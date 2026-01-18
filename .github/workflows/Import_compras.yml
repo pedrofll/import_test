@@ -2,7 +2,7 @@ name: Import compras
 
 on:
   schedule:
-    - cron: '10 12,20 * * *'
+    - cron: '00 15 * * *'
   workflow_dispatch:
 
 permissions:
