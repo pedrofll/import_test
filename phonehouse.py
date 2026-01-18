@@ -1,3 +1,4 @@
+import sys
 import requests
 from bs4 import BeautifulSoup
 from woocommerce import API
@@ -20,12 +21,14 @@ wcapi = API(
     timeout=60
 )
 
-# --- CONFIGURACIÓN PRINCIPAL ---
-# Cargamos la URL desde la variable de entorno (Secrets)
-START_URL = os.environ.get("SOURCE_URL_PHONEHOUSE", "")
+# BLOQUEO DE SEGURIDAD:
+if not START_URL:
+    print("❌ ERROR FATAL: No se ha recibido la variable 'SOURCE_URL_PHONEHOUSE'.")
+    print("   -> Revisa tu archivo .yml en GitHub Actions.")
+    print("   -> Asegúrate de haber añadido: SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_PHONEHOUSE }}")
+    sys.exit(1) # Detiene el programa aquí mismo.
 
-# Usamos la misma variable para el ID, o lo dejamos genérico, pero sin escribir dominios.
-ID_IMPORTACION = "PhoneHouse_Import" 
+ID_IMPORTACION = "PhoneHouse_Import"
 FUENTE = "Phone House"
 
 # Verificación de seguridad (para que no falle si el secret está vacío)
