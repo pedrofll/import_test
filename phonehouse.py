@@ -22,16 +22,14 @@ import json
 # ============================================================
 
 # --- CONFIGURACIÓN PRINCIPAL (OCULTA EN SECRETS) ---
-# URL completa de listado de smartphones, desde el secret PHONEHOUSE_URL
 START_URL = os.environ["PHONEHOUSE_URL"].strip()
 
 FUENTE = "Phone House"
 
-# Dominio base extraído automáticamente a partir de START_URL
-# Ejemplo: https://www.phonehouse.es/moviles-y-telefonia/... -> https://www.phonehouse.es
+# Dominio base extraído automáticamente
 ID_IMPORTACION = START_URL.split("/moviles")[0]
 
-# Código de afiliado leído desde el secret AFF_PHONEHOUSE
+# Código de afiliado oculto en secret
 ID_AFILIADO_PHONE_HOUSE = os.environ["AFF_PHONEHOUSE"]
 
 
@@ -525,6 +523,9 @@ def obtener_datos_remotos():
                 nombre_elemento = link.find(['h2', 'h3', 'h4', 'div', 'span'], 
                                           class_=re.compile(r'title|name|product', re.I))
                 titulo = nombre_elemento.get_text(strip=True) if nombre_elemento else link.get_text(strip=True)
+                # Eliminar prefijos tipo ¡OFERTA!
+                titulo = re.sub(r"^¡?oferta!?[\s\-:]*", "", titulo, flags=re.IGNORECASE).strip()
+                
                 
                 if not titulo or len(titulo) < 5:
                     continue
