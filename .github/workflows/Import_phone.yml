@@ -31,23 +31,20 @@ jobs:
       - name: Instalar librerías
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 woocommerce lxml selenium pillow
-
-      - name: Ejecutar Script PhoneHouse
-        env:
-          WP_URL: ${{ secrets.WP_URL }}
-          WP_KEY: ${{ secrets.WP_KEY }}
-          WP_SECRET: ${{ secrets.WP_SECRET }}
-
-          PHONEHOUSE_URL: ${{ secrets.PHONEHOUSE_URL }}
-          AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
+          pip install requests beautifulsoup4 woocommerce lxml pillow
 
       - name: Mostrar archivos del repositorio
         run: |
           echo ">>> LISTADO DE ARCHIVOS:"
           ls -R .
 
-
+      - name: Ejecutar Script PhoneHouse
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_KEY: ${{ secrets.WP_KEY }}
+          WP_SECRET: ${{ secrets.WP_SECRET }}
+          PHONEHOUSE_URL: ${{ secrets.PHONEHOUSE_URL }}
+          AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
         run: python phonehouse.py
 
       - name: Borrar historiales antiguos
