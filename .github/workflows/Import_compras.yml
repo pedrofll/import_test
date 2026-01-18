@@ -2,13 +2,12 @@ name: Import compras
 
 on:
   schedule:
-    # Horario UTC. Ajusta si hace falta.
     - cron: '10 12,20 * * *'
   workflow_dispatch:
 
 permissions:
-  actions: write
   contents: read
+  actions: write
 
 concurrency:
   group: 'scraper-compras'
@@ -38,7 +37,6 @@ jobs:
         env:
           SOURCE_URL: ${{ secrets.SOURCE_URL }}
         run: |
-          # Comprueba si SOURCE_URL está definida sin imprimir su valor
           echo "SOURCE_URL set: ${SOURCE_URL:+yes}"
 
       - name: Ejecutar Script
@@ -53,19 +51,10 @@ jobs:
           AFF_FNAC: ${{ secrets.AFF_FNAC }}
         run: python compras.py
 
-      - name: 🧹 Borrar historiales antiguos
+      - name: Borrar historiales antiguos
         uses: Mattraks/delete-workflow-runs@v2
         with:
           token: ${{ github.token }}
           repository: ${{ github.repository }}
           retain_days: 7
           keep_minimum_runs: 6
-
-    # --- LIMPIEZA AUTOMÁTICA ---
-    - name: 🧹 Borrar historiales antiguos
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        token: ${{ github.token }}
-        repository: ${{ github.repository }}
-        retain_days: 7       # Mantiene solo 1 semana de historial
-        keep_minimum_runs: 6 # Guarda mínimo las últimas 6 ejecuciones por seguridad
