@@ -18,7 +18,7 @@ wcapi = API(
 
 # --- ORIGEN Y AFILIADOS desde variables de entorno ---
 # No hay literales en el código: todo se lee desde variables de entorno o secrets.
-URL_ORIGEN = os.environ.get("SOURCE_URL", "")  # ej. https://comprasmartphone.com/ofertas (no poner en repo)
+URL_ORIGEN = os.environ.get("SOURCE_URL_COMPRAS", "")  # ej. https://comprasmartphone.com/ofertas (no poner en repo)
 ID_AFILIADO_ALIEXPRESS = os.environ.get("AFF_ALIEXPRESS", "")
 ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
