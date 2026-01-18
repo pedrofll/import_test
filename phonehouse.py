@@ -29,7 +29,7 @@ if not START_URL:
 
 # 3. Resto de constantes
 FUENTE = "Phone House"
-ID_IMPORTACION = "PhoneHouse_Import"
+ID_IMPORTACION = "phonehouse.es"
 
 # --- CONFIGURACIÓN WORDPRESS ---
 wcapi = API(
