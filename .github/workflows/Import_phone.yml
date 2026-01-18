@@ -42,6 +42,12 @@ jobs:
           PHONEHOUSE_URL: ${{ secrets.PHONEHOUSE_URL }}
           AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
 
+      - name: Mostrar archivos del repositorio
+        run: |
+          echo ">>> LISTADO DE ARCHIVOS:"
+          ls -R .
+
+
         run: python phonehouse.py
 
       - name: Borrar historiales antiguos
