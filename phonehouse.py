@@ -732,6 +732,14 @@ def main():
         registrar_log(f"Error crítico en ejecución principal: {str(e)}", "ERROR")
         print(">>> Error crítico en ejecución principal:", e)
 
-if __name__ == "__main__": main()
+def main():
+    print("Hola")
+
+# pero no tiene esto:
+if __name__ == "__main__":
+    main()
+
+
+
 
 
