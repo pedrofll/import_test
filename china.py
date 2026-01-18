@@ -1,4 +1,3 @@
-```python
 import requests
 from bs4 import BeautifulSoup
 from woocommerce import API
