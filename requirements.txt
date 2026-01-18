@@ -4,3 +4,4 @@ woocommerce
 lxml
 telethon
 Pillow
+selenium
