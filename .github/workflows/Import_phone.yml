@@ -36,10 +36,6 @@ jobs:
           echo ">>> LISTADO DE ARCHIVOS:"
           ls -R .
 
-      - name: Test de ejecución
-        run: |
-          echo ">>> TEST: Este mensaje DEBE aparecer"
-
       - name: Ejecutar Script PhoneHouse
         env:
           WP_URL: ${{ secrets.WP_URL }}
