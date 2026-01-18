@@ -935,7 +935,7 @@ def main():
     print("\n" + "=" * 80)
     print("🤖 SCRAPER PHONE HOUSE - VERSIÓN COMPLETA")
     print("=" * 80)
-    print(f"🔗 URL: {START_URL}")
+    print(f"🔗 URL: {SOURCE_URL_PHONEHOUSE}")
     print(f"📏 Redimensión imágenes: {'SÍ' if REDIMENSIONAR_IMAGENES else 'NO'} ({TAMANO_IMAGEN[0]}x{TAMANO_IMAGEN[1]}px)")
     print(f"🔄 Scroll AJAX: ACTIVADO")
     print(f"📱 Memoria iPhones: ACTIVADA")
