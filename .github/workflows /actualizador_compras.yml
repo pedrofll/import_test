@@ -42,7 +42,7 @@ jobs:
         WP_URL: ${{ secrets.WP_URL }}
         WP_KEY: ${{ secrets.WP_KEY }}
         WP_SECRET: ${{ secrets.WP_SECRET }}
-      run: python scraper_compras.py
+      run: python compras.py
 
     # --- LIMPIEZA AUTOMÁTICA ---
     - name: 🧹 Borrar historiales antiguos
