@@ -516,29 +516,8 @@ def obtener_datos_remotos():
             
     return productos_totales
 
-
-        
-        # 4. Resumen final
-        registrar_log("=" * 70, "INFO")
-        registrar_log("RESUMEN DE EXTRACCIÓN", "INFO")
-        registrar_log(f"Productos encontrados: {len(total_productos)}", 
-                     "SUCCESS" if len(total_productos) >= 72 else "WARNING")
-        registrar_log(f"Objetivo: 72 productos", "INFO")
-        
-        if len(total_productos) < 72:
-            registrar_log(f"Faltan {72 - len(total_productos)} productos", "WARNING")
-        
-        if summary_duplicados:
-            registrar_log(f"Duplicados ignorados: {len(summary_duplicados)}", "INFO")
-        
-        if REDIMENSIONAR_IMAGENES:
-            imagenes_redim = sum(1 for p in total_productos if p.get('img') and 'imagenes_phonehouse' in p['img'])
-            registrar_log(f"Imágenes redimensionadas: {imagenes_redim}/{len(total_productos)}", "INFO")
-        
-        registrar_log("=" * 70, "INFO")
-        
-        return total_productos
-        
+   
+     
     except Exception as e:
         registrar_log(f"Error crítico en extracción: {str(e)}", "ERROR")
         import traceback
