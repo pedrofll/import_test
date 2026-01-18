@@ -5,6 +5,7 @@ import os
 import time
 import re
 import smtplib
+from datetime import datetime  # <--- ESTA ES LA LÍNEA QUE FALTABA
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse, parse_qs, unquote, quote
@@ -35,14 +36,6 @@ TAMANO_IMAGEN = (600, 600)
 CALIDAD_JPEG = 85
 DIRECTORIO_IMAGENES = "imagenes_phonehouse_600x600"
 
-# --- CONFIGURACIÓN WORDPRESS ---
-wcapi = API(
-    url=os.environ["WP_URL"],
-    consumer_key=os.environ["WP_KEY"],
-    consumer_secret=os.environ["WP_SECRET"],
-    version="wc/v3",
-    timeout=60
-)
 
 # --- VARIABLES GLOBALES ---
 summary_creados, summary_eliminados, summary_actualizados = [], [], []
