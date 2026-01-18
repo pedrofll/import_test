@@ -43,7 +43,7 @@ jobs:
           SOURCE_URL_TRADINGSENZHEN: ${{ secrets.SOURCE_URL_TRADINGSENZHEN }}
           AFF_TRADINGSENZHEN: ${{ secrets.AFF_TRADINGSENZHEN }}
 
-        run: python scraper_tradin.py
+        run: python tradin.py
 
       - name: Borrar historiales antiguos
         uses: Mattraks/delete-workflow-runs@v2
