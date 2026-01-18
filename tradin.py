@@ -1,22 +1,27 @@
+# --- CONFIGURACIÓN ---
 import os
 import time
 import re
 import requests
 import urllib.parse
-import traceback
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from woocommerce import API
 
-# --- CONFIGURACIÓN ---
-# Dominio base oculto en variable de entorno (por ejemplo: SOURCE_URL_TRADINGSENZHEN)
-BASE_URL = os.environ["SOURCE_URL_TRADINGSENZHEN"].rstrip("/")
+# 1) Intentar leer lista de URLs completa desde secreto TSZ_URLS
+#    Formato: https://.../en/new,https://.../en/new?page=2,https://.../en/deal
+tsz_urls_raw = os.getenv("TSZ_URLS", "").strip()
 
-URLS_PAGINAS = [
-    f"{BASE_URL}/en/new",
-    f"{BASE_URL}/en/new?page=2",
-    f"{BASE_URL}/en/deal"
-]
+if tsz_urls_raw:
+    URLS_PAGINAS = [u.strip() for u in tsz_urls_raw.split(",") if u.strip()]
+else:
+    # 2) Fallback: construir a partir del dominio base
+    BASE_URL = os.environ["SOURCE_URL_TRADINGSENZHEN"].rstrip("/")
+    URLS_PAGINAS = [
+        f"{BASE_URL}/en/new",
+        f"{BASE_URL}/en/new?page=2",
+        f"{BASE_URL}/en/deal"
+    ]
 
 ID_AFILIADO_TRADINGSENZHEN = "?affp=176940"
 
