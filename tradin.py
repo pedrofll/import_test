@@ -1,21 +1,16 @@
-# --- CONFIGURACIÓN ---
-import os
-import time
-import re
-import requests
-import urllib.parse
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
-from woocommerce import API
+# --- CONFIGURACIÓN DE URLS Y DOMINIO ---
 
-# 1) Intentar leer lista de URLs completa desde secreto TSZ_URLS
-#    Formato: https://.../en/new,https://.../en/new?page=2,https://.../en/deal
-tsz_urls_raw = os.getenv("TSZ_URLS", "").strip()
+# 1) Intentar leer lista completa desde TSZ_URLS (secreto opcional)
+#    Formato: url1,url2,url3
+tsz_urls_raw = os.environ.get("TSZ_URLS", "").strip()
 
 if tsz_urls_raw:
+    # Si TSZ_URLS existe, se usa directamente
     URLS_PAGINAS = [u.strip() for u in tsz_urls_raw.split(",") if u.strip()]
+    # Dominio base derivado de la primera URL
+    BASE_URL = URLS_PAGINAS[0].split("/en/")[0]
 else:
-    # 2) Fallback: construir a partir del dominio base
+    # 2) Fallback: usar dominio base desde secreto SOURCE_URL_TRADINGSENZHEN
     BASE_URL = os.environ["SOURCE_URL_TRADINGSENZHEN"].rstrip("/")
     URLS_PAGINAS = [
         f"{BASE_URL}/en/new",
@@ -23,7 +18,12 @@ else:
         f"{BASE_URL}/en/deal"
     ]
 
-ID_AFILIADO_TRADINGSENZHEN = "?affp=176940"
+# 3) Identificador de importación (oculto)
+ID_IMPORTACION = f"{BASE_URL}/"
+
+# 4) Afiliado oculto
+ID_AFILIADO_TRADINGSENZHEN = os.environ.get("AFF_TRADINGSENZHEN", "")
+
 
 # Identificador de importación (también oculto, reutiliza el dominio base)
 ID_IMPORTACION = f"{BASE_URL}/"
