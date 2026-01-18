@@ -703,9 +703,9 @@ def sincronizar_productos(remotos):
                         print(f"    ❌ EXCEPCIÓN: {e}", flush=True)
                 
                     if not creado and intentos < max_intentos:
-                        time.sleep(30)
+                        time.sleep(60)
             
-                time.sleep(30)
+                time.sleep(60)
 
 
     # --- FASE 2B: BACKFILL ENVÍO PARA PRODUCTOS YA EXISTENTES (importado_de = chinabay.es) ---
