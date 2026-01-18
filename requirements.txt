@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+woocommerce
+lxml
+telethon
+Pillow
