@@ -1,16 +1,35 @@
-import sys
 import requests
 from bs4 import BeautifulSoup
 from woocommerce import API
 import os
+import sys  # <--- Necesario para sys.exit()
 import time
 import re
 import smtplib
-from datetime import datetime  # <--- ESTA ES LA LÍNEA QUE FALTABA
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse, parse_qs, unquote, quote
 from collections import defaultdict
+
+# ============================================================
+#  CONFIGURACIÓN INICIAL (El orden es importante)
+# ============================================================
+
+# 1. Cargar la URL desde Secrets (Variables de entorno)
+START_URL = os.environ.get("SOURCE_URL_PHONEHOUSE", "")
+
+# 2. Comprobar si existe ANTES de seguir.
+#    Si no existe, paramos el script aquí mismo para evitar errores después.
+if not START_URL:
+    print("❌ ERROR FATAL: No se ha recibido la variable 'SOURCE_URL_PHONEHOUSE'.")
+    print("   -> Revisa tu archivo .yml en GitHub Actions.")
+    print("   -> Asegúrate de haber añadido en 'env': SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_PHONEHOUSE }}")
+    sys.exit(1)
+
+# 3. Resto de constantes
+FUENTE = "Phone House"
+ID_IMPORTACION = "PhoneHouse_Import"
 
 # --- CONFIGURACIÓN WORDPRESS ---
 wcapi = API(
@@ -21,21 +40,7 @@ wcapi = API(
     timeout=60
 )
 
-# BLOQUEO DE SEGURIDAD:
-if not START_URL:
-    print("❌ ERROR FATAL: No se ha recibido la variable 'SOURCE_URL_PHONEHOUSE'.")
-    print("   -> Revisa tu archivo .yml en GitHub Actions.")
-    print("   -> Asegúrate de haber añadido: SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_PHONEHOUSE }}")
-    sys.exit(1) # Detiene el programa aquí mismo.
-
-ID_IMPORTACION = "PhoneHouse_Import"
-FUENTE = "Phone House"
-
-# Verificación de seguridad (para que no falle si el secret está vacío)
-if not START_URL:
-    print("⚠️ ADVERTENCIA: No se detectó SOURCE_URL_PHONEHOUSE en las variables de entorno.")
-
-# --- PARÁMETROS DE AFILIADO (desde secrets) ---
+# --- PARÁMETROS DE AFILIADO ---
 ID_AFILIADO_PHONE_HOUSE = os.environ.get("AFF_PHONEHOUSE", "")
 
 ENVIADO_DESDE = "España"
