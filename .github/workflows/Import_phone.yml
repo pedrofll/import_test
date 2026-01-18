@@ -45,6 +45,7 @@ jobs:
           WP_SECRET: ${{ secrets.WP_SECRET }}
           PHONEHOUSE_URL: ${{ secrets.SOURCE_URL_PHONEHOUSE }}
           AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
+          SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_PHONEHOUSE }}
         run: |
           echo ">>> EJECUTANDO phonehouse.py..."
           python phonehouse.py
