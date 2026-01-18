@@ -312,7 +312,7 @@ def sincronizar(remotos):
 
                             print(f"   ✅ CREADO -> ID: {prod_res.get('id')}")
                     except:
-                        time.sleep(15)
+                        time.sleep(60)
 
             else:
                 summary_sin_stock_nuevos.append(r['nombre'])
