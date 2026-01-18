@@ -33,15 +33,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 woocommerce lxml
 
-      - name: Check SOURCE_URL presence
+      - name: Check SOURCE_URL_COMPRAS presence
         env:
-          SOURCE_URL: ${{ secrets.SOURCE_URL }}
+          SOURCE_URL_COMPRAS: ${{ secrets.SOURCE_URL_COMPRAS }}
         run: |
-          echo "SOURCE_URL set: ${SOURCE_URL:+yes}"
+          echo "SOURCE_URL_COMPRAS set: ${SOURCE_URL_COMPRAS:+yes}"
 
       - name: Ejecutar Script
         env:
-          SOURCE_URL: ${{ secrets.SOURCE_URL }}
+          SOURCE_URL_COMPRAS: ${{ secrets.SOURCE_URL_COMPRAS }}
           WP_URL: ${{ secrets.WP_URL }}
           WP_KEY: ${{ secrets.WP_KEY }}
           WP_SECRET: ${{ secrets.WP_SECRET }}
