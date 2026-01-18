@@ -303,7 +303,6 @@ IPHONE_RAM_MAP = [
     ("iphone 6s plus", "2GB"),
     ("iphone 6s", "2GB"),
 ]
-
 def ram_por_modelo_iphone(nombre):
     """Devuelve la RAM en función del modelo de iPhone"""
     if not nombre:
@@ -315,6 +314,7 @@ def ram_por_modelo_iphone(nombre):
         if needle in n:
             return ram
     return "8GB"  # Valor por defecto
+
 
 def registrar_iphone_memoria(nombre, memoria):
     """Registra iPhone en memoria para evitar duplicados"""
@@ -328,6 +328,7 @@ def registrar_iphone_memoria(nombre, memoria):
     }
     return True
 
+
 def guardar_memoria_iphones():
     """Guarda la memoria de iPhones en archivo JSON"""
     if iphones_memoria:
@@ -335,6 +336,7 @@ def guardar_memoria_iphones():
         with open(archivo, 'w', encoding='utf-8') as f:
             json.dump(iphones_memoria, f, ensure_ascii=False, indent=2)
         registrar_log(f"Memoria iPhones guardada: {archivo}", "INFO")
+
 
 # --- EXTRACCIÓN DE INFORMACIÓN ---
 def extraer_nombre_memoria_capacidad(titulo):
@@ -363,6 +365,7 @@ def extraer_nombre_memoria_capacidad(titulo):
 
     return normalize_spaces(nombre), capacidad, (memoria or "")
 
+
 # --- GESTIÓN DE CATEGORÍAS ---
 def obtener_todas_las_categorias():
     """Obtiene todas las categorías de WooCommerce"""
@@ -380,7 +383,8 @@ def obtener_todas_las_categorias():
             break
     return categorias
 
-def resolver_jerarquia(nombre_completo, cache_categorias):
+
+def resolver_jerarquia(nombre_completo, cache_categorias, img_categoria=None):
     """Resuelve la jerarquía de categorías"""
     palabras = (nombre_completo or "").split()
     nombre_padre = palabras[0] if palabras else "Smartphones"
@@ -394,7 +398,7 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
         if cat.get("name", "").lower() == nombre_padre.lower() and cat.get("parent") == 0:
             id_cat_padre = cat.get("id")
             break
-    
+
     # Crear categoría padre si no existe
     if not id_cat_padre:
         try:
@@ -410,14 +414,18 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
         if cat.get("name", "").lower() == nombre_hijo.lower() and cat.get("parent") == id_cat_padre:
             id_cat_hijo = cat.get("id")
             break
-    
+
     # Crear categoría hijo si no existe
     if not id_cat_hijo and id_cat_padre:
         try:
-            res = wcapi.post("products/categories", {
+            payload = {
                 "name": nombre_hijo,
                 "parent": id_cat_padre
-            }).json()
+            }
+            if img_categoria:
+                payload["image"] = {"src": img_categoria}
+
+            res = wcapi.post("products/categories", payload).json()
             id_cat_hijo = res.get("id")
             cache_categorias.append(res)
             registrar_log(f"Subcategoría creada: {nombre_hijo} (ID: {id_cat_hijo})", "INFO")
@@ -426,22 +434,23 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
 
     return id_cat_padre, id_cat_hijo
 
+
 # --- EXTRACCIÓN DE PRODUCTOS CON SCROLL AJAX ---
 def obtener_datos_remotos():
     """Extrae todos los productos de Phone House"""
     total_productos = []
-    
+
     registrar_log("=" * 70, "INFO")
     registrar_log("INICIANDO EXTRACCIÓN DE PRODUCTOS", "INFO")
     registrar_log(f"URL: {START_URL}", "INFO")
     registrar_log(f"Redimensión imágenes: {'SÍ' if REDIMENSIONAR_IMAGENES else 'NO'}", "INFO")
     registrar_log(f"Scroll AJAX: ACTIVADO", "INFO")
     registrar_log("=" * 70, "INFO")
-    
+
     try:
         # 1. Obtener HTML con scroll AJAX
         html = obtener_html_con_scroll_ajax()
-        
+
         if not html:
             registrar_log("Usando método tradicional (sin AJAX)", "WARNING")
             r = requests.get(START_URL, headers=HEADERS, timeout=30)
@@ -449,12 +458,13 @@ def obtener_datos_remotos():
         else:
             soup = BeautifulSoup(html, "html.parser")
             registrar_log("HTML obtenido con scroll AJAX", "SUCCESS")
-        
+
         # 2. Buscar productos usando múltiples estrategias
         all_links = []
-        
+
         # Estrategia 1: Buscar por enlaces de productos
         patrones_url = [
+            r'/movil/',
             r'/movil-',
             r'/telefono-',
             r'/smartphone-',
@@ -466,101 +476,128 @@ def obtener_datos_remotos():
             r'huawei',
             r'motorola'
         ]
-        
+
         for patron in patrones_url:
             try:
                 links = soup.find_all('a', href=re.compile(patron, re.IGNORECASE))
                 for link in links:
                     href = link.get('href', '')
                     if href and link not in all_links:
-                        # Filtrar accesorios
                         if not any(x in href.lower() for x in ['accesorio', 'funda', 'cargador', 'protector']):
                             all_links.append(link)
             except:
                 pass
-        
-        # Estrategia 2: Buscar por contenedores de productos
-        selectores_contenedores = [
-            '[class*="product"]',
-            '[class*="item"]',
-            '.product-item',
-            '.product-card',
-            '.product-box',
-            '.product-grid-item'
-        ]
-        
-        for selector in selectores_contenedores:
-            try:
-                contenedores = soup.select(selector)
-                for contenedor in contenedores:
-                    links = contenedor.find_all('a', href=True)
-                    for link in links:
-                        href = link.get('href', '')
-                        if href and 'movil' in href and link not in all_links:
-                            all_links.append(link)
-            except:
-                pass
-        
+
         registrar_log(f"Enlaces encontrados: {len(all_links)}", "INFO")
-        
+
         # 3. Procesar cada enlace
         productos_procesados = 0
         urls_procesadas = set()
-        
+
         for link in all_links:
             if productos_procesados >= 72:
                 break
-                
+
             try:
                 href = link.get('href', '')
-                if not href or href in urls_procesadas:
+                if not href:
                     continue
-                    
+
+                # 🔥 Filtro correcto: solo móviles
+                if not href.lower().startswith("/movil/"):
+                    continue
+
+                if href in urls_procesadas:
+                    continue
+
                 url_completa = abs_url(START_URL, href)
                 urls_procesadas.add(url_completa)
-                
-                # Extraer información básica del enlace
-                nombre_elemento = link.find(['h2', 'h3', 'h4', 'div', 'span'], 
-                                          class_=re.compile(r'title|name|product', re.I))
+
+                # Extraer título
+                nombre_elemento = link.find(['h2', 'h3', 'h4', 'div', 'span'],
+                                            class_=re.compile(r'title|name|product', re.I))
                 titulo = nombre_elemento.get_text(strip=True) if nombre_elemento else link.get_text(strip=True)
-                # Eliminar prefijos tipo ¡OFERTA!
+
+                # Limpiar prefijos tipo ¡OFERTA!
                 titulo = re.sub(r"^¡?oferta!?[\s\-:]*", "", titulo, flags=re.IGNORECASE).strip()
-                
-                
+
+                # Si no hay título, obtenerlo desde la ficha
+                if not titulo or len(titulo) < 5:
+                    try:
+                        detalle_r = requests.get(url_completa, headers=HEADERS, timeout=20)
+                        detalle_soup = BeautifulSoup(detalle_r.text, "html.parser")
+                        h1 = detalle_soup.find("h1")
+                        if h1:
+                            titulo = h1.get_text(strip=True)
+                    except:
+                        pass
+
                 if not titulo or len(titulo) < 5:
                     continue
-                
-                # Filtrar no productos
-                if any(palabra in titulo.lower() for palabra in 
-                      ['accesorio', 'funda', 'cargador', 'protector', 'kit']):
+
+                # Filtrar accesorios
+                if any(palabra in titulo.lower() for palabra in
+                       ['accesorio', 'funda', 'cargador', 'protector', 'kit']):
                     continue
-                
-                # Extraer detalles
+
+                # Extraer nombre, capacidad, memoria
                 nombre, capacidad, memoria = extraer_nombre_memoria_capacidad(titulo)
-                
-                # Procesar iPhones (memoria especial)
-                es_iphone = 'iphone' in nombre.lower()
-                if es_iphone and (not memoria or memoria == ""):
-                    memoria = ram_por_modelo_iphone(nombre) or "8GB"
-                    # Registrar en memoria para evitar duplicados
-                    if not registrar_iphone_memoria(nombre, memoria):
-                        summary_duplicados.append(f"{nombre} - {memoria}")
-                        continue
-                
+
+                # Normalizar nombre para evitar duplicados por color
+                nombre_normalizado = re.sub(
+                    r"\b(negro|black|azul|blue|verde|green|rojo|red|blanco|white|morado|purple|rosa|pink)\b",
+                    "",
+                    nombre,
+                    flags=re.IGNORECASE
+                ).strip()
+
+                # Procesar iPhones
+                es_iphone = 'iphone' in nombre_normalizado.lower()
+                if es_iphone and not memoria:
+                    memoria = ram_por_modelo_iphone(nombre_normalizado)
+
                 if not capacidad:
-                    capacidad = "128GB"  # Valor por defecto
-                
+                    capacidad = "128GB"
+
+                # Clave única por modelo
+                clave_unica = f"{nombre_normalizado}_{capacidad}"
+
+                if any(p.get("clave_unica") == clave_unica for p in total_productos):
+                    summary_duplicados.append(clave_unica)
+                    continue
+
+                # Obtener imagen desde la ficha
+                img_final = ""
+                try:
+                    detalle_r = requests.get(url_completa, headers=HEADERS, timeout=20)
+                    detalle_soup = BeautifulSoup(detalle_r.text, "html.parser")
+                    img_tag = detalle_soup.find("img", src=re.compile(r"products-image", re.I))
+                    if img_tag:
+                        src = img_tag.get("src", "").split("?")[0]
+                        img_final = descargar_y_redimensionar_imagen(src, nombre_normalizado)
+                except:
+                    pass
+
+                # Fallback desde listado
+                if not img_final:
+                    img_tag = link.find("img")
+                    if img_tag:
+                        for attr in ["src", "data-src", "data-original", "data-lazy"]:
+                            src = img_tag.get(attr)
+                            if src and "http" in src:
+                                src = abs_url(START_URL, src).split("?")[0]
+                                img_final = descargar_y_redimensionar_imagen(src, nombre_normalizado)
+                                break
+
                 # Buscar precios
                 precio_actual = 0
                 precio_original = 0
-                
-                # Buscar en elementos cercanos
+
                 parent = link.parent
                 for _ in range(5):
                     if parent:
-                        # Buscar precio actual
-                        precio_tags = parent.find_all(['span', 'div'], 
-                                                    class_=re.compile(r'price|precio', re.I))
+                        precio_tags = parent.find_all(['span', 'div'],
+                                                      class_=re.compile(r'price|precio', re.I))
                         for tag in precio_tags:
                             texto = tag.get_text(strip=True)
                             if '€' in texto:
@@ -570,46 +607,16 @@ def obtener_datos_remotos():
                                         precio_original = precio
                                     else:
                                         precio_actual = precio
-                        
                         if precio_actual > 0:
                             break
                     parent = getattr(parent, 'parent', None)
-                
-                # Valores por defecto si no se encontró precio
+
                 if precio_actual == 0:
                     precio_actual = 299
                     precio_original = int(precio_actual * 1.15)
-                
-                # Buscar imagen
-                img_url = ""
-                img_tag = link.find('img')
-                if img_tag:
-                    for attr in ['src', 'data-src', 'data-original', 'data-lazy']:
-                        src = img_tag.get(attr)
-                        if src and 'http' in src and 'logo' not in src.lower():
-                            img_url = abs_url(START_URL, src)
-                            break
-                
-                # Redimensionar imagen si está configurado
-                if REDIMENSIONAR_IMAGENES and img_url:
-                    img_final = descargar_y_redimensionar_imagen(img_url, nombre)
-                else:
-                    img_final = img_url
-                
-                # Determinar versión
-                version = "IOS" if es_iphone else "Android"
-                
-                # Crear clave única para evitar duplicados
-                key = f"{nombre}_{capacidad}_{memoria}"
-                
-                # Verificar si ya existe
-                if any(p.get('clave_unica') == key for p in total_productos):
-                    summary_duplicados.append(f"{nombre} {capacidad} {memoria}")
-                    continue
-                
-                # Crear producto
+
                 producto = {
-                    "nombre": nombre,
+                    "nombre": nombre_normalizado,
                     "memoria": memoria,
                     "capacidad": capacidad,
                     "precio_actual": precio_actual,
@@ -620,54 +627,54 @@ def obtener_datos_remotos():
                     "enviado_desde_tg": ENVIADO_DESDE_TG,
                     "fecha": datetime.now().strftime("%d/%m/%Y"),
                     "en_stock": True,
-                    "clave_unica": key,
-                    "version": version,
+                    "clave_unica": clave_unica,
+                    "version": "IOS" if es_iphone else "Android",
                     "fuente": FUENTE,
                     "codigo_descuento": CODIGO_DESCUENTO,
                     "es_iphone": es_iphone
                 }
-                
+
                 total_productos.append(producto)
                 productos_procesados += 1
-                
-                # Log del producto encontrado
-                marca = "iPhone" if es_iphone else "Android"
-                registrar_log(f"[{productos_procesados}] {marca}: {nombre[:40]:40} | {precio_actual}€ | {capacidad} | {memoria}", 
-                            "INFO", False)
-                
-                # Pequeña pausa para no sobrecargar
+
+                registrar_log(
+                    f"[{productos_procesados}] {producto['nombre'][:40]:40} | {precio_actual}€ | {capacidad} | {memoria}",
+                    "INFO",
+                    False
+                )
+
                 time.sleep(0.1)
-                
+
             except Exception as e:
                 registrar_log(f"Error procesando producto: {str(e)[:100]}", "WARNING", False)
                 continue
-        
-        # 4. Resumen final
+                        # 4. Resumen final
         registrar_log("=" * 70, "INFO")
         registrar_log("RESUMEN DE EXTRACCIÓN", "INFO")
-        registrar_log(f"Productos encontrados: {len(total_productos)}", 
+        registrar_log(f"Productos encontrados: {len(total_productos)}",
                      "SUCCESS" if len(total_productos) >= 72 else "WARNING")
         registrar_log(f"Objetivo: 72 productos", "INFO")
-        
+
         if len(total_productos) < 72:
             registrar_log(f"Faltan {72 - len(total_productos)} productos", "WARNING")
-        
+
         if summary_duplicados:
             registrar_log(f"Duplicados ignorados: {len(summary_duplicados)}", "INFO")
-        
+
         if REDIMENSIONAR_IMAGENES:
             imagenes_redim = sum(1 for p in total_productos if p.get('img') and 'imagenes_phonehouse' in p['img'])
             registrar_log(f"Imágenes redimensionadas: {imagenes_redim}/{len(total_productos)}", "INFO")
-        
+
         registrar_log("=" * 70, "INFO")
-        
+
         return total_productos
-        
+
     except Exception as e:
         registrar_log(f"Error crítico en extracción: {str(e)}", "ERROR")
         import traceback
         traceback.print_exc()
         return []
+
 
 # --- CREACIÓN DE PRODUCTOS EN WOOCOMMERCE ---
 def crear_producto_woocommerce(producto, cache_categorias, max_intentos=10):
@@ -677,15 +684,19 @@ def crear_producto_woocommerce(producto, cache_categorias, max_intentos=10):
         intentos += 1
         try:
             registrar_log(f"Intento {intentos}/{max_intentos} para crear: {producto['nombre']}", "INFO", False)
-            
+
             # Preparar URLs con afiliado
             url_importada_sin_afiliado = producto["url_imp"]
             url_con_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_PHONE_HOUSE}"
             url_oferta = acortar_url(url_con_afiliado)
-            
-            # Resolver categorías
-            id_padre, id_hijo = resolver_jerarquia(producto["nombre"], cache_categorias)
-            
+
+            # Resolver categorías con imagen
+            id_padre, id_hijo = resolver_jerarquia(
+                producto["nombre"],
+                cache_categorias,
+                img_categoria=producto["img"]
+            )
+
             # Preparar datos del producto
             data = {
                 "name": producto["nombre"],
@@ -709,7 +720,6 @@ def crear_producto_woocommerce(producto, cache_categorias, max_intentos=10):
                     {"key": "enviado_desde", "value": producto["enviado_desde"]},
                     {"key": "enviado_desde_tg", "value": producto["enviado_desde_tg"]},
                     {"key": "enlace_de_compra_importado", "value": producto["url_imp"]},
-                    {"key": "url_oferta_sin_acortar", "value": producto["url_imp"]},
                     {"key": "url_importada_sin_afiliado", "value": producto["url_imp"]},
                     {"key": "url_sin_acortar_con_mi_afiliado", "value": url_con_afiliado},
                     {"key": "url_oferta", "value": url_oferta},
@@ -718,41 +728,42 @@ def crear_producto_woocommerce(producto, cache_categorias, max_intentos=10):
                     {"key": "es_iphone", "value": "1" if producto["es_iphone"] else "0"},
                 ]
             }
-            
+
             # Crear producto
             response = wcapi.post("products", data)
-            
+
             if response.status_code in [200, 201]:
                 producto_creado = response.json()
                 product_id = producto_creado.get("id")
                 product_url = producto_creado.get("permalink")
-                
+
                 # Acortar URL del producto creado
                 if product_url:
                     url_producto_acortada = acortar_url(product_url)
                     wcapi.put(f"products/{product_id}", {
                         "meta_data": [{"key": "url_post_acortada", "value": url_producto_acortada}]
                     })
-                
+
                 registrar_log(f"✅ CREADO: {producto['nombre']} (ID: {product_id})", "SUCCESS")
                 return True, product_id
-            
+
             else:
                 error_msg = f"Error {response.status_code}: {response.text[:200]}"
                 registrar_log(f"Intento {intentos} fallado: {error_msg}", "WARNING", False)
-                
+
                 if intentos < max_intentos:
-                    tiempo_espera = 2 ** intentos  # Backoff exponencial
+                    tiempo_espera = 2 ** intentos
                     registrar_log(f"Esperando {tiempo_espera} segundos...", "INFO", False)
                     time.sleep(tiempo_espera)
-        
+
         except Exception as e:
             registrar_log(f"Excepción en intento {intentos}: {str(e)}", "ERROR", False)
             if intentos < max_intentos:
                 time.sleep(5)
-    
+
     registrar_log(f"❌ FALLIDO tras {max_intentos} intentos: {producto['nombre']}", "ERROR")
     return False, None
+
 
 # --- SINCRONIZACIÓN PRINCIPAL ---
 def sincronizar_productos(productos_remotos):
@@ -760,12 +771,12 @@ def sincronizar_productos(productos_remotos):
     registrar_log("=" * 70, "INFO")
     registrar_log("INICIANDO SINCRONIZACIÓN CON WOOCOMMERCE", "INFO")
     registrar_log("=" * 70, "INFO")
-    
+
     # 1. Obtener productos existentes
     cache_categorias = obtener_todas_las_categorias()
     productos_existentes = []
     page = 1
-    
+
     while True:
         try:
             response = wcapi.get("products", params={
@@ -773,16 +784,16 @@ def sincronizar_productos(productos_remotos):
                 "page": page,
                 "status": "any"
             }).json()
-            
+
             if not response or isinstance(response, dict) and "message" in response:
                 break
-            
+
             for producto in response:
                 meta_dict = {}
                 for meta in producto.get("meta_data", []):
                     if isinstance(meta, dict) and "key" in meta and "value" in meta:
                         meta_dict[meta["key"]] = str(meta["value"])
-                
+
                 if "phonehouse.es" in meta_dict.get("importado_de", ""):
                     productos_existentes.append({
                         "id": producto["id"],
@@ -790,18 +801,18 @@ def sincronizar_productos(productos_remotos):
                         "url": meta_dict.get("enlace_de_compra_importado", ""),
                         "meta": meta_dict
                     })
-            
+
             if len(response) < 100:
                 break
-            
+
             page += 1
-            
+
         except Exception as e:
             registrar_log(f"Error obteniendo productos existentes: {str(e)}", "ERROR")
             break
-    
+
     registrar_log(f"Productos Phone House existentes: {len(productos_existentes)}", "INFO")
-    
+
     # 2. Procesar cada producto remoto
     for producto in productos_remotos:
         try:
@@ -811,13 +822,12 @@ def sincronizar_productos(productos_remotos):
                 if existente["url"].strip() == producto["url_imp"].strip():
                     producto_existente = existente
                     break
-            
+
             if producto_existente:
                 # Actualizar producto existente
                 precio_actual_existente = float(producto_existente["meta"].get("precio_actual", 0) or 0)
-                
+
                 if abs(producto["precio_actual"] - precio_actual_existente) > 1:
-                    # Actualizar precios
                     update_data = {
                         "sale_price": str(producto["precio_actual"]),
                         "regular_price": str(producto["precio_original"]),
@@ -828,7 +838,7 @@ def sincronizar_productos(productos_remotos):
                             {"key": "url_oferta", "value": acortar_url(f"{producto['url_imp']}{ID_AFILIADO_PHONE_HOUSE}")},
                         ]
                     }
-                    
+
                     wcapi.put(f"products/{producto_existente['id']}", update_data)
                     summary_actualizados.append({
                         "nombre": producto["nombre"],
@@ -842,11 +852,11 @@ def sincronizar_productos(productos_remotos):
                         "id": producto_existente["id"]
                     })
                     registrar_log(f"⏭️ IGNORADO: {producto['nombre']} (sin cambios)", "INFO", False)
-            
+
             else:
                 # Crear nuevo producto
                 exito, product_id = crear_producto_woocommerce(producto, cache_categorias)
-                
+
                 if exito:
                     summary_creados.append({
                         "nombre": producto["nombre"],
@@ -854,153 +864,11 @@ def sincronizar_productos(productos_remotos):
                     })
                 else:
                     summary_fallidos.append(producto["nombre"])
-            
-            # Pequeña pausa entre productos
+
             time.sleep(1)
-            
+
         except Exception as e:
             registrar_log(f"Error procesando {producto.get('nombre', 'desconocido')}: {str(e)}", "ERROR")
             summary_fallidos.append(producto.get("nombre", "desconocido"))
-    
-    # 3. Eliminar productos obsoletos (opcional - comentado por seguridad)
-    # registrar_log("Verificando productos obsoletos...", "INFO")
-    # for existente in productos_existentes:
-    #     encontrado = False
-    #     for remoto in productos_remotos:
-    #         if existente["url"].strip() == remoto["url_imp"].strip():
-    #             encontrado = True
-    #             break
-    #     
-    #     if not encontrado:
-    #         try:
-    #             wcapi.delete(f"products/{existente['id']}", params={"force": True})
-    #             summary_eliminados.append({
-    #                 "nombre": existente["nombre"],
-    #                 "id": existente["id"]
-    #             })
-    #             registrar_log(f"🗑️ ELIMINADO: {existente['nombre']} (obsoleto)", "WARNING")
-    #         except Exception as e:
-    #             registrar_log(f"Error eliminando {existente['nombre']}: {str(e)}", "ERROR")
-    
-    # 4. Mostrar resumen final
+
     mostrar_resumen_completo()
-
-def mostrar_resumen_completo():
-    """Muestra un resumen completo de la ejecución"""
-    total_procesados = (
-        len(summary_creados) +
-        len(summary_eliminados) +
-        len(summary_actualizados) +
-        len(summary_ignorados) +
-        len(summary_fallidos)
-    )
-    
-    registrar_log("=" * 70, "INFO")
-    registrar_log("📋 RESUMEN FINAL DE EJECUCIÓN", "INFO")
-    registrar_log(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
-    registrar_log("=" * 70, "INFO")
-    
-    registrar_log(f"📊 ESTADÍSTICAS GENERALES:", "INFO")
-    registrar_log(f"   Total productos procesados: {total_procesados}", "INFO")
-    registrar_log(f"   Objetivo: 72 productos", "INFO")
-    registrar_log(f"   Cobertura: {(total_procesados/72*100):.1f}%", 
-                 "SUCCESS" if total_procesados >= 72 else "WARNING")
-    
-    registrar_log(f"\n📦 PRODUCTOS:", "INFO")
-    registrar_log(f"   Creados: {len(summary_creados)}", "SUCCESS")
-    for item in summary_creados:
-        registrar_log(f"     • {item['nombre']} (ID: {item['id']})", "INFO")
-    
-    registrar_log(f"\n   Actualizados: {len(summary_actualizados)}", "INFO")
-    for item in summary_actualizados:
-        registrar_log(f"     • {item['nombre']}: {item['cambio']}", "INFO")
-    
-    registrar_log(f"\n   Ignorados (sin cambios): {len(summary_ignorados)}", "INFO")
-    for item in summary_ignorados[:5]:
-        registrar_log(f"     • {item['nombre']}", "INFO", False)
-    if len(summary_ignorados) > 5:
-        registrar_log(f"     ... y {len(summary_ignorados) - 5} más", "INFO", False)
-    
-    registrar_log(f"\n   Eliminados: {len(summary_eliminados)}", "WARNING")
-    for item in summary_eliminados:
-        registrar_log(f"     • {item['nombre']} (ID: {item['id']})", "INFO")
-    
-    registrar_log(f"\n   Fallidos: {len(summary_fallidos)}", "ERROR")
-    for item in summary_fallidos[:5]:
-        registrar_log(f"     • {item}", "INFO")
-    if len(summary_fallidos) > 5:
-        registrar_log(f"     ... y {len(summary_fallidos) - 5} más", "INFO")
-    
-    registrar_log(f"\n📱 iPHONES EN MEMORIA: {len(iphones_memoria)}", "INFO")
-    
-    if REDIMENSIONAR_IMAGENES:
-        registrar_log(f"\n🖼️ IMÁGENES REDIMENSIONADAS:", "INFO")
-        registrar_log(f"   Directorio: {DIRECTORIO_IMAGENES}/", "INFO")
-        registrar_log(f"   Tamaño: {TAMANO_IMAGEN[0]}x{TAMANO_IMAGEN[1]}px", "INFO")
-    
-    registrar_log(f"\n📝 LOGS GUARDADOS EN: {archivo_log}", "INFO")
-    
-    registrar_log("\n" + "=" * 70, "INFO")
-    registrar_log("✅ PROCESO COMPLETADO", "SUCCESS")
-    registrar_log("=" * 70, "INFO")
-    
-    # Guardar memoria de iPhones
-    guardar_memoria_iphones()
-
-# --- EJECUCIÓN PRINCIPAL ---
-def main():
-    """Función principal del scraper"""
-    print("\n" + "=" * 80)
-    print("🤖 SCRAPER PHONE HOUSE - VERSIÓN COMPLETA")
-    print("=" * 80)
-    print(f"🔗 URL: {START_URL}")
-    print(f"📏 Redimensión imágenes: {'SÍ' if REDIMENSIONAR_IMAGENES else 'NO'} ({TAMANO_IMAGEN[0]}x{TAMANO_IMAGEN[1]}px)")
-    print(f"🔄 Scroll AJAX: ACTIVADO")
-    print(f"📱 Memoria iPhones: ACTIVADA")
-    print(f"📝 Sistema logs: ACTIVADO")
-    print(f"🎯 Objetivo: 72 productos")
-    print("=" * 80 + "\n")
-    
-    try:
-        # 1. Extraer productos
-        productos = obtener_datos_remotos()
-        
-        if not productos:
-            registrar_log("No se encontraron productos", "ERROR")
-            return
-        
-        # 2. Sincronizar con WooCommerce
-        sincronizar_productos(productos)
-        
-        # 3. Mensaje final
-        print("\n" + "=" * 80)
-        print("🎉 ¡PROCESO COMPLETADO CON ÉXITO!")
-        print("=" * 80)
-        print(f"📊 Productos procesados: {len(summary_creados) + len(summary_actualizados)}")
-        print(f"📁 Logs guardados en: {archivo_log}")
-        if REDIMENSIONAR_IMAGENES:
-            print(f"🖼️ Imágenes en: {DIRECTORIO_IMAGENES}/")
-        print("=" * 80)
-        
-    except KeyboardInterrupt:
-        registrar_log("Proceso interrumpido por el usuario", "WARNING")
-        mostrar_resumen_completo()
-    except Exception as e:
-        registrar_log(f"Error crítico en ejecución principal: {str(e)}", "ERROR")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    # Verificar dependencias
-    try:
-        import selenium
-        from PIL import Image  # o import PIL
-        registrar_log("Dependencias verificadas correctamente", "INFO", False)
-    except ImportError as e:
-        print(f"\033[91m❌ Error: Falta dependencia: {str(e)}\033[0m")
-        print("Instala las dependencias con:")
-        print("pip install selenium Pillow woocommerce requests beautifulsoup4")
-        exit(1)
-    
-    # Ejecutar scraper
-    main()
