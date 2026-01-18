@@ -2,7 +2,7 @@ name: Import PhoneHouse
 
 on:
   schedule:
-    - cron: "00 19 * * *"   # 20:00 España (19:00 UTC)
+    - cron: "00 19 * * *"
   workflow_dispatch:
 
 permissions:
@@ -20,8 +20,6 @@ jobs:
     steps:
       - name: Descargar código
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
 
       - name: Configurar Python
         uses: actions/setup-python@v4
@@ -38,6 +36,10 @@ jobs:
           echo ">>> LISTADO DE ARCHIVOS:"
           ls -R .
 
+      - name: Test de ejecución
+        run: |
+          echo ">>> TEST: Este mensaje DEBE aparecer"
+
       - name: Ejecutar Script PhoneHouse
         env:
           WP_URL: ${{ secrets.WP_URL }}
@@ -45,7 +47,9 @@ jobs:
           WP_SECRET: ${{ secrets.WP_SECRET }}
           PHONEHOUSE_URL: ${{ secrets.PHONEHOUSE_URL }}
           AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
-        run: python phonehouse.py
+        run: |
+          echo ">>> EJECUTANDO phonehouse.py..."
+          python phonehouse.py
 
       - name: Borrar historiales antiguos
         uses: Mattraks/delete-workflow-runs@v2
