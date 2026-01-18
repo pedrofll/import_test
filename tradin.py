@@ -1,4 +1,16 @@
-# --- CONFIGURACIÓN DE URLS Y DOMINIO ---
+import os
+import time
+import re
+import requests
+import urllib.parse
+import traceback
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from woocommerce import API
+
+# ============================================================
+#   CONFIGURACIÓN ROBUSTA (BASE_URL, URLS_PAGINAS, IMPORTACIÓN)
+# ============================================================
 
 # 1) Intentar leer lista completa desde TSZ_URLS (secreto opcional)
 #    Formato: url1,url2,url3
@@ -7,11 +19,16 @@ tsz_urls_raw = os.environ.get("TSZ_URLS", "").strip()
 if tsz_urls_raw:
     # Si TSZ_URLS existe, se usa directamente
     URLS_PAGINAS = [u.strip() for u in tsz_urls_raw.split(",") if u.strip()]
-    # Dominio base derivado de la primera URL
-    BASE_URL = URLS_PAGINAS[0].split("/en/")[0]
+
+    # BASE_URL derivado automáticamente de la primera URL
+    # Ejemplo: https://tradingshenzhen.com/en/new → https://tradingshenzhen.com
+    primera = URLS_PAGINAS[0]
+    BASE_URL = primera.split("/en/")[0].rstrip("/")
+
 else:
     # 2) Fallback: usar dominio base desde secreto SOURCE_URL_TRADINGSENZHEN
     BASE_URL = os.environ["SOURCE_URL_TRADINGSENZHEN"].rstrip("/")
+
     URLS_PAGINAS = [
         f"{BASE_URL}/en/new",
         f"{BASE_URL}/en/new?page=2",
@@ -24,10 +41,7 @@ ID_IMPORTACION = f"{BASE_URL}/"
 # 4) Afiliado oculto
 ID_AFILIADO_TRADINGSENZHEN = os.environ.get("AFF_TRADINGSENZHEN", "")
 
-
-# Identificador de importación (también oculto, reutiliza el dominio base)
-ID_IMPORTACION = f"{BASE_URL}/"
-
+# 5) WooCommerce API
 wcapi = API(
     url=os.environ["WP_URL"],
     consumer_key=os.environ["WP_KEY"],
@@ -98,35 +112,38 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
     
     return id_cat_padre, id_cat_hijo
 
+# --- FASE 1: SCRAPING ---
 def obtener_datos_remotos():
     total_productos = []
     hoy = datetime.now().strftime("%d/%m/%Y")
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
+
     print(f"--- FASE 1: ESCANEANDO {len(URLS_PAGINAS)} PÁGINAS ---")
-    
+
     for idx, url in enumerate(URLS_PAGINAS, 1):
         try:
             print(f"   Scaneando página {idx}...")
             r = requests.get(url, headers=headers, timeout=20)
             soup = BeautifulSoup(r.text, 'html.parser')
+
             for item in soup.select("div.product_desc"):
                 link_tag = item.select_one('h3[itemprop="name"] a')
                 if not link_tag or " - " not in link_tag.text:
                     continue
-                
+
                 url_imp = link_tag['href']
                 nombre = link_tag.text.split(" - ")[0].strip()
+
                 if any(k in nombre.upper() for k in ["TAB", "IPAD", "PAD"]):
                     continue
 
                 specs = link_tag.text.split(" - ")[1].strip()
                 if "/" not in specs:
                     continue
-                
+
                 enviado_desde = "Europa" if "EU Warehouse" in link_tag.text else "China"
                 memoria = specs.split("/")[0].strip()
-                
-                # --- LÓGICA DE CAPACIDAD (TB/GB) ---
+
                 cap_raw = specs.split("/")[1].strip().upper()
                 if "TB" in cap_raw:
                     capacidad = cap_raw
@@ -135,23 +152,22 @@ def obtener_datos_remotos():
                 else:
                     capacidad = cap_raw.replace("B", "GB") if cap_raw.endswith("B") else f"{cap_raw}GB"
 
-                # --- EXTRACCIÓN DE PRECIOS ---
                 p_cont = item.find_next_sibling("div", class_="product-price-and-shipping") or item.parent.select_one(".product-price-and-shipping")
                 p_act_el = p_cont.select_one(".price") if p_cont else item.parent.select_one(".price")
                 p_act = int(float(re.sub(r'[^\d.]', '', p_act_el.get_text(strip=True)))) if p_act_el else 0
 
                 p_reg_el = p_cont.select_one(".regular-price") if p_cont else None
                 p_reg = int(float(re.sub(r'[^\d.]', '', p_reg_el.get_text(strip=True)))) if p_reg_el else int(p_act * 1.1)
-                
+
                 det_r = requests.get(url_imp, headers=headers, timeout=15)
                 det_soup = BeautifulSoup(det_r.text, 'html.parser')
                 img = det_soup.find("meta", property="og:image")["content"] if det_soup.find("meta", property="og:image") else ""
-                
+
                 avail_tag = det_soup.select_one("#product-availability, .product-quantities")
                 stock_txt = avail_tag.get_text().strip() if avail_tag else det_soup.get_text()
                 match_stock = re.search(r'(\d+)', stock_txt)
                 cantidad = match_stock.group(1) if match_stock else ("Disponible" if "in stock" in stock_txt.lower() else "0")
-                
+
                 total_productos.append({
                     "nombre": nombre,
                     "memoria": memoria,
@@ -169,31 +185,35 @@ def obtener_datos_remotos():
                 })
         except:
             continue
+
     print(f"   ✅ Total productos encontrados: {len(total_productos)}")
     return total_productos
 
+# --- FASE 2: SINCRONIZACIÓN ---
 def sincronizar(remotos):
     print(f"--- FASE 2: SINCRONIZANDO ---")
     cache_categorias = obtener_todas_las_categorias()
     locales = []
     page = 1
+
     while True:
         res = wcapi.get("products", params={"per_page": 100, "page": page}).json()
         if not res or "message" in res:
             break
+
         for p in res:
             meta = {m['key']: str(m['value']) for m in p.get('meta_data', [])}
             if "tradingshenzhen.com" in meta.get('importado_de', '').lower():
                 locales.append({"id": p['id'], "nombre": p['name'], "meta": meta})
+
         if len(res) < 100:
             break
         page += 1
 
     for r in remotos:
         try:
-            # --- LOG DE CONSOLA ACTUALIZADO (1 AL 10) ---
             print("-" * 60)
-            print(f"Detectado {r['nombre']} (Página {r['pagina']})", flush=True)
+            print(f"Detectado {r['nombre']} (Página {r['pagina']})")
             print(f"1) Nombre:          {r['nombre']}")
             print(f"2) Memoria:         {r['memoria']}")
             print(f"3) Capacidad:       {r['capacidad']}")
@@ -203,16 +223,14 @@ def sincronizar(remotos):
             print(f"7) Enviado desde:   {r['enviado_desde']}")
             print(f"8) Stock Real:      {r['cantidad']}")
             print(f"9) URL Imagen:      {r['img'][:75]}...")
-            print(f"10) Enlace Compra:   {r['url_imp']}")
+            print(f"10) Enlace Compra:  {r['url_imp']}")
 
             url_r = r['url_imp'].strip().rstrip('/')
-            match = next(
-                (l for l in locales if l['meta'].get('enlace_de_compra_importado', '').strip().rstrip('/') == url_r),
-                None
-            )
-            
+            match = next((l for l in locales if l['meta'].get('enlace_de_compra_importado', '').strip().rstrip('/') == url_r), None)
+
             url_aff = f"{r['url_imp']}{ID_AFILIADO_TRADINGSENZHEN}"
             url_final = acortar_url(url_aff)
+
             flag_emoji = "🇪🇺 " if r['enviado_desde'] == "Europa" else "🇨🇳 "
             envio_telegram = f"{flag_emoji}{r['enviado_desde']}"
 
@@ -220,46 +238,39 @@ def sincronizar(remotos):
                 if not r['en_stock']:
                     wcapi.delete(f"products/{match['id']}", params={"force": True})
                     summary_eliminados.append({"nombre": r['nombre'], "id": match['id'], "razon": "Sin Stock"})
-                    print(f"   ❌ ELIMINADO de la web por falta de stock.")
+                    print("   ❌ ELIMINADO de la web por falta de stock.")
                     continue
-                
+
                 p_acf = int(float(match['meta'].get('precio_actual', 0)))
                 if r['precio_actual'] != p_acf:
                     cambio_str = f"{p_acf}€ -> {r['precio_actual']}€"
                     print(f"   🔄 ACTUALIZANDO: {cambio_str}")
-                    wcapi.put(
-                        f"products/{match['id']}",
-                        {
-                            "sale_price": str(r['precio_actual']),
-                            "regular_price": str(r['precio_regular']),
-                            "meta_data": [
-                                {"key": "precio_actual", "value": str(r['precio_actual'])},
-                                {"key": "enviado_desde_tg", "value": envio_telegram}
-                            ]
-                        }
-                    )
-                    summary_actualizados.append(
-                        {"nombre": r['nombre'], "id": match['id'], "cambio": cambio_str}
-                    )
+
+                    wcapi.put(f"products/{match['id']}", {
+                        "sale_price": str(r['precio_actual']),
+                        "regular_price": str(r['precio_regular']),
+                        "meta_data": [
+                            {"key": "precio_actual", "value": str(r['precio_actual'])},
+                            {"key": "enviado_desde_tg", "value": envio_telegram}
+                        ]
+                    })
+
+                    summary_actualizados.append({"nombre": r['nombre'], "id": match['id'], "cambio": cambio_str})
                 else:
                     summary_ignorados.append({"nombre": r['nombre'], "id": match['id']})
-                    print(f"   ⏭️ IGNORADO: Ya está actualizado.")
-            
+                    print("   ⏭️ IGNORADO: Ya está actualizado.")
+
             elif r['en_stock']:
-                print(f"   🆕 CREANDO PRODUCTO NUEVO...")
+                print("   🆕 CREANDO PRODUCTO NUEVO...")
                 id_p, id_h = resolver_jerarquia(r['nombre'], cache_categorias)
-                
+
                 data = {
                     "name": r['nombre'],
                     "type": "simple",
                     "status": "publish",
                     "regular_price": str(r['precio_regular']),
                     "sale_price": str(r['precio_actual']),
-                    "categories": (
-                        [{"id": id_p}, {"id": id_h}] if id_h
-                        else [{"id": id_p}] if id_p
-                        else []
-                    ),
+                    "categories": [{"id": id_p}, {"id": id_h}] if id_h else [{"id": id_p}] if id_p else [],
                     "images": [{"src": r['img']}] if r['img'] else [],
                     "meta_data": [
                         {"key": "nombre_movil_final", "value": r['nombre']},
@@ -283,6 +294,7 @@ def sincronizar(remotos):
                 intentos = 0
                 max_intentos = 10
                 creado = False
+
                 while intentos < max_intentos and not creado:
                     intentos += 1
                     try:
@@ -290,46 +302,58 @@ def sincronizar(remotos):
                         if res.status_code in [200, 201]:
                             creado = True
                             prod_res = res.json()
-                            summary_creados.append(
-                                {"nombre": r['nombre'], "id": prod_res.get('id')}
-                            )
+                            summary_creados.append({"nombre": r['nombre'], "id": prod_res.get('id')})
+
                             url_short = acortar_url(prod_res.get('permalink'))
                             if url_short:
-                                wcapi.put(
-                                    f"products/{prod_res.get('id')}",
-                                    {"meta_data": [{"key": "url_post_acortada", "value": url_short}]}
-                                )
+                                wcapi.put(f"products/{prod_res.get('id')}", {
+                                    "meta_data": [{"key": "url_post_acortada", "value": url_short}]
+                                })
+
                             print(f"   ✅ CREADO -> ID: {prod_res.get('id')}")
                     except:
                         time.sleep(15)
+
             else:
                 summary_sin_stock_nuevos.append(r['nombre'])
+
         except:
             print(f"   ❌ ERROR en {r['nombre']}")
             summary_fallidos.append(r['nombre'])
 
-    # --- RESUMEN FINAL ---
-    print(
-        f"\n{'='*60}\n📋 RESUMEN DE EJECUCIÓN ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n{'='*60}"
-    )
+    print("\n" + "="*60)
+    print(f"📋 RESUMEN DE EJECUCIÓN ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+    print("="*60)
+
     print(f"a) ARTÍCULOS CREADOS ({len(summary_creados)}):")
     for item in summary_creados:
         print(f"- {item['nombre']} (ID: {item['id']})")
-    print("-" * 40 + f"\nb) ARTÍCULOS ELIMINADOS DE LA WEB ({len(summary_eliminados)}):")
+
+    print("-" * 40)
+    print(f"b) ARTÍCULOS ELIMINADOS ({len(summary_eliminados)}):")
     for item in summary_eliminados:
         print(f"- {item['nombre']} (ID: {item['id']}) - {item['razon']}")
-    print("-" * 40 + f"\nc) ARTÍCULOS ACTUALIZADOS ({len(summary_actualizados)}):")
+
+    print("-" * 40)
+    print(f"c) ARTÍCULOS ACTUALIZADOS ({len(summary_actualizados)}):")
     for item in summary_actualizados:
         print(f"- {item['nombre']} (ID: {item['id']}): {item['cambio']}")
-    print("-" * 40 + f"\nd) ARTÍCULOS IGNORADOS ({len(summary_ignorados)}):")
+
+    print("-" * 40)
+    print(f"d) ARTÍCULOS IGNORADOS ({len(summary_ignorados)}):")
     for item in summary_ignorados:
         print(f"- {item['nombre']} (ID: {item['id']})")
-    print("-" * 40 + f"\ne) OMITIDOS (NUEVOS SIN STOCK) ({len(summary_sin_stock_nuevos)}):")
+
+    print("-" * 40)
+    print(f"e) NUEVOS SIN STOCK ({len(summary_sin_stock_nuevos)}):")
     for item in summary_sin_stock_nuevos:
         print(f"- {item}")
-    print("-" * 40 + f"\nf) FALLIDOS ({len(summary_fallidos)}):")
+
+    print("-" * 40)
+    print(f"f) FALLIDOS ({len(summary_fallidos)}):")
     for item in summary_fallidos:
         print(f"- {item}")
+
     print("="*60)
 
 if __name__ == '__main__':
