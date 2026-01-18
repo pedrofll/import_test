@@ -20,8 +20,17 @@ wcapi = API(
     timeout=60
 )
 
-# URL origen oculta en secret
-URL_ORIGEN = os.environ.get("SOURCE_URL_PHONEHOUSE", "")
+# --- CONFIGURACIÓN PRINCIPAL ---
+# Cargamos la URL desde la variable de entorno (Secrets)
+START_URL = os.environ.get("SOURCE_URL_PHONEHOUSE", "")
+
+# Usamos la misma variable para el ID, o lo dejamos genérico, pero sin escribir dominios.
+ID_IMPORTACION = "PhoneHouse_Import" 
+FUENTE = "Phone House"
+
+# Verificación de seguridad (para que no falle si el secret está vacío)
+if not START_URL:
+    print("⚠️ ADVERTENCIA: No se detectó SOURCE_URL_PHONEHOUSE en las variables de entorno.")
 
 # --- PARÁMETROS DE AFILIADO (desde secrets) ---
 ID_AFILIADO_PHONE_HOUSE = os.environ.get("AFF_PHONEHOUSE", "")
@@ -935,7 +944,7 @@ def main():
     print("\n" + "=" * 80)
     print("🤖 SCRAPER PHONE HOUSE - VERSIÓN COMPLETA")
     print("=" * 80)
-    print(f"🔗 URL: {SOURCE_URL_PHONEHOUSE}")
+    print(f"🔗 URL: {START_URL}")
     print(f"📏 Redimensión imágenes: {'SÍ' if REDIMENSIONAR_IMAGENES else 'NO'} ({TAMANO_IMAGEN[0]}x{TAMANO_IMAGEN[1]}px)")
     print(f"🔄 Scroll AJAX: ACTIVADO")
     print(f"📱 Memoria iPhones: ACTIVADA")
