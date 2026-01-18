@@ -428,28 +428,28 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
 
     return id_cat_padre, id_cat_hijo
 
-    # ============================================================
-#  FUNCIÓN DE EXTRACCIÓN OPTIMIZADA (SIN SELENIUM)
+# ============================================================
+#  FUNCIÓN DE EXTRACCIÓN (NUEVA Y LIMPIA)
 # ============================================================
 
 def obtener_datos_remotos():
     """Descarga la página y extrae productos usando parse_product"""
     
-    # --- LOGS DE INICIO ---
+    # Logs de inicio
     print("=" * 70)
     print("INFO: INICIANDO EXTRACCIÓN DE PRODUCTOS")
     print(f"INFO: URL: {START_URL}")
-    print(f"INFO: Scroll AJAX: DESACTIVADO (Modo Directo Seguro)")
+    print(f"INFO: Scroll AJAX: DESACTIVADO (Modo Directo)")
     print("=" * 70)
 
     productos_totales = []
     
-    # Usamos session para mejorar la conexión
+    # Configurar sesión
     session = requests.Session()
     session.headers.update(HEADERS)
 
     try:
-        # 1. Petición Directa (Sin Selenium)
+        # 1. Petición HTTP (reemplaza a Selenium)
         r = session.get(START_URL, timeout=30)
         
         if r.status_code != 200:
@@ -458,38 +458,36 @@ def obtener_datos_remotos():
         
         soup = BeautifulSoup(r.content, "html.parser")
         
-        # 2. Buscar contenedores de productos
-        # PhoneHouse usa principalmente 'div.product-item'
+        # 2. Buscar items (Phone House usa div.product-item)
         items = soup.select("div.product-item") or soup.select("li.item")
         
         if not items:
-            print("⚠️ ADVERTENCIA: No se encontraron productos con los selectores estándar.")
+            print("⚠️ No se encontraron productos (Revisar selectores CSS).")
             return []
 
-        print(f"📦 Se han detectado {len(items)} productos en la página.")
+        print(f"📦 Se han detectado {len(items)} productos.")
 
-        # 3. Procesar cada producto
+        # 3. Procesar lista
         count = 0
         for item in items:
-            # Usamos la función de limpieza que creamos en el paso anterior
+            # Llamamos a parse_product (que debe estar definida arriba)
             datos = parse_product(item, 1)
             
             if datos:
                 count += 1
                 
-                # --- AÑADIR DATOS EXTRA PARA TU WORDPRESS ---
-                # Estos campos estaban en tu código original y son necesarios para la exportación
+                # Completar datos para exportación
                 datos['clave_unica'] = f"{datos['nombre']}_{datos['capacidad']}_{datos['memoria']}"
                 datos['codigo_descuento'] = CODIGO_DESCUENTO
                 datos['fecha'] = datetime.now().strftime("%d/%m/%Y")
                 datos['en_stock'] = True
                 datos['es_iphone'] = "IPHONE" in datos['nombre'].upper()
                 datos['fuente'] = FUENTE
-                datos['enviado_desde_tg'] = ENVIADO_DESDE_TG # Bandera para telegram
+                datos['enviado_desde_tg'] = ENVIADO_DESDE_TG
 
                 productos_totales.append(datos)
 
-                # --- EL LOG EXACTO QUE PEDISTE (1-10) ---
+                # --- LOG EXACTO (1-10) ---
                 print("-" * 60)
                 print(f"Detectado {datos['nombre']} (Item {count})", flush=True)
                 print(f"1) Nombre:          {datos['nombre']}")
@@ -500,29 +498,18 @@ def obtener_datos_remotos():
                 print(f"6) Precio Original: {datos['precio_regular']}€")
                 print(f"7) Enviado desde:   {datos['enviado_desde']}")
                 print(f"8) Stock Real:      {datos['cantidad']}")
-                
-                # Limpieza visual de la URL de imagen para el log
                 img_log = datos['img'][:75] + "..." if datos['img'] else "SIN IMAGEN"
                 print(f"9) URL Imagen:      {img_log}")
                 print(f"10) Enlace Compra:   {datos['url_imp']}")
-
-                # Pequeña pausa para no saturar
+                
                 time.sleep(0.05)
         
-        print(f"\n✅ EXTRACCIÓN FINALIZADA. Total productos válidos: {len(productos_totales)}")
+        print(f"\n✅ EXTRACCIÓN FINALIZADA. Total: {len(productos_totales)}")
 
     except Exception as e:
-        print(f"❌ Error crítico durante la extracción: {e}")
+        print(f"❌ Error crítico: {e}")
             
     return productos_totales
-
-   
-     
-    except Exception as e:
-        registrar_log(f"Error crítico en extracción: {str(e)}", "ERROR")
-        import traceback
-        traceback.print_exc()
-        return []
 
 # --- CREACIÓN DE PRODUCTOS EN WOOCOMMERCE ---
 def crear_producto_woocommerce(producto, cache_categorias, max_intentos=10):
