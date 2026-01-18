@@ -1,0 +1,64 @@
+name: Import china
+
+on:
+  schedule:
+    - cron: '00 11,21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: 'scraper-compras'
+  cancel-in-progress: true
+
+jobs:
+  ejecutar-scraper:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Instalar librerías
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 woocommerce lxml
+
+      - name: Check SOURCE_URL presence
+        env:
+          SOURCE_URL: ${{ secrets.SOURCE_URL }}
+        run: |
+          echo "SOURCE_URL set: ${SOURCE_URL:+yes}"
+
+      - name: Ejecutar Script
+        env:
+          SOURCE_URL: ${{ secrets.SOURCE_URL_CHINABAY }}
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_KEY: ${{ secrets.WP_KEY }}
+          WP_SECRET: ${{ secrets.WP_SECRET }}
+          AFF_ALIEXPRESS: ${{ secrets.AFF_ALIEXPRESS }}
+          AFF_MEDIAMARKT: ${{ secrets.AFF_MEDIAMARKT }}
+          AFF_AMAZON: ${{ secrets.AFF_AMAZON }}
+          AFF_FNAC: ${{ secrets.AFF_FNAC }}
+          AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
+          AFF_TRADINGSENZHEN: ${{ secrets.AFF_TRADINGSENZHEN }}
+          AFF_DHGATE: ${{ secrets.AFF_DHGATE }}
+          
+        run: python china.py
+
+      - name: Borrar historiales antiguos
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 6
