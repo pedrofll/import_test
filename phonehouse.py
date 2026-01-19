@@ -344,56 +344,49 @@ def obtener_html_con_scroll(url: str) -> str | None:
 PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
 
 def descubrir_urls_producto(html: str, base_url: str):
-    """
-    Devuelve set de URLs absolutas sin query.
-    Estrategias:
-      1) hrefs de <a>
-      2) valores de atributos data-* (y otros) que contengan /movil/...html
-      3) búsqueda regex global en el HTML completo (muy efectiva en SPAs)
+    """Devuelve set de URLs de ficha EXTRAIDAS SOLO de las tarjetas del listado.
+
+    Motivo: el HTML puede contener URLs de productos en menús, carruseles, JSON internos,
+    o secciones no visibles. Para evitar 'productos fantasma', solo aceptamos URLs que
+    estén asociadas a una tarjeta de producto del grid (h3.marca-item + precios-items-mosaico).
     """
     soup = BeautifulSoup(html, "html.parser")
     urls = set()
 
-    # 1) hrefs
-    for a in soup.find_all("a", href=True):
+    for h3 in soup.select("h3.marca-item"):
+        # Subir por el DOM hasta encontrar un contenedor que parezca una tarjeta con precios
+        card = h3
+        hops = 0
+        while card is not None and hops < 8:
+            try:
+                if hasattr(card, "select_one") and card.select_one(".precios-items-mosaico"):
+                    break
+            except Exception:
+                pass
+            card = getattr(card, "parent", None)
+            hops += 1
+
+        if not card or not getattr(card, "find", None):
+            continue
+
+        a = card.find("a", href=True)
+        if not a:
+            continue
+
         href = (a.get("href") or "").strip()
         if not href:
             continue
+
         if not PRODUCT_PATH_RE.search(href):
             continue
+
         u = abs_url(base_url, href).split("?")[0]
-        urls.add(u)
-
-    # 2) atributos (data-url, onclick, etc.)
-    for tag in soup.find_all(True):
-        for k, v in (tag.attrs or {}).items():
-            if isinstance(v, list):
-                v = " ".join([str(x) for x in v])
-            if not isinstance(v, str):
-                continue
-            if not PRODUCT_PATH_RE.search(v):
-                continue
-            # extraer todas las coincidencias
-            for m in PRODUCT_PATH_RE.finditer(v):
-                path = m.group(0)
-                u = abs_url(base_url, path).split("?")[0]
-                urls.add(u)
-
-    # 3) regex global en html
-    for m in PRODUCT_PATH_RE.finditer(html):
-        path = m.group(0)
-        u = abs_url(base_url, path).split("?")[0]
-        urls.add(u)
-
-    # filtros: evitar no-móviles si apareciesen
-    filtradas = set()
-    for u in urls:
         low = u.lower()
-        if any(x in low for x in ["accesorio", "funda", "cargador", "protector", "seguro", "financiacion", "reacondicionado"]):
+        if any(x in low for x in ["accesorio", "funda", "cargador", "protector", "seguro", "financiacion"]):
             continue
-        filtradas.add(u)
+        urls.add(u)
 
-    return filtradas
+    return urls
 
 # --------------------------
 # FETCH DE FICHA PARA COMPLETAR DATOS
@@ -709,9 +702,70 @@ def obtener_datos_remotos():
     else:
         print("✅ HTML obtenido con Selenium/scroll", flush=True)
 
-    print("\n🔍 Descubriendo URLs de fichas de móvil...", flush=True)
+    print("\n🔍 Descubriendo URLs de fichas de móvil (solo tarjetas del listado)...", flush=True)
     urls = descubrir_urls_producto(html, START_URL)
-    print(f"   🔗 URLs únicas detectadas (/movil/.../*.html) en HTML: {len(urls)}", flush=True)
+    print(f"   🔗 URLs únicas (desde cards): {len(urls)}", flush=True)
+
+    soup_listado = BeautifulSoup(html, "html.parser")
+
+    # Mapa url->card para extraer precios/imagen/titulo SIN ir a la ficha (evita precios fantasma)
+    card_by_url = {}
+    for h3 in soup_listado.select("h3.marca-item"):
+        titulo_card = normalize_spaces(h3.get_text(" ", strip=True))
+        card = h3
+        hops = 0
+        while card is not None and hops < 8:
+            if hasattr(card, "select_one") and card.select_one(".precios-items-mosaico"):
+                break
+            card = getattr(card, "parent", None)
+            hops += 1
+        if not card:
+            continue
+        a = card.find("a", href=True)
+        if not a:
+            continue
+        href = (a.get("href") or "").strip()
+        if not href or not PRODUCT_PATH_RE.search(href):
+            continue
+        u = abs_url(START_URL, href).split("?")[0]
+        if u not in urls:
+            continue
+
+        # Precios desde card
+        act = 0
+        orig = 0
+        box = card.select_one(".precios-items-mosaico")
+        if box:
+            # actual: span.precio-2 o span.precio (no tachado)
+            cand = box.select_one("span.precio-2") or box.select_one("span.precio:not(.precio-tachado)")
+            if cand:
+                at = normalize_spaces(cand.get_text(" ", strip=True))
+                vals = parse_eur_all(at) if "parse_eur_all" in globals() else []
+                act = vals[0] if vals else parse_eur_int(at)
+            oc = box.select_one("span.precio-tachado") or box.select_one("s") or box.select_one("del")
+            if oc:
+                ot = normalize_spaces(oc.get_text(" ", strip=True))
+                ovals = parse_eur_all(ot) if "parse_eur_all" in globals() else []
+                orig = ovals[0] if ovals else parse_eur_int(ot)
+        if orig == 0:
+            orig = act
+
+        # Imagen desde card (src o data-src)
+        img = ""
+        imgtag = card.find("img")
+        if imgtag:
+            for attr in ("src", "data-src", "data-original", "data-lazy"):
+                s = (imgtag.get(attr) or "").strip()
+                if s and "logo" not in s.lower():
+                    img = abs_url(START_URL, s)
+                    break
+
+        card_by_url[u] = {
+            "titulo_card": titulo_card,
+            "precio_actual": act,
+            "precio_original": orig,
+            "img": img,
+        }
 
     # Orden estable para reproducibilidad
     urls_ordenadas = sorted(urls)
@@ -724,20 +778,44 @@ def obtener_datos_remotos():
         if len(productos) >= OBJETIVO:
             break
 
-        ficha = fetch_ficha_producto(url, session=session, max_retries=3)
-        if not ficha:
-            razones_skip["fetch_fail"] += 1
-            continue
+        base = card_by_url.get(url, {})
+        titulo = base.get("titulo_card") or ""
+        precio_actual = int(base.get("precio_actual") or 0)
+        precio_original = int(base.get("precio_original") or 0)
+        img = base.get("img") or ""
 
-        titulo = ficha.get("titulo") or ""
+        if not titulo:
+            # fallback: si por algún motivo no encontramos la tarjeta
+            ficha = fetch_ficha_producto(url, session=session, max_retries=3)
+            if not ficha:
+                razones_skip["fetch_fail"] += 1
+                continue
+            titulo = ficha.get("titulo") or ""
+            precio_actual = int(ficha.get("precio_actual") or 0)
+            precio_original = int(ficha.get("precio_original") or 0)
+            img = ficha.get("img") or ""
+
         if not titulo:
             razones_skip["sin_titulo"] += 1
             continue
 
-        nombre = ficha.get("nombre") or ""
-        cap = ficha.get("capacidad") or ""
-        ram = ficha.get("memoria") or ""
-        es_iphone = bool(ficha.get("es_iphone"))
+        nombre, cap, ram = extraer_nombre_memoria_capacidad(titulo)
+        es_iphone = "iphone" in (nombre or "").lower()
+        if es_iphone and not ram:
+            ram = ram_por_modelo_iphone(nombre) or ""
+
+        # Si falta cap/ram, entonces sí consultamos la ficha para completar specs
+        if (not cap) or ((not ram) and (not es_iphone)):
+            ficha = fetch_ficha_producto(url, session=session, max_retries=3)
+            if ficha:
+                cap = cap or (ficha.get("capacidad") or "")
+                ram = ram or (ficha.get("memoria") or "")
+                img = img or (ficha.get("img") or "")
+                # IMPORTANTE: NO sobreescribir precios del card salvo que falten
+                if precio_actual == 0:
+                    precio_actual = int(ficha.get("precio_actual") or 0)
+                if precio_original == 0:
+                    precio_original = int(ficha.get("precio_original") or 0)
 
         if not cap:
             razones_skip["sin_cap"] += 1
@@ -749,17 +827,13 @@ def obtener_datos_remotos():
             razones_skip["sin_ram"] += 1
             continue
 
-        precio_actual = int(ficha.get("precio_actual") or 0)
-        precio_original = int(ficha.get("precio_original") or 0)
         if precio_actual <= 0:
             razones_skip["sin_precio"] += 1
             continue
         if precio_original <= 0:
             precio_original = precio_actual
 
-        img = ficha.get("img") or ""
         version = "IOS" if es_iphone else "Global"
-
         key = (nombre.lower(), cap.upper(), ram.upper())
         if any(p["dedupe_key"] == key for p in productos):
             summary_duplicados.append(f"{nombre} {cap} {ram}".strip())
@@ -787,8 +861,7 @@ def obtener_datos_remotos():
         if len(productos) <= 10:
             print(f"   [{len(productos)}] {nombre[:28]:28} | {precio_actual:4d}€ | {cap} | {ram}", flush=True)
 
-        # Pequeño delay para no castigar PhoneHouse
-        time.sleep(0.15)
+        time.sleep(0.12)
 
     print("\n📊 RESUMEN EXTRACCIÓN:", flush=True)
     print(f"   Productos únicos válidos: {len(productos)}", flush=True)
