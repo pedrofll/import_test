@@ -22,7 +22,8 @@ from woocommerce import API
 
 # --- CONFIG ---
 DEFAULT_START_URL = "https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html"
-START_URL = os.environ.get("SOURCE_URL_PHONEHOUSE") or DEFAULT_START_URL
+START_URL = os.getenv('SOURCE_URL_PHONEHOUSE') or 'https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html'
+EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
 # Afiliado (secret/env). Acepta "utm=..." o "?utm=..."
 AFF_RAW = os.environ.get("AFF_PHONEHOUSE", "").strip()
@@ -301,6 +302,22 @@ def obtener_html_con_scroll(url: str) -> str | None:
     try:
         driver.set_page_load_timeout(40)
         driver.get(url)
+        time.sleep(2)
+        current = getattr(driver, 'current_url', '') or ''
+        print(f"URL final (Selenium): {mask_url(current)}", flush=True)
+        if EXPECTED_PATH not in current:
+            print(f"⚠️  Redirección detectada (no estamos en {EXPECTED_PATH}). Reintentando...", flush=True)
+            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
+            time.sleep(2)
+            current = getattr(driver, 'current_url', '') or ''
+            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
+        if EXPECTED_PATH not in current:
+            print("❌ ERROR: No se pudo acceder a 'todos-los-smartphones'. Abortando.", flush=True)
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            return None
         try:
             print(f"URL final (Selenium): {mask_url(driver.current_url)}", flush=True)
         except Exception:
@@ -404,6 +421,8 @@ def descubrir_urls_producto(html: str, base_url: str):
         u = abs_url(base_url, href).split("?")[0]
         low = u.lower()
         if any(x in low for x in ["accesorio", "funda", "cargador", "protector", "seguro", "financiacion"]):
+            continue
+        if any(x in low for x in ['reacondicionado','reacondicionados','renuevo','renov','reacond']):
             continue
 
         block = a
@@ -810,6 +829,8 @@ def obtener_datos_remotos():
     razones_skip = {"sin_precio": 0, "sin_cap": 0, "sin_ram": 0, "sin_titulo": 0, "fetch_fail": 0}
 
     for idx, url in enumerate(urls_ordenadas, 1):
+        if any(x in url.lower() for x in ['reacondicionado','reacondicionados','renuevo','renov','reacond']):
+            continue
         if len(productos) >= OBJETIVO:
             break
 
