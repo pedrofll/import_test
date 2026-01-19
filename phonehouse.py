@@ -82,7 +82,43 @@ def abs_url(base: str, href: str) -> str:
         return href
 
 def parse_eur_int(txt: str) -> int:
+    """Convierte un texto que contiene un precio en euros a entero.
+
+    Importante: evita falsos positivos como 'G54' cuando el texto contiene '€'.
+    Regla: prioriza números pegados al símbolo € (p.ej. '149€' o '149 €').
+    """
     if not txt:
+        return 0
+
+    t = txt.replace("\xa0", " ").strip()
+
+    # Prioridad 1: números inmediatamente antes de '€'
+    matches = re.findall(r"(\d{1,5}(?:[\.,]\d{1,2})?)\s*€", t)
+    if matches:
+        num = matches[0].replace(".", "").replace(",", ".")
+        try:
+            return int(float(num))
+        except Exception:
+            return 0
+
+    # Prioridad 2: si hay símbolo euro pero con formato raro, intenta el último número
+    if "€" in t:
+        nums = re.findall(r"\d{1,5}(?:[\.,]\d{1,2})?", t)
+        if nums:
+            num = nums[-1].replace(".", "").replace(",", ".")
+            try:
+                return int(float(num))
+            except Exception:
+                return 0
+
+    # Fallback conservador
+    m = re.search(r"(\d{1,5}(?:[\.,]\d{1,2})?)", t)
+    if not m:
+        return 0
+    num = m.group(1).replace(".", "").replace(",", ".")
+    try:
+        return int(float(num))
+    except Exception:
         return 0
     t = txt.replace("\xa0", " ").strip()
     # Ej: "1.239,00 €" o "999€"
