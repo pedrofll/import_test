@@ -519,70 +519,65 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
 
         return ""
 
-    def _extract_prices_html(soup: BeautifulSoup):
-        """Extrae (actual, original) con prioridad a la estructura típica de PhoneHouse.
+    def _extract_prices_html(soup: BeautifulSoup, jsonld_price: int = 0):
+        """Extrae (actual, original) con prioridad a PhoneHouse y con fallback seguro.
 
-        Prioridad:
-          1) Bloques tipo .precios-items-mosaico (listado) o contenedores similares en ficha.
-             - actual: span.precio (no tachado) o span.precio-2
-             - original: span.precio-tachado o <s>/<del>
-          2) Meta product:price:amount
-          3) Fallback: recolectar precios con € excluyendo contextos 'desde' y cuotas.
+        1) Si existe .precios-items-mosaico:
+            - actual: span.precio-2 o span.precio (no tachado)
+            - original: span.precio-tachado o <s>/<del>
+        2) Si no existe, usa meta product:price:amount.
+        3) Si sigue sin, usa jsonld_price.
+        4) Fallback global muy conservador (evita 'desde' y cuotas).
         """
-        # 1) PhoneHouse: bloque de precios (listado)
-        containers = soup.select(".precios-items-mosaico, .precios-items, [class*='precio']")
-        for c in containers:
-            ctext = normalize_spaces(c.get_text(" ", strip=True))
-            if "€" not in ctext:
-                continue
 
-            # Original (tachado) explícito
-            orig = 0
-            o = c.select_one(".precio-tachado, s, del")
-            if o:
-                ot = normalize_spaces(o.get_text(" ", strip=True))
-                if ("€" in ot) and (not _is_bad_price_context(ot)):
-                    vals = parse_eur_all(ot)
-                    orig = vals[0] if vals else parse_eur_int(ot)
-
-            # Actual explícito: span.precio / .precio-2 sin 'tachado'
+        # 1) PhoneHouse listado / mosaico
+        box = soup.select_one(".precios-items-mosaico")
+        if box:
             act = 0
-            a = None
-            for cand in c.select("span.precio-2, span.precio"):
-                cls = " ".join(cand.get("class", [])).lower()
-                if "tach" in cls:
-                    continue
-                at = normalize_spaces(cand.get_text(" ", strip=True))
-                if ("€" in at) and (not _is_bad_price_context(at)):
-                    a = cand
-                    act = parse_eur_int(at)
-                    if act:
-                        break
+            orig = 0
 
-            # Si no ha pillado actual, intenta el texto del contenedor sin partes "desde"
-            if act == 0 and (not _is_bad_price_context(ctext)):
-                vals = parse_eur_all(ctext)
-                if vals:
-                    # suele venir: [149, 249] (actual, original) en listado
-                    # preferimos el menor como actual
-                    act = min(vals)
-                    if orig == 0:
-                        bigger = sorted({v for v in vals if v > act})
-                        orig = bigger[0] if bigger else act
+            # Actual: span.precio-2 o span.precio (no tachado)
+            cand = box.select_one("span.precio-2") or box.select_one("span.precio:not(.precio-tachado)")
+            if cand:
+                at = normalize_spaces(cand.get_text(" ", strip=True))
+                # Puede venir como "149 €" o "149€"
+                act_vals = parse_eur_all(at)
+                act = act_vals[0] if act_vals else parse_eur_int(at)
+
+                # Heurística anti-fragmentación: si act es muy pequeña pero jsonld_price es plausible, usar jsonld
+                if act and act < 20 and jsonld_price > 50:
+                    act = jsonld_price
+
+            # Original tachado
+            oc = box.select_one("span.precio-tachado") or box.select_one("s") or box.select_one("del")
+            if oc:
+                ot = normalize_spaces(oc.get_text(" ", strip=True))
+                ovals = parse_eur_all(ot)
+                orig = ovals[0] if ovals else parse_eur_int(ot)
+
+            # Si no hay original, intenta extraer todos los precios del box
+            if act and orig == 0:
+                allp = parse_eur_all(normalize_spaces(box.get_text(" ", strip=True)))
+                bigger = sorted({p for p in allp if p > act})
+                orig = bigger[0] if bigger else act
 
             if act:
                 if orig == 0:
                     orig = act
                 return act, orig
 
-        # 2) Meta product:price:amount
+        # 2) Meta
         actual = 0
         original = 0
         mp = soup.find("meta", property="product:price:amount")
         if mp and mp.get("content"):
             actual = parse_eur_int(mp["content"])
 
-        # 3) Fallback global (sin 'desde'/cuotas)
+        # 3) JSON-LD
+        if (actual == 0) and jsonld_price:
+            actual = jsonld_price
+
+        # 4) Fallback global (conservador)
         if actual == 0:
             prices = []
             for el in soup.find_all(["span", "div", "p", "s", "del"]):
@@ -625,7 +620,7 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
                 if og and og.get("content"):
                     titulo = normalize_spaces(og["content"])
 
-            j = _extract_jsonld_product(soup)
+            j2 = _extract_jsonld_product(soup)
             if not titulo and j.get("titulo"):
                 titulo = j["titulo"]
 
@@ -634,7 +629,16 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
             img = abs_url(url, img) if img else ""
 
             # Precios HTML
-            precio_actual, precio_original = _extract_prices_html(soup)
+                        # JSON-LD (si existe) para apoyar el parseo
+            j = j2
+            j_price_int = 0
+            try:
+                if (j.get('price') or 0):
+                    j_price_int = int(round(float(j.get('price') or 0)))
+            except Exception:
+                j_price_int = 0
+
+            precio_actual, precio_original = _extract_prices_html(soup, jsonld_price=j_price_int)
 
             # JSON-LD precio actual solo si el HTML parece vacío
             try:
@@ -659,7 +663,7 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
             # DEBUG
             try:
                 _t = (titulo or "").replace("\n", " ")
-                print(f"   🧾 [FICHA] {mask_url(url)} | actual={precio_actual}€ | original={precio_original}€ | img={'OK' if img else 'VACIA'} | titulo='{_t[:60]}'", flush=True)
+                print(f"   🧾 [FICHA] {mask_url(url)} | actual={precio_actual}€ | original={precio_original}€ | jsonld={j_price_int}€ | img={'OK' if img else 'VACIA'} | titulo='{_t[:60]}'", flush=True)
             except Exception:
                 pass
 
