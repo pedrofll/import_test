@@ -785,24 +785,69 @@ def obtener_datos_remotos():
         if u not in urls:
             continue
 
-        # Precios desde card
+        # Precios desde card (PhoneHouse cambia clases con frecuencia)
         act = 0
         orig = 0
-        box = card.select_one(".precios-items-mosaico")
+
+        # Contenedores típicos en listado:
+        # - .precios-items-mosaico
+        # - .listado-precios-libre
+        # - (fallback) cualquier bloque que contenga 'precio' y el símbolo €
+        box = (
+            card.select_one(".precios-items-mosaico")
+            or card.select_one(".listado-precios-libre")
+            or card.select_one("[class*='precios']")
+            or card.select_one("[class*='precio']")
+        )
+
         if box:
-            # actual: span.precio-2 o span.precio (no tachado)
-            cand = box.select_one("span.precio-2") or box.select_one("span.precio:not(.precio-tachado)")
+            # Actual: span.precio-2 o span.precio (no tachado)
+            cand = (
+                box.select_one("span.precio-2")
+                or box.select_one("span.precio:not(.precio-tachado):not(.precio-tachado-finales):not(.precio-tachado-final)")
+            )
             if cand:
                 at = normalize_spaces(cand.get_text(" ", strip=True))
-                vals = parse_eur_all(at) if "parse_eur_all" in globals() else []
-                act = vals[0] if vals else parse_eur_int(at)
-            oc = box.select_one("span.precio-tachado") or box.select_one("s") or box.select_one("del")
+                if ("€" in at) and ("otras ofertas" not in at.lower()):
+                    vals = parse_eur_all(at) if "parse_eur_all" in globals() else []
+                    act = vals[0] if vals else parse_eur_int(at)
+
+            # Original tachado: múltiples clases posibles
+            oc = (
+                box.select_one("span.precio-tachado")
+                or box.select_one("span.precio-tachado-finales")
+                or box.select_one("span.precio-tachado-final")
+                or box.select_one("s")
+                or box.select_one("del")
+            )
             if oc:
                 ot = normalize_spaces(oc.get_text(" ", strip=True))
                 ovals = parse_eur_all(ot) if "parse_eur_all" in globals() else []
                 orig = ovals[0] if ovals else parse_eur_int(ot)
+
+            # Si aún no hay act, recolecta todos los precios del box descartando "otras ofertas"
+            if act == 0:
+                bt = normalize_spaces(box.get_text(" ", strip=True))
+                if "otras ofertas" in bt.lower():
+                    # elimina la sección "otras ofertas ..." para no contaminar
+                    bt = bt.split("Otras ofertas")[0]
+                    bt = bt.split("otras ofertas")[0]
+                vals = parse_eur_all(bt) if "parse_eur_all" in globals() else []
+                if vals:
+                    act = max(vals) if len(vals) == 1 else min(vals)  # en cards suele venir [1099,1339]
+                    if orig == 0:
+                        bigger = sorted({v for v in vals if v > act})
+                        orig = bigger[0] if bigger else act
+
+        # Último fallback: evita precios ridículos (4€, 9€) provocados por HTML fragmentado
+        if act and act < 20:
+            act = 0
+        if orig and orig < 20:
+            orig = 0
+
         if orig == 0:
             orig = act
+
 
         # Imagen desde card (src o data-src)
         img = ""
