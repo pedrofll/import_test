@@ -8,39 +8,42 @@ from bs4 import BeautifulSoup
 from woocommerce import API
 
 # ============================================================
-#  SCRAPER PHONE HOUSE - VERSIÓN COMPLETA (SCROLL + URL MASK)
+#  PHONEHOUSE SCRAPER (SCROLL + MASK + FULL PRODUCT FETCH)
 # ============================================================
-#
-# Objetivos:
-#  - Extraer hasta 72 móviles del listado con scroll infinito
-#  - Importar/actualizar en WooCommerce
-#  - No mostrar URLs sensibles completas en logs (enmascara query/afiliado)
-#
-# Requisitos:
-#  - WP_URL, WP_KEY, WP_SECRET (secrets)
-#  - SOURCE_URL_PHONEHOUSE (opcional; por defecto el listado de smartphones)
-#  - AFF_PHONEHOUSE (opcional; querystring o parámetros de afiliado)
-#
+# Cambios clave (v2):
+#  - Selenium scroll para cargar el listado completo.
+#  - Descubrimiento de URLs más agresivo:
+#       * <a href>, atributos data-*, y búsqueda regex en el HTML completo.
+#  - Para cada URL de producto detectada, se hace fetch de la ficha (requests)
+#    para extraer precio/imagen/título y (si falta) RAM/capacidad desde specs.
+#  - Logs enmascarados: no imprime querystrings/afiliados.
+# ============================================================
 
-# --- CONFIGURACIÓN ---
+# --- CONFIG ---
 DEFAULT_START_URL = "https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html"
 START_URL = os.environ.get("SOURCE_URL_PHONEHOUSE") or DEFAULT_START_URL
 
-FUENTE = "Phone House"
-ID_IMPORTACION = "https://www.phonehouse.es"
-
-# Afiliado: idealmente en secret/env. Permite:
-#  - "?utm_source=..." (prefijado con '?')
-#  - "utm_source=..." (sin '?', se añade)
+# Afiliado (secret/env). Acepta "utm=..." o "?utm=..."
 AFF_RAW = os.environ.get("AFF_PHONEHOUSE", "").strip()
 if AFF_RAW and not AFF_RAW.startswith("?") and not AFF_RAW.startswith("&"):
     AFF_RAW = "?" + AFF_RAW
-ID_AFILIADO_PHONE_HOUSE = AFF_RAW
 
+FUENTE = "Phone House"
+ID_IMPORTACION = "https://www.phonehouse.es"
 ENVIADO_DESDE = "España"
 ENVIADO_DESDE_TG = "🇪🇸 España"
 CODIGO_DESCUENTO = "OFERTA PROMO"
 
+OBJETIVO = 72
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Referer": "https://www.phonehouse.es/",
+}
+
+# WooCommerce API
 wcapi = API(
     url=os.environ["WP_URL"],
     consumer_key=os.environ["WP_KEY"],
@@ -49,21 +52,17 @@ wcapi = API(
     timeout=60
 )
 
+# Summaries
 summary_creados, summary_eliminados, summary_actualizados = [], [], []
 summary_ignorados, summary_sin_stock_nuevos, summary_fallidos = [], [], []
-summary_duplicados = []
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.phonehouse.es/",
-}
+summary_duplicados = []  # variantes/color/duplicados detectados
 
 # --------------------------
 # UTILIDADES
 # --------------------------
+def normalize_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
+
 def mask_url(url: str) -> str:
     """Enmascara la URL para logs (no muestra querystring completa)."""
     try:
@@ -73,17 +72,7 @@ def mask_url(url: str) -> str:
     except Exception:
         return "***"
 
-def acortar_url(url_larga: str) -> str:
-    """Acorta con is.gd."""
-    try:
-        url_encoded = urllib.parse.quote(url_larga, safe="")
-        r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=10)
-        return r.text.strip() if r.status_code == 200 else url_larga
-    except Exception:
-        return url_larga
-
 def abs_url(base: str, href: str) -> str:
-    """Convierte URL relativa a absoluta."""
     try:
         if href.startswith("//"):
             href = "https:" + href
@@ -92,10 +81,10 @@ def abs_url(base: str, href: str) -> str:
         return href
 
 def parse_eur_int(txt: str) -> int:
-    """Convierte texto de precio a entero."""
     if not txt:
         return 0
     t = txt.replace("\xa0", " ").strip()
+    # Ej: "1.239,00 €" o "999€"
     m = re.search(r"(\d{1,5}(?:[.,]\d{1,2})?)", t)
     if not m:
         return 0
@@ -105,8 +94,14 @@ def parse_eur_int(txt: str) -> int:
     except Exception:
         return 0
 
-def normalize_spaces(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip()
+def acortar_url(url_larga: str) -> str:
+    """Acorta con is.gd (si falla, devuelve la original)."""
+    try:
+        url_encoded = urllib.parse.quote(url_larga, safe="")
+        r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=10)
+        return r.text.strip() if r.status_code == 200 else url_larga
+    except Exception:
+        return url_larga
 
 # --------------------------
 # RAM iPhone
@@ -120,6 +115,7 @@ IPHONE_RAM_MAP = [
     ("iphone 16 pro max", "8GB"),
     ("iphone 16 pro", "8GB"),
     ("iphone 16 plus", "8GB"),
+    ("iphone 16e", "8GB"),
     ("iphone 16", "8GB"),
     ("iphone 15 pro max", "8GB"),
     ("iphone 15 pro", "8GB"),
@@ -129,8 +125,6 @@ IPHONE_RAM_MAP = [
     ("iphone 14 pro", "6GB"),
     ("iphone 14 plus", "6GB"),
     ("iphone 14", "6GB"),
-    ("iphone se (3", "4GB"),
-    ("iphone se 3", "4GB"),
     ("iphone 13 pro max", "6GB"),
     ("iphone 13 pro", "6GB"),
     ("iphone 13 mini", "4GB"),
@@ -139,23 +133,6 @@ IPHONE_RAM_MAP = [
     ("iphone 12 pro", "6GB"),
     ("iphone 12 mini", "4GB"),
     ("iphone 12", "4GB"),
-    ("iphone se (2", "3GB"),
-    ("iphone se 2", "3GB"),
-    ("iphone 11 pro max", "4GB"),
-    ("iphone 11 pro", "4GB"),
-    ("iphone 11", "4GB"),
-    ("iphone xs max", "4GB"),
-    ("iphone xs", "4GB"),
-    ("iphone xr", "3GB"),
-    ("iphone x", "3GB"),
-    ("iphone 8 plus", "3GB"),
-    ("iphone 8", "2GB"),
-    ("iphone 7 plus", "3GB"),
-    ("iphone 7", "2GB"),
-    ("iphone se (1", "2GB"),
-    ("iphone se 1", "2GB"),
-    ("iphone 6s plus", "2GB"),
-    ("iphone 6s", "2GB"),
 ]
 
 def ram_por_modelo_iphone(nombre: str):
@@ -170,12 +147,17 @@ def ram_por_modelo_iphone(nombre: str):
     return None
 
 # --------------------------
-# EXTRACCIÓN (memoria/capacidad)
+# EXTRACCIÓN (título -> RAM/cap)
 # --------------------------
 def extraer_nombre_memoria_capacidad(titulo: str):
+    """
+    Devuelve (nombre, capacidad, memoria).
+    - Capacidad restringida a tamaños típicos para evitar falsos positivos.
+    - RAM restringida a tamaños típicos.
+    """
     t = normalize_spaces(titulo)
 
-    # Formatos combo (CAP+RAM o RAM+CAP) con separadores + o /
+    # Formatos combo CAP+RAM o RAM+CAP (con + o /)
     m_combo = re.search(
         r"(?P<cap>\d{2,4})\s*(?P<unit>TB|GB)\s*[\+/]\s*(?P<ram>\d{1,2})\s*GB(?:\s*RAM)?\b"
         r"|(?P<ram2>\d{1,2})\s*GB(?:\s*RAM)?\s*[\+/]\s*(?P<cap2>\d{2,4})\s*(?P<unit2>TB|GB)\b",
@@ -189,11 +171,10 @@ def extraer_nombre_memoria_capacidad(titulo: str):
         else:
             capacidad = f"{m_combo.group('cap2')}{m_combo.group('unit2').upper()}"
             memoria = f"{m_combo.group('ram2')}GB"
-
         nombre = t[:m_combo.start()].strip()
         return normalize_spaces(nombre), capacidad, memoria
 
-    # Capacidad (almacenamiento) - restringimos para evitar falsos positivos (p.ej. datos)
+    # Capacidad (almacenamiento)
     m_cap = re.search(r"\b(64|128|256|512|1024)\s*GB\b|\b(1|2)\s*TB\b", t, flags=re.I)
     capacidad = ""
     if m_cap:
@@ -202,23 +183,386 @@ def extraer_nombre_memoria_capacidad(titulo: str):
         else:
             capacidad = f"{m_cap.group(2)}TB"
 
-    # RAM (memoria) con o sin literal "RAM"
-    m_ram = re.search(r"\b(4|6|8|12|16)\s*GB(?:\s*RAM)?\b", t, flags=re.I)
+    # RAM
+    m_ram = re.search(r"\b(3|4|6|8|12|16)\s*GB(?:\s*RAM)?\b", t, flags=re.I)
     memoria = f"{m_ram.group(1)}GB" if m_ram else ""
 
-    # Nombre: cortar por primera aparición
+    # Nombre
     cut_positions = []
     if m_cap:
         cut_positions.append(m_cap.start())
     if m_ram:
         cut_positions.append(m_ram.start())
     cut = min(cut_positions) if cut_positions else len(t)
-
     nombre = t[:cut].strip()
     return normalize_spaces(nombre), capacidad, memoria
 
+def extraer_specs_ram_cap(soup: BeautifulSoup):
+    """
+    Intenta extraer RAM y capacidad desde la ficha, incluso si no están en el título.
+    Heurísticas:
+      - Busca textos tipo "Memoria RAM", "RAM", "Almacenamiento", "Capacidad", "Memoria interna"
+      - Devuelve (capacidad, ram) (pueden ser "").
+    """
+    text = normalize_spaces(soup.get_text(" "))
+
+    # Capacidad
+    cap = ""
+    # Preferimos valores típicos de almacenamiento
+    m_cap = re.search(r"\b(64|128|256|512|1024)\s*GB\b|\b(1|2)\s*TB\b", text, flags=re.I)
+    if m_cap:
+        cap = f"{m_cap.group(1)}GB" if m_cap.group(1) else f"{m_cap.group(2)}TB"
+
+    # RAM
+    ram = ""
+    # Primero intenta cerca de "RAM"
+    m_ram = re.search(r"(?:memoria\s*ram|ram)\D{0,30}\b(3|4|6|8|12|16)\s*gb\b", text, flags=re.I)
+    if m_ram:
+        ram = f"{m_ram.group(1)}GB"
+    else:
+        # fallback: cualquier RAM típica; ojo: puede confundir con almacenamiento, pero priorizamos si ya hay cap
+        m_ram2 = re.search(r"\b(3|4|6|8|12|16)\s*GB\b", text, flags=re.I)
+        if m_ram2:
+            ram = f"{m_ram2.group(1)}GB"
+
+    return cap, ram
+
 # --------------------------
-# CATEGORÍAS
+# SCROLL: obtener HTML renderizado
+# --------------------------
+def obtener_html_con_scroll(url: str) -> str | None:
+    """Carga con Selenium y scrollea hasta estabilizar altura."""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.common.exceptions import TimeoutException
+    except Exception:
+        return None
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1400,900")
+
+    driver = webdriver.Chrome(options=chrome_options)
+    try:
+        driver.set_page_load_timeout(40)
+        driver.get(url)
+        try:
+            print(f"URL final (Selenium): {mask_url(driver.current_url)}", flush=True)
+        except Exception:
+            pass
+
+        time.sleep(2)
+
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        stable_rounds = 0
+        max_rounds = 45
+
+        print("🧭 Haciendo scroll hasta el final...", flush=True)
+
+        for _ in range(max_rounds):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.6)
+            new_height = driver.execute_script("return document.body.scrollHeight")
+
+            if new_height == last_height:
+                stable_rounds += 1
+                if stable_rounds >= 3:
+                    break
+            else:
+                stable_rounds = 0
+                last_height = new_height
+
+        return driver.page_source
+    except TimeoutException:
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+# --------------------------
+# DESCUBRIR URLs de producto
+# --------------------------
+PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
+
+def descubrir_urls_producto(html: str, base_url: str):
+    """
+    Devuelve set de URLs absolutas sin query.
+    Estrategias:
+      1) hrefs de <a>
+      2) valores de atributos data-* (y otros) que contengan /movil/...html
+      3) búsqueda regex global en el HTML completo (muy efectiva en SPAs)
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    urls = set()
+
+    # 1) hrefs
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        if not PRODUCT_PATH_RE.search(href):
+            continue
+        u = abs_url(base_url, href).split("?")[0]
+        urls.add(u)
+
+    # 2) atributos (data-url, onclick, etc.)
+    for tag in soup.find_all(True):
+        for k, v in (tag.attrs or {}).items():
+            if isinstance(v, list):
+                v = " ".join([str(x) for x in v])
+            if not isinstance(v, str):
+                continue
+            if not PRODUCT_PATH_RE.search(v):
+                continue
+            # extraer todas las coincidencias
+            for m in PRODUCT_PATH_RE.finditer(v):
+                path = m.group(0)
+                u = abs_url(base_url, path).split("?")[0]
+                urls.add(u)
+
+    # 3) regex global en html
+    for m in PRODUCT_PATH_RE.finditer(html):
+        path = m.group(0)
+        u = abs_url(base_url, path).split("?")[0]
+        urls.add(u)
+
+    # filtros: evitar no-móviles si apareciesen
+    filtradas = set()
+    for u in urls:
+        low = u.lower()
+        if any(x in low for x in ["accesorio", "funda", "cargador", "protector", "seguro", "financiacion", "reacondicionado"]):
+            continue
+        filtradas.add(u)
+
+    return filtradas
+
+# --------------------------
+# FETCH DE FICHA PARA COMPLETAR DATOS
+# --------------------------
+def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int = 3):
+    """
+    Devuelve dict con {titulo, precio_actual, precio_original, img, capacidad, memoria}
+    usando la página de ficha.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = session.get(url, headers=HEADERS, timeout=30)
+            if r.status_code in (429, 503):
+                time.sleep(2.5 * attempt)
+                continue
+            if r.status_code != 200:
+                time.sleep(1.0 * attempt)
+                continue
+
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            # Título: h1 o meta og:title
+            titulo = ""
+            h1 = soup.find("h1")
+            if h1:
+                titulo = normalize_spaces(h1.get_text())
+            if not titulo:
+                og = soup.find("meta", property="og:title")
+                if og and og.get("content"):
+                    titulo = normalize_spaces(og["content"])
+
+            # Imagen: og:image
+            img = ""
+            ogi = soup.find("meta", property="og:image")
+            if ogi and ogi.get("content"):
+                img = ogi["content"].strip()
+
+            # Precios: buscamos primero en elementos comunes
+            precio_actual = 0
+            precio_original = 0
+
+            # 1) meta product:price:amount (si existe)
+            mp = soup.find("meta", property="product:price:amount")
+            if mp and mp.get("content"):
+                precio_actual = parse_eur_int(mp["content"])
+
+            # 2) buscar tokens con €
+            if precio_actual == 0:
+                # prioriza zonas con "price"
+                candidates = soup.find_all(["span", "div"], class_=re.compile(r"price|precio", re.I))
+                for c in candidates:
+                    t = normalize_spaces(c.get_text())
+                    if "€" in t:
+                        p = parse_eur_int(t)
+                        if p > 0:
+                            precio_actual = p
+                            break
+
+            # Original (tachado) si lo hay
+            candidates2 = soup.find_all(["s", "del", "span", "div"], class_=re.compile(r"old|before|tachad|price", re.I))
+            for c in candidates2:
+                t = normalize_spaces(c.get_text())
+                if "€" in t:
+                    p = parse_eur_int(t)
+                    if p > 0 and (precio_original == 0 or p > precio_original):
+                        precio_original = p
+
+            if precio_original == 0:
+                precio_original = precio_actual
+
+            # RAM/capacidad desde título
+            nombre, cap, ram = extraer_nombre_memoria_capacidad(titulo or "")
+            es_iphone = "iphone" in (nombre or "").lower()
+
+            if es_iphone and not ram:
+                ram = ram_por_modelo_iphone(nombre) or ""
+
+            # Si falta algo, buscar en specs
+            if not cap or (not ram and not es_iphone):
+                cap2, ram2 = extraer_specs_ram_cap(soup)
+                cap = cap or cap2
+                if not ram:
+                    ram = ram2
+
+            # Validación mínima
+            return {
+                "titulo": titulo,
+                "nombre": nombre,
+                "capacidad": cap,
+                "memoria": ram,
+                "es_iphone": es_iphone,
+                "precio_actual": precio_actual,
+                "precio_original": precio_original,
+                "img": img
+            }
+        except Exception:
+            time.sleep(1.0 * attempt)
+            continue
+
+    return None
+
+# --------------------------
+# EXTRACCIÓN REMOTA COMPLETA
+# --------------------------
+def obtener_datos_remotos():
+    hoy = datetime.now().strftime("%d/%m/%Y")
+
+    print("================================================================================", flush=True)
+    print("🤖 SCRAPER PHONE HOUSE - VERSIÓN COMPLETA (v2)", flush=True)
+    print("================================================================================", flush=True)
+    print(f"🔗 URL: {mask_url(START_URL)}", flush=True)
+    print("🔄 Scroll AJAX: ACTIVADO", flush=True)
+    print(f"🎯 Objetivo: {OBJETIVO} productos", flush=True)
+    print("================================================================================\n", flush=True)
+
+    print("--- FASE 1: ESCANEANDO PHONE HOUSE ---", flush=True)
+    print(f"URL: {mask_url(START_URL)}", flush=True)
+
+    html = obtener_html_con_scroll(START_URL)
+    if not html:
+        print("⚠️  Selenium falló; usando requests (puede ver menos productos).", flush=True)
+        r = requests.get(START_URL, headers=HEADERS, timeout=30)
+        print(f"URL final (requests): {mask_url(r.url)}", flush=True)
+        html = r.text
+    else:
+        print("✅ HTML obtenido con Selenium/scroll", flush=True)
+
+    print("\n🔍 Descubriendo URLs de fichas de móvil...", flush=True)
+    urls = descubrir_urls_producto(html, START_URL)
+    print(f"   🔗 URLs únicas detectadas (/movil/.../*.html) en HTML: {len(urls)}", flush=True)
+
+    # Orden estable para reproducibilidad
+    urls_ordenadas = sorted(urls)
+
+    session = requests.Session()
+    productos = []
+    razones_skip = {"sin_precio": 0, "sin_cap": 0, "sin_ram": 0, "sin_titulo": 0, "fetch_fail": 0}
+
+    for idx, url in enumerate(urls_ordenadas, 1):
+        if len(productos) >= OBJETIVO:
+            break
+
+        ficha = fetch_ficha_producto(url, session=session, max_retries=3)
+        if not ficha:
+            razones_skip["fetch_fail"] += 1
+            continue
+
+        titulo = ficha.get("titulo") or ""
+        if not titulo:
+            razones_skip["sin_titulo"] += 1
+            continue
+
+        nombre = ficha.get("nombre") or ""
+        cap = ficha.get("capacidad") or ""
+        ram = ficha.get("memoria") or ""
+        es_iphone = bool(ficha.get("es_iphone"))
+
+        if not cap:
+            razones_skip["sin_cap"] += 1
+            continue
+        if (not es_iphone) and (not ram):
+            razones_skip["sin_ram"] += 1
+            continue
+        if es_iphone and (not ram):
+            razones_skip["sin_ram"] += 1
+            continue
+
+        precio_actual = int(ficha.get("precio_actual") or 0)
+        precio_original = int(ficha.get("precio_original") or 0)
+        if precio_actual <= 0:
+            razones_skip["sin_precio"] += 1
+            continue
+        if precio_original <= 0:
+            precio_original = precio_actual
+
+        img = ficha.get("img") or ""
+        version = "IOS" if es_iphone else "Global"
+
+        key = (nombre.lower(), cap.upper(), ram.upper())
+        if any(p["dedupe_key"] == key for p in productos):
+            summary_duplicados.append(f"{nombre} {cap} {ram}".strip())
+            continue
+
+        productos.append({
+            "nombre": nombre,
+            "memoria": ram,
+            "capacidad": cap,
+            "precio_actual": precio_actual,
+            "precio_original": precio_original,
+            "img": img,
+            "url_imp": url,
+            "enviado_desde": ENVIADO_DESDE,
+            "enviado_desde_tg": ENVIADO_DESDE_TG,
+            "fecha": hoy,
+            "en_stock": True,
+            "dedupe_key": key,
+            "version": version,
+            "fuente": FUENTE,
+            "codigo_descuento": CODIGO_DESCUENTO,
+        })
+
+        # Log de muestra (primeros 10)
+        if len(productos) <= 10:
+            print(f"   [{len(productos)}] {nombre[:28]:28} | {precio_actual:4d}€ | {cap} | {ram}", flush=True)
+
+        # Pequeño delay para no castigar PhoneHouse
+        time.sleep(0.15)
+
+    print("\n📊 RESUMEN EXTRACCIÓN:", flush=True)
+    print(f"   Productos únicos válidos: {len(productos)}", flush=True)
+    print(f"   Variantes/duplicados ignorados: {len(summary_duplicados)}", flush=True)
+    print(f"   Objetivo: {OBJETIVO}", flush=True)
+    if len(productos) < OBJETIVO:
+        print(f"   ⚠️  Faltan {OBJETIVO - len(productos)}", flush=True)
+        print(f"   Motivos descarte: {razones_skip}", flush=True)
+
+    return productos
+
+# --------------------------
+# CATEGORÍAS WC
 # --------------------------
 def obtener_todas_las_categorias():
     categorias = []
@@ -287,261 +631,13 @@ def actualizar_imagen_categoria(cache_categorias, cat_id, img_src):
         return False
 
 # --------------------------
-# EXTRACCIÓN REMOTA (CON SCROLL)
-# --------------------------
-def obtener_html_con_scroll(start_url: str) -> str | None:
-    """
-    Intenta cargar la página con Selenium y hacer scroll hasta el final.
-    Devuelve HTML si funciona; si no, None.
-    """
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.common.exceptions import TimeoutException
-    except Exception:
-        return None
-
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1400,900")
-
-    driver = webdriver.Chrome(options=chrome_options)
-    try:
-        driver.set_page_load_timeout(40)
-        driver.get(start_url)
-        try:
-            print(f"URL final (Selenium): {mask_url(driver.current_url)}", flush=True)
-        except Exception:
-            pass
-
-        time.sleep(2)
-
-        last_height = driver.execute_script("return document.body.scrollHeight")
-        stable_rounds = 0
-        max_rounds = 40  # evita bucles infinitos
-
-        print("🧭 Haciendo scroll hasta el final...", flush=True)
-
-        for _ in range(max_rounds):
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1.5)
-            new_height = driver.execute_script("return document.body.scrollHeight")
-
-            if new_height == last_height:
-                stable_rounds += 1
-                # Algunos listados necesitan varios "ticks" para completar AJAX
-                if stable_rounds >= 3:
-                    break
-            else:
-                stable_rounds = 0
-                last_height = new_height
-
-        html = driver.page_source
-        return html
-    except TimeoutException:
-        # Si PhoneHouse tarda demasiado o bloquea, caemos a requests
-        return None
-    except Exception:
-        return None
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-
-def obtener_datos_remotos():
-    total_productos = []
-    hoy = datetime.now().strftime("%d/%m/%Y")
-
-    print("================================================================================", flush=True)
-    print("🤖 SCRAPER PHONE HOUSE - VERSIÓN COMPLETA", flush=True)
-    print("================================================================================", flush=True)
-    print(f"🔗 URL: {mask_url(START_URL)}", flush=True)
-    print("🔄 Scroll AJAX: ACTIVADO", flush=True)
-    print("🎯 Objetivo: 72 productos", flush=True)
-    print("================================================================================", flush=True)
-
-    print("\n--- FASE 1: ESCANEANDO PHONE HOUSE ---", flush=True)
-    print(f"URL: {mask_url(START_URL)}", flush=True)
-
-    # 1) Intentar Selenium + scroll
-    html = obtener_html_con_scroll(START_URL)
-    if html:
-        soup = BeautifulSoup(html, "html.parser")
-        print("✅ HTML obtenido con Selenium/scroll", flush=True)
-    else:
-        print("⚠️  Selenium no disponible o falló; usando requests (puede ver menos productos).", flush=True)
-        r = requests.get(START_URL, headers=HEADERS, timeout=30)
-        try:
-            print(f"URL final (requests): {mask_url(r.url)}", flush=True)
-        except Exception:
-            pass
-        soup = BeautifulSoup(r.text, "html.parser")
-
-    # 2) Buscar enlaces de fichas de móviles (más estricto para evitar menús)
-    print("\n🔍 Buscando TODOS los enlaces a productos...", flush=True)
-
-    product_path_re = re.compile(r"^/movil/[^/]+/[^/?#]+\.html$", re.I)
-
-    all_a = soup.find_all("a", href=True)
-    raw_candidates = 0
-    unique_links = {}
-
-    for a in all_a:
-        href = (a.get("href") or "").strip()
-        if not href:
-            continue
-
-        # Normaliza href -> URL absoluta
-        full_url = abs_url(START_URL, href)
-        path = urllib.parse.urlsplit(full_url).path
-
-        if not product_path_re.match(path):
-            continue
-
-        raw_candidates += 1
-
-        # Deduplicación por URL sin query
-        base_url = full_url.split("?")[0]
-        unique_links[base_url] = a
-
-    print(f"   🔗 Total candidatos ficha (/movil/.../*.html): {raw_candidates}", flush=True)
-    print(f"   🔗 Enlaces únicos: {len(unique_links)}", flush=True)
-
-    # 3) Procesar enlaces únicos
-    productos_procesados = 0
-    productos_ignorados_color = 0
-
-    for idx, (url, link) in enumerate(unique_links.items(), 1):
-        if productos_procesados >= 72:
-            break
-        try:
-            # Extraer título
-            nombre_element = link.find(["h2", "h3", "div", "span"], class_=re.compile(r"name|title|product", re.I))
-            if nombre_element:
-                titulo = normalize_spaces(nombre_element.get_text())
-            else:
-                titulo = normalize_spaces(link.get_text())
-
-            if not titulo or len(titulo) < 5:
-                continue
-
-            titulo_limpio = titulo.replace("¡OFERTA!", "").replace("OFERTA", "").strip()
-
-            nombre, capacidad, memoria = extraer_nombre_memoria_capacidad(titulo_limpio)
-
-            # Para iPhone, derivar RAM si no aparece
-            if "iphone" in (nombre or "").lower() and not memoria:
-                memoria = ram_por_modelo_iphone(nombre) or ""
-
-            # Reglas: necesitamos capacidad y (RAM o iPhone derivada)
-            if not nombre or not capacidad:
-                continue
-            if ("iphone" not in nombre.lower()) and (not memoria):
-                continue
-            if ("iphone" in nombre.lower()) and (not memoria):
-                continue
-
-            # Buscar precios cerca del enlace
-            precio_actual = 0
-            precio_original = 0
-            parent = link.parent
-            for _ in range(4):
-                if not parent:
-                    break
-                precio_elements = parent.find_all(["span", "div"], class_=re.compile(r"price|precio", re.I))
-                for precio_el in precio_elements:
-                    texto = normalize_spaces(precio_el.get_text())
-                    if "€" in texto:
-                        p = parse_eur_int(texto)
-                        if p > 0:
-                            if "tachado" in str(precio_el.get("class", "")) or precio_el.name in ["s", "del"]:
-                                precio_original = p
-                            else:
-                                precio_actual = p
-                if precio_actual > 0:
-                    break
-                parent = getattr(parent, "parent", None)
-
-            # No inventamos precio: si no hay, descartamos (puede ajustarse a fetch de ficha si lo necesitas)
-            if precio_actual == 0:
-                continue
-            if precio_original == 0:
-                precio_original = precio_actual
-
-            # Imagen
-            img_url = ""
-            img_element = link.find("img")
-            if img_element:
-                for attr in ["src", "data-src", "data-original", "data-lazy"]:
-                    candidate = img_element.get(attr)
-                    if candidate and "catalogo-blanco" not in candidate.lower():
-                        img_url = abs_url(START_URL, candidate)
-                        break
-
-            version = "IOS" if "iphone" in nombre.lower() else "Global"
-
-            key = (nombre.lower(), capacidad.upper(), (memoria or "").upper())
-
-            # Dedupe por color/variantes: mismo (nombre, capacidad, RAM) se considera duplicado
-            if any(p["dedupe_key"] == key for p in total_productos):
-                summary_duplicados.append(f"{nombre} {capacidad} {memoria}".strip())
-                productos_ignorados_color += 1
-                continue
-
-            total_productos.append({
-                "nombre": nombre,
-                "memoria": memoria,
-                "capacidad": capacidad,
-                "precio_actual": precio_actual,
-                "precio_original": precio_original,
-                "img": img_url,
-                "url_imp": url,
-                "enviado_desde": ENVIADO_DESDE,
-                "enviado_desde_tg": ENVIADO_DESDE_TG,
-                "fecha": hoy,
-                "en_stock": True,
-                "pagina": 1,
-                "dedupe_key": key,
-                "version": version,
-                "fuente": FUENTE,
-                "codigo_descuento": CODIGO_DESCUENTO
-            })
-
-            productos_procesados += 1
-            if productos_procesados <= 10:
-                print(f"   [{productos_procesados}] {nombre[:30]:30} | {precio_actual:4d}€ | {capacidad} | {memoria}", flush=True)
-
-        except Exception:
-            continue
-
-    total_encontrados = len(total_productos) + len(summary_duplicados)
-
-    print(f"\n📊 RESUMEN EXTRACCIÓN:", flush=True)
-    print(f"   Productos únicos encontrados: {len(total_productos)}", flush=True)
-    print(f"   Variantes de color ignoradas: {len(summary_duplicados)}", flush=True)
-    print(f"   Total productos detectados: {total_encontrados}", flush=True)
-    print(f"   Objetivo: 72 productos", flush=True)
-
-    if total_encontrados < 72:
-        print(f"   ⚠️  Faltan {72 - total_encontrados} productos por encontrar", flush=True)
-        print(f"   💡 Si Selenium funciona y aún faltan, es probable que:", flush=True)
-        print(f"      - Parte del catálogo se cargue por otra navegación/paginación", flush=True)
-        print(f"      - O el listado use enlaces no presentes en el DOM (datos JSON)", flush=True)
-
-    return total_productos
-
-# --------------------------
-# SINCRONIZACIÓN WP
+# SINCRONIZACIÓN WC
 # --------------------------
 def sincronizar(remotos):
     print("\n--- FASE 2: SINCRONIZANDO ---", flush=True)
     cache_categorias = obtener_todas_las_categorias()
 
-    # Cargar productos locales importados de PhoneHouse
+    # Cargar productos importados (por meta importado_de)
     locales = []
     page = 1
     while True:
@@ -557,57 +653,41 @@ def sincronizar(remotos):
         page += 1
 
     print(f"📦 Productos Phone House existentes en la web: {len(locales)}", flush=True)
+    print(f"📦 Productos remotos a procesar: {len(remotos)}", flush=True)
 
     for r in remotos:
         try:
-            # Preparar URLs
-            url_importada_sin_afiliado = (r["url_imp"] or "").strip()
-            url_con_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_PHONE_HOUSE}" if ID_AFILIADO_PHONE_HOUSE else url_importada_sin_afiliado
+            url_base = (r["url_imp"] or "").strip().split("?")[0]
+            url_con_afiliado = f"{url_base}{AFF_RAW}" if AFF_RAW else url_base
             url_oferta = acortar_url(url_con_afiliado)
 
-            # Logs (enmascarados)
-            print("-" * 60, flush=True)
-            print(f"Detectado {r['nombre']}", flush=True)
-            print(f"1) Nombre: {r['nombre']}", flush=True)
-            print(f"2) Memoria: {r['memoria']}", flush=True)
-            print(f"3) Capacidad: {r['capacidad']}", flush=True)
-            print(f"4) Versión: {r.get('version','Global')}", flush=True)
-            print(f"5) Fuente: {FUENTE}", flush=True)
-            print(f"6) Precio actual: {r['precio_actual']}€", flush=True)
-            print(f"7) Precio original: {r['precio_original']}€", flush=True)
-            print(f"8) Código de descuento: {CODIGO_DESCUENTO}", flush=True)
-            print(f"9) URL Imagen: {(r['img'][:80] + '...') if r.get('img') else '(vacía)'}", flush=True)
-            print(f"11) Enlace Importado: {mask_url(url_importada_sin_afiliado)}", flush=True)
-            print(f"14) URL con afiliado: {mask_url(url_con_afiliado)}", flush=True)
-            print(f"15) URL acortada con afiliado: {mask_url(url_oferta)}", flush=True)
-            print("-" * 60, flush=True)
-
-            # Match por meta enlace_de_compra_importado
-            url_r = url_importada_sin_afiliado.rstrip("/")
+            # match por enlace_de_compra_importado
             match = next(
                 (
                     l for l in locales
-                    if l["meta"].get("enlace_de_compra_importado", "").strip().rstrip("/") == url_r
+                    if l["meta"].get("enlace_de_compra_importado", "").strip().split("?")[0].rstrip("/") == url_base.rstrip("/")
                 ),
                 None
             )
 
-            # Categorías
             id_padre, id_hijo = resolver_jerarquia(r["nombre"], cache_categorias)
 
-            # Imagen de subcategoría (si no existe, se intenta fijar con la del primer producto)
             img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
-            if not img_subcat and r.get("img"):
-                actualizado = actualizar_imagen_categoria(cache_categorias, id_hijo, r["img"])
-                img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo) if actualizado else ""
+            if (not img_subcat) and r.get("img"):
+                actualizar_imagen_categoria(cache_categorias, id_hijo, r["img"])
+                img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
             img_final_producto = img_subcat or r.get("img") or ""
 
             if match:
-                # Actualizar precio si cambia
-                p_acf = int(float(match["meta"].get("precio_actual", 0) or 0))
+                # comparar precio_actual
+                try:
+                    p_acf = int(float(match["meta"].get("precio_actual", 0) or 0))
+                except Exception:
+                    p_acf = 0
+
                 if r["precio_actual"] != p_acf:
                     cambio_str = f"{p_acf}€ -> {r['precio_actual']}€"
-                    print(f"   🔄 ACTUALIZANDO: {cambio_str}", flush=True)
+                    print(f"🔄 ACTUALIZANDO: {r['nombre']} ({cambio_str})", flush=True)
                     wcapi.put(
                         f"products/{match['id']}",
                         {
@@ -627,10 +707,9 @@ def sincronizar(remotos):
                     summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambio": cambio_str})
                 else:
                     summary_ignorados.append({"nombre": r["nombre"], "id": match["id"]})
-                    print("   ⏭️ IGNORADO: Ya está actualizado.", flush=True)
 
             else:
-                print("   🆕 CREANDO PRODUCTO NUEVO...", flush=True)
+                print(f"🆕 CREANDO: {r['nombre']}", flush=True)
                 data = {
                     "name": r["nombre"],
                     "type": "simple",
@@ -651,8 +730,8 @@ def sincronizar(remotos):
                         {"key": "codigo_de_descuento", "value": CODIGO_DESCUENTO},
                         {"key": "enviado_desde", "value": ENVIADO_DESDE},
                         {"key": "enviado_desde_tg", "value": ENVIADO_DESDE_TG},
-                        {"key": "enlace_de_compra_importado", "value": url_importada_sin_afiliado},
-                        {"key": "url_importada_sin_afiliado", "value": url_importada_sin_afiliado},
+                        {"key": "enlace_de_compra_importado", "value": url_base},
+                        {"key": "url_importada_sin_afiliado", "value": url_base},
                         {"key": "url_sin_acortar_con_mi_afiliado", "value": url_con_afiliado},
                         {"key": "url_oferta", "value": url_oferta},
                         {"key": "imagen_producto", "value": r.get("img","")},
@@ -667,85 +746,58 @@ def sincronizar(remotos):
                 while intentos < max_intentos and not creado:
                     intentos += 1
                     try:
-                        print(f"    ⏳ Intentando crear {r['nombre']} (Intento {intentos}/{max_intentos})...", flush=True)
                         res = wcapi.post("products", data)
-
                         if res.status_code in (200, 201):
                             creado = True
-                            prod_res = res.json()
-                            summary_creados.append({"nombre": r["nombre"], "id": prod_res.get("id")})
+                            prod = res.json()
+                            summary_creados.append({"nombre": r["nombre"], "id": prod.get("id")})
+                            print(f"✅ CREADO -> ID: {prod.get('id')}", flush=True)
 
                             # Acortar permalink del post
-                            url_short = acortar_url(prod_res.get("permalink", ""))
-                            if url_short:
-                                wcapi.put(
-                                    f"products/{prod_res.get('id')}",
-                                    {"meta_data": [{"key": "url_post_acortada", "value": url_short}]},
-                                )
-
-                            print(f"   ✅ CREADO -> ID: {prod_res.get('id')}", flush=True)
+                            try:
+                                url_short = acortar_url(prod.get("permalink", ""))
+                                if url_short:
+                                    wcapi.put(
+                                        f"products/{prod.get('id')}",
+                                        {"meta_data": [{"key": "url_post_acortada", "value": url_short}]},
+                                    )
+                            except Exception:
+                                pass
                         else:
                             body_preview = (res.text or "").replace("\n", " ")[:250]
-                            print(f"   ⚠️  Error {res.status_code} al crear {r['nombre']}: {body_preview}", flush=True)
-
+                            print(f"⚠️  Woo error {res.status_code}: {body_preview}", flush=True)
                     except Exception as e:
-                        print(f"   ⚠️  Excepción al crear {r['nombre']}: {e}", flush=True)
+                        print(f"⚠️  Excepción Woo: {e}", flush=True)
 
                     if (not creado) and (intentos < max_intentos):
-                        print("    ⏳ Esperando 15s antes del siguiente reintento...", flush=True)
                         time.sleep(15)
 
                 if not creado:
-                    print(f"   ❌ NO SE PUDO CREAR tras {max_intentos} intentos -> {r['nombre']}", flush=True)
                     summary_fallidos.append(r.get("nombre", "desconocido"))
+                    print(f"❌ NO SE PUDO CREAR: {r.get('nombre','?')}", flush=True)
 
         except Exception as e:
-            print(f"   ❌ ERROR en {r.get('nombre')}: {e}", flush=True)
             summary_fallidos.append(r.get("nombre", "desconocido"))
+            print(f"❌ ERROR en {r.get('nombre','?')}: {e}", flush=True)
 
-    # Resumen ejecución
-    total_procesados = (
-        len(summary_creados) +
-        len(summary_eliminados) +
-        len(summary_actualizados) +
-        len(summary_ignorados) +
-        len(summary_sin_stock_nuevos) +
-        len(summary_fallidos) +
+    # Resumen
+    total = (
+        len(summary_creados) + len(summary_eliminados) + len(summary_actualizados) +
+        len(summary_ignorados) + len(summary_sin_stock_nuevos) + len(summary_fallidos) +
         len(summary_duplicados)
     )
 
-    print("\n" + "=" * 60, flush=True)
+    print("\n============================================================", flush=True)
     print(f"📋 RESUMEN DE EJECUCIÓN ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
-    print("=" * 60, flush=True)
-    print(f"📊 TOTAL PRODUCTOS PROCESADOS: {total_procesados} (Objetivo: 72)", flush=True)
-
-    print("\n" + "=" * 60, flush=True)
-    print(f"a) ARTÍCULOS CREADOS ({len(summary_creados)}):", flush=True)
-    for item in summary_creados:
-        print(f"- {item['nombre']} (ID: {item['id']})", flush=True)
-
-    print("-" * 40, flush=True)
-    print(f"c) ARTÍCULOS ACTUALIZADOS ({len(summary_actualizados)}):", flush=True)
-    for item in summary_actualizados:
-        print(f"- {item['nombre']} (ID: {item['id']}): {item['cambio']}", flush=True)
-
-    print("-" * 40, flush=True)
-    print(f"d) ARTÍCULOS IGNORADOS ({len(summary_ignorados)}):", flush=True)
-    for item in summary_ignorados:
-        print(f"- {item['nombre']} (ID: {item['id']})", flush=True)
-
-    print("-" * 40, flush=True)
-    print(f"f) VARIANTES DE COLOR IGNORADAS ({len(summary_duplicados)}):", flush=True)
-    if summary_duplicados:
-        for i, item in enumerate(summary_duplicados[:10], 1):
-            print(f"   {i:2d}. {item}", flush=True)
-
-    print("-" * 40, flush=True)
-    print(f"g) FALLIDOS ({len(summary_fallidos)}):", flush=True)
-    for item in summary_fallidos:
-        print(f"- {item}", flush=True)
-
-    print("=" * 60, flush=True)
+    print("============================================================", flush=True)
+    print(f"📊 TOTAL PRODUCTOS PROCESADOS: {total} (Objetivo: {OBJETIVO})", flush=True)
+    print("------------------------------------------------------------", flush=True)
+    print(f"a) CREADOS: {len(summary_creados)}", flush=True)
+    print(f"c) ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
+    print(f"d) IGNORADOS: {len(summary_ignorados)}", flush=True)
+    print(f"f) DUPLICADOS: {len(summary_duplicados)}", flush=True)
+    print(f"g) FALLIDOS: {len(summary_fallidos)}", flush=True)
+    print("============================================================", flush=True)
 
 if __name__ == "__main__":
     remotos = obtener_datos_remotos()
