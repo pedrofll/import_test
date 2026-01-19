@@ -418,7 +418,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.item-listado-final"))
         )
 
-        print("🧭 Haciendo scroll (sin hacer click) hasta que aparezca 'Ver más' y/o deje de cargar...", flush=True)
+        print("🧭 Haciendo scroll (SIN CLICK) para forzar carga de más productos...", flush=True)
 
         def count_items():
             try:
@@ -429,26 +429,72 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             except Exception:
                 return 0
 
+        def find_scroll_container():
+            """
+            PhoneHouse a veces renderiza el listado dentro de un contenedor que hace scroll,
+            no necesariamente el window. Probamos varios candidatos.
+            """
+            candidates = [
+                "#productsList",
+                "div[id^='productsList']",
+                "#productsList0",
+                "#productsList1",
+                ".productsList",
+                ".listado",
+                ".listado-items",
+                "main",
+                "body",
+            ]
+            for sel in candidates:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, sel)
+                    # Comprobar si es scrollable
+                    sh, ch = driver.execute_script(
+                        "return [arguments[0].scrollHeight, arguments[0].clientHeight];", el
+                    )
+                    if sh and ch and sh > ch + 50:
+                        return el
+                except Exception:
+                    continue
+            return None
+
+        scroll_el = find_scroll_container()
+        if scroll_el:
+            print("   🧭 Usando contenedor scrollable del listado (no window).", flush=True)
+        else:
+            print("   🧭 Usando scroll del window (fallback).", flush=True)
+
         prev = -1
         stable = 0
-        seen_more = False
 
-        for _ in range(160):
-            driver.execute_script("window.scrollBy(0, 1200);")
-            time.sleep(0.8)
-
-            # comprobar si aparece el botón (NO se pulsa)
+        # Estrategia: scroll al fondo -> esperar -> comprobar si aumentan items. Repetir.
+        for i in range(60):
             try:
-                btns = driver.find_elements(By.CSS_SELECTOR, "#seemorediv a.button-secondary-small, #seemore a.button-secondary-small, a.button-secondary-small[href*='seemore']")
-                for b in btns:
-                    try:
-                        if b.is_displayed():
-                            seen_more = True
-                            break
-                    except Exception:
-                        continue
+                if scroll_el:
+                    # mover scroll del contenedor al final
+                    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scroll_el)
+                else:
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             except Exception:
                 pass
+
+            # Espera más larga para permitir AJAX
+            time.sleep(2.5)
+
+            # "wiggle" pequeño para disparar observers
+            try:
+                if scroll_el:
+                    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollTop - 400;", scroll_el)
+                    time.sleep(0.4)
+                    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scroll_el)
+                else:
+                    driver.execute_script("window.scrollBy(0, -400);")
+                    time.sleep(0.4)
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            except Exception:
+                pass
+
+            time.sleep(1.5)
 
             cur = count_items()
             if cur != prev:
@@ -457,17 +503,18 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
                 stable = 0
             else:
                 stable += 1
+                print(f"   … sin cambios (items={cur}) stable={stable}", flush=True)
 
-            # condición de salida: no crece durante varios ciclos y ya vimos el botón
-            if stable >= 8 and seen_more:
-                print("✅ Detectado botón 'Ver más'. No se hace click (según indicación).", flush=True)
-                break
-            if stable >= 18:
+            # si no hay crecimiento durante varios ciclos, paramos
+            if stable >= 8:
                 break
 
-        # scroll final al fondo por seguridad
+        # Al final, asegurarnos de estar al fondo (solo scroll)
         try:
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            if scroll_el:
+                driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scroll_el)
+            else:
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(1.0)
         except Exception:
             pass
