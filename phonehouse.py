@@ -35,9 +35,9 @@ START_URL = os.environ.get("SOURCE_URL_PHONEHOUSE", "")
 # 2. Comprobar si existe ANTES de seguir.
 #    Si no existe, paramos el script aquí mismo para evitar errores después.
 if not START_URL:
-    print("❌ ERROR FATAL: No se ha recibido la variable 'SOURCE_URL_PHONEHOUSE'.")
-    print("   -> Revisa tu archivo .yml en GitHub Actions.")
-    print("   -> Asegúrate de haber añadido en 'env': SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_PHONEHOUSE }}")
+    print("❌ ERROR FATAL: No se ha recibido la variable 'SOURCE_URL_PHONEHOUSE'.", flush=True)
+    print("   -> Revisa tu archivo .yml en GitHub Actions.", flush=True)
+    print("   -> Asegúrate de haber añadido en 'env': SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_PHONEHOUSE }}", flush=True)
     sys.exit(1)
 
 # 3. Resto de constantes
@@ -97,14 +97,13 @@ def registrar_log(mensaje, nivel="INFO", mostrar=True):
     # Mostrar en consola si está activado
     if mostrar:
         if nivel == "ERROR":
-            print(f"\033[91m{log_entry}\033[0m")
+            print(f"\033[91m{log_entry}\033[0m", flush=True)
         elif nivel == "WARNING":
-            print(f"\033[93m{log_entry}\033[0m")
+            print(f"\033[93m{log_entry}\033[0m", flush=True)
         elif nivel == "SUCCESS":
-            print(f"\033[92m{log_entry}\033[0m")
+            print(f"\033[92m{log_entry}\033[0m", flush=True)
         else:
-            print(log_entry)
-
+            print(log_entry), flush=True)
 # --- FUNCIÓN REDIMENSIÓN IMÁGENES ---
 def descargar_y_redimensionar_imagen(url_imagen, nombre_producto):
     """Descarga y redimensiona una imagen a 600x600 píxeles"""
@@ -174,7 +173,18 @@ def obtener_html_con_scroll_ajax():
         chrome_options.add_argument(f"user-agent={HEADERS['User-Agent']}")
         
         driver = webdriver.Chrome(options=chrome_options)
-        driver.get(START_URL)
+        try:
+            driver.set_page_load_timeout(40)
+        except Exception:
+            pass
+        try:
+            driver.get(START_URL)
+        except TimeoutException:
+            registrar_log("Timeout cargando URL en Selenium (page_load_timeout)", "WARNING")
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
         try:
             registrar_log(f"URL final (Selenium) tras redirecciones: {driver.current_url}", "INFO")
         except Exception:
@@ -1002,17 +1012,17 @@ def mostrar_resumen_completo():
 # --- EJECUCIÓN PRINCIPAL ---
 def main():
     """Función principal del scraper"""
-    print("\n" + "=" * 80)
-    print("🤖 SCRAPER PHONE HOUSE - VERSIÓN COMPLETA")
-    print("=" * 80)
-    print(f"🔗 URL: {START_URL}")
+    print("\n" + "=" * 80, flush=True)
+    print("🤖 SCRAPER PHONE HOUSE - VERSIÓN COMPLETA", flush=True)
+    print("=" * 80, flush=True)
+    print(f"🔗 URL: {START_URL}", flush=True)
     print(f"📏 Redimensión imágenes: {'SÍ' if REDIMENSIONAR_IMAGENES else 'NO'} ({TAMANO_IMAGEN[0]}x{TAMANO_IMAGEN[1]}px)")
-    print(f"🔄 Scroll AJAX: ACTIVADO")
-    print(f"📱 Memoria iPhones: ACTIVADA")
-    print(f"📝 Sistema logs: ACTIVADO")
-    print(f"🎯 Objetivo: 72 productos")
+    print(f"🔄 Scroll AJAX: ACTIVADO", flush=True)
+    print(f"📱 Memoria iPhones: ACTIVADA", flush=True)
+    print(f"📝 Sistema logs: ACTIVADO", flush=True)
+    print(f"🎯 Objetivo: 72 productos", flush=True)
     print("=" * 80 + "\n")
-    
+   , flush=True)
     try:
         # 1. Extraer productos
         productos = obtener_datos_remotos()
@@ -1025,15 +1035,15 @@ def main():
         sincronizar_productos(productos)
         
         # 3. Mensaje final
-        print("\n" + "=" * 80)
-        print("🎉 ¡PROCESO COMPLETADO CON ÉXITO!")
-        print("=" * 80)
+        print("\n" + "=" * 80, flush=True)
+        print("🎉 ¡PROCESO COMPLETADO CON ÉXITO!", flush=True)
+        print("=" * 80, flush=True)
         print(f"📊 Productos procesados: {len(summary_creados) + len(summary_actualizados)}")
-        print(f"📁 Logs guardados en: {archivo_log}")
+        print(f"📁 Logs guardados en: {archivo_log}", flush=True)
         if REDIMENSIONAR_IMAGENES:
-            print(f"🖼️ Imágenes en: {DIRECTORIO_IMAGENES}/")
+            print(f"🖼️ Imágenes en: {DIRECTORIO_IMAGENES}/", flush=True)
         print("=" * 80)
-        
+       , flush=True)
     except KeyboardInterrupt:
         registrar_log("Proceso interrumpido por el usuario", "WARNING")
         mostrar_resumen_completo()
@@ -1050,8 +1060,8 @@ if __name__ == "__main__":
         registrar_log("Dependencias verificadas correctamente", "INFO", False)
     except ImportError as e:
         print(f"\033[91m❌ Error: Falta dependencia: {str(e)}\033[0m")
-        print("Instala las dependencias con:")
-        print("pip install selenium Pillow woocommerce requests beautifulsoup4")
+        print("Instala las dependencias con:", flush=True)
+        print("pip install selenium Pillow woocommerce requests beautifulsoup4", flush=True)
         exit(1)
     
     # Ejecutar scraper
