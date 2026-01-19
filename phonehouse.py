@@ -468,17 +468,18 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
         stable = 0
 
         # Estrategia: scroll al fondo -> esperar -> comprobar si aumentan items. Repetir.
-        for i in range(60):
+        seemore_calls = 0
+
+        for i in range(80):
             try:
                 if scroll_el:
-                    # mover scroll del contenedor al final
                     driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scroll_el)
                 else:
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             except Exception:
                 pass
 
-            # Espera más larga para permitir AJAX
+            # Espera para permitir AJAX
             time.sleep(2.5)
 
             # "wiggle" pequeño para disparar observers
@@ -505,8 +506,31 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
                 stable += 1
                 print(f"   … sin cambios (items={cur}) stable={stable}", flush=True)
 
-            # si no hay crecimiento durante varios ciclos, paramos
-            if stable >= 8:
+            # Si no crece, intentamos cargar más ejecutando seemore() (NO es click; es JS directo)
+            if stable >= 4:
+                try:
+                    can = driver.execute_script("return (typeof seemore === 'function');")
+                except Exception:
+                    can = False
+
+                if can and seemore_calls < 20:
+                    seemore_calls += 1
+                    print(f"   🔁 Ejecutando seemore() vía JS (sin click) #{seemore_calls}...", flush=True)
+                    try:
+                        driver.execute_script("seemore();")
+                    except Exception:
+                        # en algunos casos está bajo window.seemore
+                        try:
+                            driver.execute_script("window.seemore();")
+                        except Exception:
+                            pass
+                    time.sleep(2.5)
+                    # resetear estabilidad para dar margen a crecimiento
+                    stable = 0
+                    continue
+
+            # si no hay crecimiento durante varios ciclos y no podemos seemore(), paramos
+            if stable >= 10:
                 break
 
         # Al final, asegurarnos de estar al fondo (solo scroll)
