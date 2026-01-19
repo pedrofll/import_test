@@ -175,6 +175,10 @@ def obtener_html_con_scroll_ajax():
         
         driver = webdriver.Chrome(options=chrome_options)
         driver.get(START_URL)
+        try:
+            registrar_log(f"URL final (Selenium) tras redirecciones: {driver.current_url}", "INFO")
+        except Exception:
+            pass
         
         # Esperar a que cargue la página inicial
         time.sleep(3)
@@ -353,32 +357,64 @@ def guardar_memoria_iphones():
 
 # --- EXTRACCIÓN DE INFORMACIÓN ---
 def extraer_nombre_memoria_capacidad(titulo):
-    """Extrae nombre, memoria y capacidad del título del producto"""
+    """
+    Extrae nombre, capacidad (almacenamiento) y memoria (RAM) del título.
+
+    Soporta formatos habituales:
+      - "256GB+8GB RAM"
+      - "128GB+4GB"
+      - "8GB/256GB", "8/256GB"
+      - "8+256GB"
+      - "256GB 8GB RAM"
+
+    Devuelve: (nombre, capacidad, memoria). Si no detecta algo, devuelve "" en ese campo.
+    """
     t = normalize_spaces(titulo)
 
-    # Caso: "128GB+4GB"
-    m_combo = re.search(r"(\d+)\s*(TB|GB)\s*\+\s*(\d+)\s*GB", t, flags=re.I)
+    # 1) Formatos combo (CAP+RAM o RAM+CAP) con separadores + o /
+    m_combo = re.search(
+        r"(?P<cap>\d{2,4})\s*(?P<unit>TB|GB)\s*[\+\/]\s*(?P<ram>\d{1,2})\s*GB(?:\s*RAM)?\b"
+        r"|(?P<ram2>\d{1,2})\s*GB(?:\s*RAM)?\s*[\+\/]\s*(?P<cap2>\d{2,4})\s*(?P<unit2>TB|GB)\b",
+        t,
+        flags=re.I
+    )
     if m_combo:
-        capacidad = f"{m_combo.group(1)}{m_combo.group(2).upper()}"
-        memoria = f"{m_combo.group(3)}GB"
+        if m_combo.group("cap") and m_combo.group("ram"):
+            capacidad = f"{m_combo.group('cap')}{m_combo.group('unit').upper()}"
+            memoria = f"{m_combo.group('ram')}GB"
+        else:
+            capacidad = f"{m_combo.group('cap2')}{m_combo.group('unit2').upper()}"
+            memoria = f"{m_combo.group('ram2')}GB"
+
         nombre = t[:m_combo.start()].strip()
         return normalize_spaces(nombre), capacidad, memoria
 
-    # Caso sin combo
-    m_cap = re.search(r"(\d+)\s*(TB|GB)", t, flags=re.I)
-    capacidad = f"{m_cap.group(1)}{m_cap.group(2).upper()}" if m_cap else ""
-
-    m_mem = re.search(r"(\d+)\s*GB\s*RAM", t, flags=re.I)
-    memoria = f"{m_mem.group(1)}GB" if m_mem else ""
-
+    # 2) CAPACIDAD (almacenamiento) - restringimos a tamaños típicos para evitar falsos positivos (p.ej. "50GB" de datos)
+    m_cap = re.search(r"\b(64|128|256|512|1024)\s*GB\b|\b(1|2)\s*TB\b", t, flags=re.I)
+    capacidad = ""
     if m_cap:
-        nombre = t[:m_cap.start()].strip()
-    else:
-        nombre = t
+        if m_cap.group(1):
+            capacidad = f"{m_cap.group(1)}GB"
+        else:
+            capacidad = f"{m_cap.group(2)}TB"
 
-    return normalize_spaces(nombre), capacidad, (memoria or "")
+    # 3) RAM (memoria) con o sin literal "RAM"
+    m_ram = re.search(r"\b(4|6|8|12|16)\s*GB(?:\s*RAM)?\b", t, flags=re.I)
+    memoria = f"{m_ram.group(1)}GB" if m_ram else ""
 
-# --- GESTIÓN DE CATEGORÍAS ---
+    # 4) Nombre: cortar por la primera aparición de capacidad o RAM
+    cut_positions = []
+    if m_cap:
+        cut_positions.append(m_cap.start())
+    if m_ram:
+        cut_positions.append(m_ram.start())
+    cut = min(cut_positions) if cut_positions else len(t)
+
+    nombre = t[:cut].strip()
+    return normalize_spaces(nombre), capacidad, memoria
+
+
+# --- GESTIÓN DE CATEGORÍAS ---# --- GESTIÓN DE CATEGORÍAS ---
 def obtener_todas_las_categorias():
     """Obtiene todas las categorías de WooCommerce"""
     categorias = []
@@ -479,6 +515,11 @@ def obtener_datos_remotos():
             session = requests.Session()
             session.headers.update(HEADERS)
             r = session.get(START_URL, timeout=30)
+            try:
+                u = urlparse(r.url)
+                registrar_log(f"URL final (requests) tras redirecciones: {u.scheme}://{u.netloc}{u.path}", "INFO")
+            except Exception:
+                pass
             if r.status_code != 200:
                 registrar_log(f"Error al cargar la página: HTTP {r.status_code}", "ERROR")
                 return []
@@ -487,56 +528,40 @@ def obtener_datos_remotos():
             soup = BeautifulSoup(html, "html.parser")
             registrar_log("HTML obtenido con Selenium/scroll", "SUCCESS")
 
-        # 2) Buscar productos usando múltiples estrategias (tolerante a cambios)
+        # 2) Descubrir SOLO fichas de producto (evita menús/categorías/servicios)
+        #    Aceptamos únicamente URLs con patrón:
+        #      /movil/<marca>/<slug>.html
+        PRODUCT_PATH_RE = re.compile(r"^/movil/[^/]+/[^/?#]+\.html$", re.I)
+
         all_links = []
+        seen_urls = set()
 
-        patrones_url = [
-            r'/movil-', r'/telefono-', r'/smartphone-', r'/producto/', r'/p/',
-            r'iphone', r'samsung', r'xiaomi', r'huawei', r'motorola'
-        ]
+        for a in soup.find_all("a", href=True):
+            href = (a.get("href") or "").strip()
+            if not href:
+                continue
 
-        for patron in patrones_url:
+            url_completa = abs_url(START_URL, href)
+
             try:
-                links = soup.find_all('a', href=re.compile(patron, re.IGNORECASE))
-                for link in links:
-                    href = link.get('href', '')
-                    if not href:
-                        continue
-                    if link in all_links:
-                        continue
-                    if any(x in href.lower() for x in ['accesorio', 'funda', 'cargador', 'protector']):
-                        continue
-                    all_links.append(link)
+                path = urlparse(url_completa).path
             except Exception:
-                pass
+                continue
 
-        selectores_contenedores = [
-            '[class*="product"]',
-            '[class*="item"]',
-            '.product-item',
-            '.product-card',
-            '.product-box',
-            '.product-grid-item',
-        ]
+            if not PRODUCT_PATH_RE.match(path):
+                continue
 
-        for selector in selectores_contenedores:
-            try:
-                contenedores = soup.select(selector)
-                for contenedor in contenedores:
-                    links = contenedor.find_all('a', href=True)
-                    for link in links:
-                        href = link.get('href', '')
-                        if not href:
-                            continue
-                        # heurística: móviles suelen contener 'movil'
-                        if 'movil' in href.lower() and link not in all_links:
-                            if any(x in href.lower() for x in ['accesorio', 'funda', 'cargador', 'protector']):
-                                continue
-                            all_links.append(link)
-            except Exception:
-                pass
+            low = url_completa.lower()
+            if any(x in low for x in ["accesorio", "funda", "cargador", "protector", "kit", "reacondicionado", "seguro", "financiacion"]):
+                continue
 
-        registrar_log(f"Enlaces candidatos encontrados: {len(all_links)}", "INFO")
+            if url_completa in seen_urls:
+                continue
+
+            seen_urls.add(url_completa)
+            all_links.append(a)
+
+        registrar_log(f"URLs de producto detectadas (/movil/.../*.html): {len(all_links)}", "INFO")
 
         if not all_links:
             registrar_log("No se encontraron enlaces de productos. Probable cambio de HTML o bloqueo anti-bot.", "ERROR")
@@ -573,15 +598,28 @@ def obtener_datos_remotos():
 
                 nombre, capacidad, memoria = extraer_nombre_memoria_capacidad(titulo)
 
+                # Requisito: SOLO móviles con CAPACIDAD detectada en el título (no se inventa)
+                if not capacidad:
+                    continue
+
                 es_iphone = 'iphone' in nombre.lower()
-                if es_iphone and (not memoria or memoria == ""):
-                    memoria = ram_por_modelo_iphone(nombre) or "8GB"
-                    if not registrar_iphone_memoria(nombre, memoria):
+
+                # Requisito: SOLO móviles con RAM. Para iPhone permitimos derivarla por modelo.
+                if es_iphone and (not memoria):
+                    memoria = ram_por_modelo_iphone(nombre)
+
+                    # Evitar duplicados de iPhone por RAM derivada
+                    if memoria and not registrar_iphone_memoria(nombre, memoria):
                         summary_duplicados.append(f"{nombre} - {memoria}")
                         continue
 
-                if not capacidad:
-                    capacidad = "128GB"
+                # Si no es iPhone y no hay RAM explícita, descartar
+                if (not es_iphone) and (not memoria):
+                    continue
+
+                # Si es iPhone y aun así no se ha podido derivar RAM, descartar
+                if es_iphone and (not memoria):
+                    continue
 
                 # Buscar precios cerca del enlace
                 precio_actual = 0
@@ -604,10 +642,13 @@ def obtener_datos_remotos():
                             break
                     parent = getattr(parent, 'parent', None)
 
+                # Requisito: no inventar precios. Si no hay precio detectable en el listado, descartamos el candidato.
                 if precio_actual == 0:
-                    # fallback conservador para no romper la importación
-                    precio_actual = 299
-                    precio_original = int(precio_actual * 1.15)
+                    continue
+
+                # Si no se detecta precio original, igualamos al actual (evita inventar "tachados")
+                if precio_original == 0:
+                    precio_original = precio_actual
 
                 # Buscar imagen
                 img_url = ""
