@@ -427,14 +427,13 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
         print(f"   🔎 seemore() disponible: {'SÍ' if has_seemore else 'NO'}", flush=True)
 
         def count_items():
-            """Cuenta items del listado de forma robusta.
+            """Cuenta items del listado usando los <input data-item_list_id=...>.
 
-            Phonehouse puede renderizar los productos en varios bloques (#productsList{page}),
-            y los <input data-item_list_id=...> no siempre están presentes en los items cargados por AJAX.
-            Por eso contamos por el contenedor principal de tarjetas.
+            En PhoneHouse, tras ejecutar seemore() los productos adicionales pueden renderizarse con
+            plantillas/clases distintas, pero los inputs GTM con data-item_list_id siguen creciendo.
             """
             try:
-                return len(driver.find_elements(By.CSS_SELECTOR, "div.item-listado-final"))
+                return len(driver.find_elements(By.CSS_SELECTOR, f"input[data-item_list_id='{LIST_ID}']"))
             except Exception:
                 return 0
 
@@ -605,7 +604,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
 
             # URL ficha
             try:
-                a = card.find_element(By.CSS_SELECTOR, "a[href^='/movil/'], a[href*='/movil/']")
+                a = cont.find_element(By.CSS_SELECTOR, "a[href^='/movil/'], a[href*='/movil/']")
                 href = (a.get_attribute("href") or "").strip()
             except Exception:
                 continue
@@ -625,7 +624,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
 
             # título del card
             try:
-                h3 = card.find_element(By.CSS_SELECTOR, "h3.marca-item")
+                h3 = cont.find_element(By.CSS_SELECTOR, "h3.marca-item")
                 titulo = _safe_text(h3)
             except Exception:
                 titulo = ""
@@ -636,7 +635,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             precio_actual = 0
             precio_original = 0
             try:
-                box = card.find_element(By.CSS_SELECTOR, ".listado-precios-libre, .precios-items-mosaico, [class*='listado-precios'], [class*='precios']")
+                box = cont.find_element(By.CSS_SELECTOR, ".listado-precios-libre, .precios-items-mosaico, [class*='listado-precios'], [class*='precios']")
             except Exception:
                 box = None
 
@@ -681,7 +680,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             # imagen
             img = ""
             try:
-                im = card.find_element(By.CSS_SELECTOR, "img")
+                im = cont.find_element(By.CSS_SELECTOR, "img")
                 for attr in ["src", "data-src", "data-original", "data-lazy"]:
                     v = (im.get_attribute(attr) or "").strip()
                     if v and "logo" not in v.lower():
