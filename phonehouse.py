@@ -428,6 +428,13 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
                     ram = ram2
 
             # Validación mínima
+            # DEBUG precios de ficha (para diagnosticar precios mal parseados)
+            try:
+                _t = (titulo or "").replace("\n", " ")
+                print(f"   🧾 [FICHA] {mask_url(url)} | actual={precio_actual}€ | original={precio_original}€ | titulo='{_t[:60]}'", flush=True)
+            except Exception:
+                pass
+
             return {
                 "titulo": titulo,
                 "nombre": nombre,
@@ -657,6 +664,21 @@ def sincronizar(remotos):
 
     for r in remotos:
         try:
+            # --- LOG DETALLADO (DEBUG) ---
+            print("-" * 60, flush=True)
+            print(f"Detectado {r.get('nombre','(sin nombre)')}", flush=True)
+            print(f"1) Nombre:          {r.get('nombre','')}", flush=True)
+            print(f"2) Memoria (RAM):   {r.get('memoria','')}", flush=True)
+            print(f"3) Capacidad:       {r.get('capacidad','')}", flush=True)
+            print(f"4) Versión ROM:     {r.get('version','Global')}", flush=True)
+            print(f"5) Precio Actual:   {r.get('precio_actual',0)}€", flush=True)
+            print(f"6) Precio Original: {r.get('precio_original',0)}€", flush=True)
+            print(f"7) Enviado desde:   {r.get('enviado_desde','')}", flush=True)
+            print(f"8) Stock Real:      {r.get('cantidad','N/D')}", flush=True)
+            img = (r.get('img','') or '')
+            print(f"9) URL Imagen:      {(img[:75] + '...') if img else '(vacía)'}", flush=True)
+            print(f"10) Enlace Compra:  {mask_url(r.get('url_imp',''))}", flush=True)
+            print("-" * 60, flush=True)
             url_base = (r["url_imp"] or "").strip().split("?")[0]
             url_con_afiliado = f"{url_base}{AFF_RAW}" if AFF_RAW else url_base
             url_oferta = acortar_url(url_con_afiliado)
