@@ -376,7 +376,10 @@ def descubrir_urls_producto(html: str, base_url: str):
     try:
         a_mov = soup.find_all("a", href=PRODUCT_PATH_RE)
         print(f"   🧪 Diagnóstico: <a href='/movil/...'> encontrados: {len(a_mov)}", flush=True)
-        n_precios = len(soup.select('.precios-items-mosaico')) + len(soup.select('[class*="precios-items"]'))
+        n_precios = (len(soup.select('.precios-items-mosaico'))
+                    + len(soup.select('.listado-precios-libre'))
+                    + len(soup.select('[class*="listado-precios"]'))
+                    + len(soup.select('[class*="precios-items"]')))
         print(f"   🧪 Diagnóstico: contenedores precios (mosaico/otros): {n_precios}", flush=True)
         n_title_like = len(soup.select('h3[class*="marca"], h3[class*="item"], [class*="marca-item"], [class*="product-name"], [class*="title"]'))
         print(f"   🧪 Diagnóstico: nodos título (marca/item/title): {n_title_like}", flush=True)
@@ -789,30 +792,66 @@ def obtener_datos_remotos():
         act = 0
         orig = 0
 
-        # Contenedores típicos en listado:
+        # Contenedores típicos en listado (han variado con el tiempo):
         # - .precios-items-mosaico
         # - .listado-precios-libre
-        # - (fallback) cualquier bloque que contenga 'precio' y el símbolo €
+        # - otros bloques con 'precio/precios'
         box = (
             card.select_one(".precios-items-mosaico")
             or card.select_one(".listado-precios-libre")
+            or card.select_one("[class*='listado-precios']")
             or card.select_one("[class*='precios']")
             or card.select_one("[class*='precio']")
         )
 
+        def _clean_price_text(s: str) -> str:
+            s = normalize_spaces(s or "")
+            # corta "Otras ofertas..." para no contaminar
+            low = s.lower()
+            if "otras ofertas" in low:
+                s = re.split(r"otras ofertas", s, flags=re.I)[0]
+            if "desde" in low and "otras ofertas" in low:
+                # doble seguro
+                s = re.split(r"desde", s, flags=re.I)[0]
+            return s
+
+        def _attr_price_candidates(node) -> list[int]:
+            vals = []
+            try:
+                for k, v in (node.attrs or {}).items():
+                    if v is None:
+                        continue
+                    # clases no
+                    if k in ("class",):
+                        continue
+                    if isinstance(v, (list, tuple)):
+                        vv = " ".join([str(x) for x in v])
+                    else:
+                        vv = str(v)
+                    # buscar números de 2-5 dígitos (evita 4/5 sueltos)
+                    for s in re.findall(r"\b(\d{2,5})\b", vv):
+                        try:
+                            n = int(s)
+                            if 20 <= n <= 5000:
+                                vals.append(n)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return vals
+
         if box:
-            # Actual: span.precio-2 o span.precio (no tachado)
+            # 1) Intento directo por selectores (actual + tachado)
             cand = (
                 box.select_one("span.precio-2")
                 or box.select_one("span.precio:not(.precio-tachado):not(.precio-tachado-finales):not(.precio-tachado-final)")
             )
             if cand:
-                at = normalize_spaces(cand.get_text(" ", strip=True))
-                if ("€" in at) and ("otras ofertas" not in at.lower()):
-                    vals = parse_eur_all(at) if "parse_eur_all" in globals() else []
-                    act = vals[0] if vals else parse_eur_int(at)
+                at = _clean_price_text(cand.get_text(" ", strip=True))
+                vals = parse_eur_all(at) if "parse_eur_all" in globals() else []
+                # Si viene "1099 €" debería salir aquí
+                act = vals[0] if vals else parse_eur_int(at)
 
-            # Original tachado: múltiples clases posibles
             oc = (
                 box.select_one("span.precio-tachado")
                 or box.select_one("span.precio-tachado-finales")
@@ -821,25 +860,53 @@ def obtener_datos_remotos():
                 or box.select_one("del")
             )
             if oc:
-                ot = normalize_spaces(oc.get_text(" ", strip=True))
+                ot = _clean_price_text(oc.get_text(" ", strip=True))
                 ovals = parse_eur_all(ot) if "parse_eur_all" in globals() else []
                 orig = ovals[0] if ovals else parse_eur_int(ot)
 
-            # Si aún no hay act, recolecta todos los precios del box descartando "otras ofertas"
-            if act == 0:
-                bt = normalize_spaces(box.get_text(" ", strip=True))
-                if "otras ofertas" in bt.lower():
-                    # elimina la sección "otras ofertas ..." para no contaminar
-                    bt = bt.split("Otras ofertas")[0]
-                    bt = bt.split("otras ofertas")[0]
-                vals = parse_eur_all(bt) if "parse_eur_all" in globals() else []
-                if vals:
-                    act = max(vals) if len(vals) == 1 else min(vals)  # en cards suele venir [1099,1339]
-                    if orig == 0:
-                        bigger = sorted({v for v in vals if v > act})
-                        orig = bigger[0] if bigger else act
+            # 2) Si el precio sale "ridículo" (1 dígito) o vacío, reconstruir desde TODO el contenedor
+            #    y también mirando atributos data-* por si el sitio guarda ahí el precio real.
+            if (act == 0) or (act < 20):
+                raw_box_text = _clean_price_text(box.get_text(" ", strip=True))
+                euro_vals = parse_eur_all(raw_box_text) if "parse_eur_all" in globals() else []
+                euro_vals = [v for v in euro_vals if 20 <= v <= 5000]
 
-        # Último fallback: evita precios ridículos (4€, 9€) provocados por HTML fragmentado
+                attr_vals = []
+                # atributos del propio box y de hijos cercanos
+                attr_vals.extend(_attr_price_candidates(box))
+                for ch in box.find_all(True, limit=25):
+                    attr_vals.extend(_attr_price_candidates(ch))
+                attr_vals = [v for v in attr_vals if 20 <= v <= 5000]
+
+                candidates = sorted(set(euro_vals + attr_vals))
+
+                if candidates:
+                    # normalmente: [1099, 1339] -> actual=min, original=next>actual
+                    act = min(candidates)
+                    if orig == 0:
+                        bigger = sorted([v for v in candidates if v > act])
+                        orig = bigger[0] if bigger else max(candidates)
+
+                # Debug cuando el precio no se pudo reconstruir bien
+                if act == 0 or act < 20:
+                    try:
+                        print("   🧪 DEBUG PRECIOS (card):", flush=True)
+                        print(f"      titulo_card='{(titulo_card or '')[:60]}'", flush=True)
+                        print(f"      box_text='{raw_box_text[:180]}'", flush=True)
+                        print(f"      euro_vals={euro_vals[:10]}", flush=True)
+                        print(f"      attr_vals={sorted(set(attr_vals))[:10]}", flush=True)
+                    except Exception:
+                        pass
+
+            # Si aún no hay original, inferir desde candidatos del box
+            if act and orig == 0:
+                raw_box_text = _clean_price_text(box.get_text(" ", strip=True))
+                vals = parse_eur_all(raw_box_text) if "parse_eur_all" in globals() else []
+                vals = [v for v in vals if 20 <= v <= 5000]
+                bigger = sorted({v for v in vals if v > act})
+                orig = bigger[0] if bigger else act
+
+        # Último fallback: no aceptamos precios ridículos
         if act and act < 20:
             act = 0
         if orig and orig < 20:
@@ -847,6 +914,7 @@ def obtener_datos_remotos():
 
         if orig == 0:
             orig = act
+
 
 
         # Imagen desde card (src o data-src)
@@ -864,6 +932,7 @@ def obtener_datos_remotos():
             "precio_actual": act,
             "precio_original": orig,
             "img": img,
+            "debug_box_text": (normalize_spaces(box.get_text(' ', strip=True)) if box else ''),
         }
 
     # Orden estable para reproducibilidad
@@ -905,18 +974,14 @@ def obtener_datos_remotos():
         if es_iphone and not ram:
             ram = ram_por_modelo_iphone(nombre) or ""
 
-        # Si falta cap/ram, entonces sí consultamos la ficha para completar specs
-        if (not cap) or ((not ram) and (not es_iphone)):
+        # Si falta cap/ram, entonces sí consultamos la ficha para completar specs/imagen.
+        # IMPORTANTE: NO usar la ficha para precios (en ficha aparecen cuotas tipo 4€/mes y contamina).
+        if (not cap) or ((not ram) and (not es_iphone)) or (not img):
             ficha = fetch_ficha_producto(url, session=session, max_retries=3)
             if ficha:
                 cap = cap or (ficha.get("capacidad") or "")
                 ram = ram or (ficha.get("memoria") or "")
                 img = img or (ficha.get("img") or "")
-                # IMPORTANTE: NO sobreescribir precios del card salvo que falten
-                if precio_actual == 0:
-                    precio_actual = int(ficha.get("precio_actual") or 0)
-                if precio_original == 0:
-                    precio_original = int(ficha.get("precio_original") or 0)
 
         if not cap:
             razones_skip["sin_cap"] += 1
