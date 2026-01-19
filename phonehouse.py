@@ -393,6 +393,8 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
 
     driver = webdriver.Chrome(options=opts)
 
+    hoy = datetime.now().strftime("%d/%m/%Y")
+
     try:
         driver.get(url)
         time.sleep(2)
