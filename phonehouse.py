@@ -22,6 +22,9 @@ from woocommerce import API
 
 # --- CONFIG ---
 DEFAULT_START_URL = "https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html"
+EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
+LIST_ID = '31'
+LIST_NAME = 'Todos los Móviles y Smartphones'
 START_URL = os.getenv('SOURCE_URL_PHONEHOUSE') or 'https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
@@ -359,6 +362,239 @@ def obtener_html_con_scroll(url: str) -> str | None:
 # DESCUBRIR URLs de producto
 # --------------------------
 PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
+
+
+
+def obtener_productos_desde_dom(url: str, objetivo: int = 72):
+    """Extrae productos del LISTADO (cards) usando Selenium DOM.
+
+    Reglas clave:
+      - Solo acepta items del listado principal (input data-item_list_id=31, name=Todos los Móviles y Smartphones)
+      - Precio SOLO desde span.precio-2 / precio tachado del card (ignora 'Otras ofertas desde')
+      - Nunca usa la ficha para precios (evita cuotas 4€/mes)
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+    except Exception as e:
+        print(f"❌ Selenium no disponible: {e}", flush=True)
+        return []
+
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1400,2200")
+    opts.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+    driver = webdriver.Chrome(options=opts)
+
+    try:
+        driver.get(url)
+        time.sleep(2)
+
+        current = getattr(driver, 'current_url', '') or ''
+        print(f"URL final (Selenium): {mask_url(current)}", flush=True)
+
+        # Forzar URL esperada si hay redirección
+        if EXPECTED_PATH not in current:
+            print(f"⚠️  Redirección detectada. Reintentando a {EXPECTED_PATH}...", flush=True)
+            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
+            time.sleep(2)
+            current = getattr(driver, 'current_url', '') or ''
+            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
+
+        if EXPECTED_PATH not in current:
+            print("❌ ERROR: no estamos en 'todos-los-smartphones'. Abortando.", flush=True)
+            return []
+
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.item-listado-final"))
+        )
+
+        print("🧭 Haciendo scroll hasta el final...", flush=True)
+        last_h = 0
+        stable = 0
+        for _ in range(70):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.2)
+            h = driver.execute_script("return document.body.scrollHeight")
+            if h == last_h:
+                stable += 1
+            else:
+                stable = 0
+            last_h = h
+            if stable >= 3:
+                break
+
+        # Items del listado principal (el <input> tiene dataset GTM)
+        items = driver.find_elements(
+            By.CSS_SELECTOR,
+            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
+        )
+        print(f"✅ Items de listado (id={LIST_ID}) detectados: {len(items)}", flush=True)
+        if len(items) == 0:
+            print("❌ No se detecta el listado esperado. Para evitar importar productos de otras secciones, se aborta.", flush=True)
+            return []
+
+        productos = []
+        seen_urls = set()
+
+        def _safe_text(el):
+            try:
+                return normalize_spaces(el.text or "")
+            except Exception:
+                return ""
+
+        for inp in items:
+            if len(productos) >= objetivo:
+                break
+
+            try:
+                card = inp.find_element(By.XPATH, "..")
+            except Exception:
+                continue
+
+            # URL ficha
+            try:
+                a = card.find_element(By.CSS_SELECTOR, "a[href^='/movil/'], a[href*='/movil/']")
+                href = (a.get_attribute("href") or "").strip()
+            except Exception:
+                continue
+
+            if not href:
+                continue
+            href = href.split("?")[0]
+
+            # evitar reacondicionados / renuevo si aparecieran en el listado
+            low = href.lower()
+            if any(x in low for x in ["reacondicionado", "reacondicionados", "renuevo", "reacond"]):
+                continue
+
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
+
+            # título del card
+            try:
+                h3 = card.find_element(By.CSS_SELECTOR, "h3.marca-item")
+                titulo = _safe_text(h3)
+            except Exception:
+                titulo = ""
+            if len(titulo) < 6:
+                continue
+
+            # precio actual (card)
+            precio_actual = 0
+            precio_original = 0
+            try:
+                box = card.find_element(By.CSS_SELECTOR, ".listado-precios-libre, .precios-items-mosaico, [class*='listado-precios'], [class*='precios']")
+            except Exception:
+                box = None
+
+            if box:
+                # actual: span.precio-2
+                try:
+                    el_act = box.find_element(By.CSS_SELECTOR, "span.precio-2")
+                    at = _safe_text(el_act)
+                    vals = [v for v in parse_eur_all(at) if 20 <= v <= 5000]
+                    if vals:
+                        precio_actual = vals[0]
+                except Exception:
+                    pass
+
+                if precio_actual == 0:
+                    # fallback: primer span.precio no tachado
+                    try:
+                        el_act = box.find_element(By.CSS_SELECTOR, "span.precio:not(.precio-tachado):not(.precio-tachado-finales):not(.precio-tachado-final)")
+                        at = _safe_text(el_act)
+                        vals = [v for v in parse_eur_all(at) if 20 <= v <= 5000]
+                        if vals:
+                            precio_actual = vals[0]
+                    except Exception:
+                        pass
+
+                # original tachado (si existe)
+                try:
+                    el_org = box.find_element(By.CSS_SELECTOR, "span.precio-tachado, span.precio-tachado-finales, span.precio-tachado-final, s, del")
+                    ot = _safe_text(el_org)
+                    ovals = [v for v in parse_eur_all(ot) if 20 <= v <= 5000]
+                    if ovals:
+                        precio_original = ovals[0]
+                except Exception:
+                    pass
+
+                if precio_original == 0:
+                    precio_original = precio_actual
+
+            if precio_actual < 20:
+                continue
+
+            # imagen
+            img = ""
+            try:
+                im = card.find_element(By.CSS_SELECTOR, "img")
+                for attr in ["src", "data-src", "data-original", "data-lazy"]:
+                    v = (im.get_attribute(attr) or "").strip()
+                    if v and "logo" not in v.lower():
+                        if v.startswith("//"):
+                            v = "https:" + v
+                        img = abs_url("https://www.phonehouse.es", v)
+                        break
+            except Exception:
+                pass
+
+            # specs desde título
+            nombre, cap, ram = extraer_nombre_memoria_capacidad(titulo)
+            es_iphone = "iphone" in (nombre or "").lower()
+            if es_iphone and not ram:
+                ram = ram_por_modelo_iphone(nombre) or ""
+
+            # solo móviles con RAM y capacidad
+            if not cap:
+                continue
+            if (not ram) and (not es_iphone):
+                continue
+            if es_iphone and not ram:
+                continue
+
+            version = "IOS" if es_iphone else "Global"
+            key = f"{nombre}_{cap}_{ram}"
+
+            if any(p.get('clave_unica') == key for p in productos):
+                summary_duplicados.append(f"{nombre} {cap} {ram}".strip())
+                continue
+
+            productos.append({
+                "nombre": nombre,
+                "memoria": ram,
+                "capacidad": cap,
+                "precio_actual": int(precio_actual),
+                "precio_original": int(precio_original or precio_actual),
+                "img": img,
+                "url_imp": href,
+                "enviado_desde": ENVIADO_DESDE,
+                "enviado_desde_tg": ENVIADO_DESDE_TG,
+                "fecha": hoy,
+                "en_stock": True,
+                "clave_unica": key,
+                "version": version,
+                "fuente": FUENTE,
+                "codigo_descuento": CODIGO_DESCUENTO,
+            })
+
+        print(f"✅ Productos DOM válidos: {len(productos)}", flush=True)
+        return productos
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 def descubrir_urls_producto(html: str, base_url: str):
     """Devuelve set de URLs de ficha asociadas a tarjetas del listado (heurística robusta).
@@ -737,311 +973,18 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
 # EXTRACCIÓN REMOTA COMPLETA
 # --------------------------
 def obtener_datos_remotos():
-    hoy = datetime.now().strftime("%d/%m/%Y")
-
-    print("================================================================================", flush=True)
-    print("🤖 SCRAPER PHONE HOUSE - VERSIÓN COMPLETA (v2)", flush=True)
-    print("================================================================================", flush=True)
-    print(f"🔗 URL: {mask_url(START_URL)}", flush=True)
-    print("🔄 Scroll AJAX: ACTIVADO", flush=True)
-    print(f"🎯 Objetivo: {OBJETIVO} productos", flush=True)
-    print("================================================================================\n", flush=True)
-
+    """Extrae productos de PhoneHouse desde el listado (solo cards DOM)."""
+    print("", flush=True)
     print("--- FASE 1: ESCANEANDO PHONE HOUSE ---", flush=True)
     print(f"URL: {mask_url(START_URL)}", flush=True)
 
-    html = obtener_html_con_scroll(START_URL)
-    if not html:
-        print("⚠️  Selenium falló; usando requests (puede ver menos productos).", flush=True)
-        r = requests.get(START_URL, headers=HEADERS, timeout=30)
-        print(f"URL final (requests): {mask_url(r.url)}", flush=True)
-        html = r.text
-    else:
-        print("✅ HTML obtenido con Selenium/scroll", flush=True)
+    productos = obtener_productos_desde_dom(START_URL, objetivo=OBJETIVO)
 
-    print("\n🔍 Descubriendo URLs de fichas de móvil (solo tarjetas del listado)...", flush=True)
-    urls = descubrir_urls_producto(html, START_URL)
-    print(f"   🔗 URLs únicas (desde cards): {len(urls)}", flush=True)
-
-    soup_listado = BeautifulSoup(html, "html.parser")
-
-    # Mapa url->card para extraer precios/imagen/titulo SIN ir a la ficha (evita precios fantasma)
-    card_by_url = {}
-    for h3 in soup_listado.select("h3[class*='marca'], h3[class*='item'], h3"):
-        titulo_card = normalize_spaces(h3.get_text(" ", strip=True))
-        card = h3
-        hops = 0
-        while card is not None and hops < 8:
-            if hasattr(card, "select_one") and card.select_one(".precios-items-mosaico"):
-                break
-            card = getattr(card, "parent", None)
-            hops += 1
-        if not card:
-            continue
-        a = card.find("a", href=True)
-        if not a:
-            continue
-        href = (a.get("href") or "").strip()
-        if not href or not PRODUCT_PATH_RE.search(href):
-            continue
-        u = abs_url(START_URL, href).split("?")[0]
-        if u not in urls:
-            continue
-
-        # Precios desde card (PhoneHouse cambia clases con frecuencia)
-        act = 0
-        orig = 0
-
-        # Contenedores típicos en listado (han variado con el tiempo):
-        # - .precios-items-mosaico
-        # - .listado-precios-libre
-        # - otros bloques con 'precio/precios'
-        box = (
-            card.select_one(".precios-items-mosaico")
-            or card.select_one(".listado-precios-libre")
-            or card.select_one("[class*='listado-precios']")
-            or card.select_one("[class*='precios']")
-            or card.select_one("[class*='precio']")
-        )
-
-        def _clean_price_text(s: str) -> str:
-            s = normalize_spaces(s or "")
-            # corta "Otras ofertas..." para no contaminar
-            low = s.lower()
-            if "otras ofertas" in low:
-                s = re.split(r"otras ofertas", s, flags=re.I)[0]
-            if "desde" in low and "otras ofertas" in low:
-                # doble seguro
-                s = re.split(r"desde", s, flags=re.I)[0]
-            return s
-
-        def _attr_price_candidates(node) -> list[int]:
-            vals = []
-            try:
-                for k, v in (node.attrs or {}).items():
-                    if v is None:
-                        continue
-                    # clases no
-                    if k in ("class",):
-                        continue
-                    if isinstance(v, (list, tuple)):
-                        vv = " ".join([str(x) for x in v])
-                    else:
-                        vv = str(v)
-                    # buscar números de 2-5 dígitos (evita 4/5 sueltos)
-                    for s in re.findall(r"\b(\d{2,5})\b", vv):
-                        try:
-                            n = int(s)
-                            if 20 <= n <= 5000:
-                                vals.append(n)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            return vals
-
-        if box:
-            # 1) Intento directo por selectores (actual + tachado)
-            cand = (
-                box.select_one("span.precio-2")
-                or box.select_one("span.precio:not(.precio-tachado):not(.precio-tachado-finales):not(.precio-tachado-final)")
-            )
-            if cand:
-                at = _clean_price_text(cand.get_text(" ", strip=True))
-                vals = parse_eur_all(at) if "parse_eur_all" in globals() else []
-                # Si viene "1099 €" debería salir aquí
-                act = vals[0] if vals else parse_eur_int(at)
-
-            oc = (
-                box.select_one("span.precio-tachado")
-                or box.select_one("span.precio-tachado-finales")
-                or box.select_one("span.precio-tachado-final")
-                or box.select_one("s")
-                or box.select_one("del")
-            )
-            if oc:
-                ot = _clean_price_text(oc.get_text(" ", strip=True))
-                ovals = parse_eur_all(ot) if "parse_eur_all" in globals() else []
-                orig = ovals[0] if ovals else parse_eur_int(ot)
-
-            # 2) Si el precio sale "ridículo" (1 dígito) o vacío, reconstruir desde TODO el contenedor
-            #    y también mirando atributos data-* por si el sitio guarda ahí el precio real.
-            if (act == 0) or (act < 20):
-                raw_box_text = _clean_price_text(box.get_text(" ", strip=True))
-                euro_vals = parse_eur_all(raw_box_text) if "parse_eur_all" in globals() else []
-                euro_vals = [v for v in euro_vals if 20 <= v <= 5000]
-
-                attr_vals = []
-                # atributos del propio box y de hijos cercanos
-                attr_vals.extend(_attr_price_candidates(box))
-                for ch in box.find_all(True, limit=25):
-                    attr_vals.extend(_attr_price_candidates(ch))
-                attr_vals = [v for v in attr_vals if 20 <= v <= 5000]
-
-                candidates = sorted(set(euro_vals + attr_vals))
-
-                if candidates:
-                    # normalmente: [1099, 1339] -> actual=min, original=next>actual
-                    act = min(candidates)
-                    if orig == 0:
-                        bigger = sorted([v for v in candidates if v > act])
-                        orig = bigger[0] if bigger else max(candidates)
-
-                # Debug cuando el precio no se pudo reconstruir bien
-                if act == 0 or act < 20:
-                    try:
-                        print("   🧪 DEBUG PRECIOS (card):", flush=True)
-                        print(f"      titulo_card='{(titulo_card or '')[:60]}'", flush=True)
-                        print(f"      box_text='{raw_box_text[:180]}'", flush=True)
-                        print(f"      euro_vals={euro_vals[:10]}", flush=True)
-                        print(f"      attr_vals={sorted(set(attr_vals))[:10]}", flush=True)
-                    except Exception:
-                        pass
-
-            # Si aún no hay original, inferir desde candidatos del box
-            if act and orig == 0:
-                raw_box_text = _clean_price_text(box.get_text(" ", strip=True))
-                vals = parse_eur_all(raw_box_text) if "parse_eur_all" in globals() else []
-                vals = [v for v in vals if 20 <= v <= 5000]
-                bigger = sorted({v for v in vals if v > act})
-                orig = bigger[0] if bigger else act
-
-        # Último fallback: no aceptamos precios ridículos
-        if act and act < 20:
-            act = 0
-        if orig and orig < 20:
-            orig = 0
-
-        if orig == 0:
-            orig = act
-
-
-
-        # Imagen desde card (src o data-src)
-        img = ""
-        imgtag = card.find("img")
-        if imgtag:
-            for attr in ("src", "data-src", "data-original", "data-lazy"):
-                s = (imgtag.get(attr) or "").strip()
-                if s and "logo" not in s.lower():
-                    img = abs_url(START_URL, s)
-                    break
-
-        card_by_url[u] = {
-            "titulo_card": titulo_card,
-            "precio_actual": act,
-            "precio_original": orig,
-            "img": img,
-            "debug_box_text": (normalize_spaces(box.get_text(' ', strip=True)) if box else ''),
-        }
-
-    # Orden estable para reproducibilidad
-    urls_ordenadas = sorted(urls)
-
-    session = requests.Session()
-    productos = []
-    razones_skip = {"sin_precio": 0, "sin_cap": 0, "sin_ram": 0, "sin_titulo": 0, "fetch_fail": 0}
-
-    for idx, url in enumerate(urls_ordenadas, 1):
-        if any(x in url.lower() for x in ['reacondicionado','reacondicionados','renuevo','renov','reacond']):
-            continue
-        if len(productos) >= OBJETIVO:
-            break
-
-        base = card_by_url.get(url, {})
-        titulo = base.get("titulo_card") or ""
-        precio_actual = int(base.get("precio_actual") or 0)
-        precio_original = int(base.get("precio_original") or 0)
-        img = base.get("img") or ""
-
-        if not titulo:
-            # fallback: si por algún motivo no encontramos la tarjeta
-            ficha = fetch_ficha_producto(url, session=session, max_retries=3)
-            if not ficha:
-                razones_skip["fetch_fail"] += 1
-                continue
-            titulo = ficha.get("titulo") or ""
-            precio_actual = int(ficha.get("precio_actual") or 0)
-            precio_original = int(ficha.get("precio_original") or 0)
-            img = ficha.get("img") or ""
-
-        if not titulo:
-            razones_skip["sin_titulo"] += 1
-            continue
-
-        nombre, cap, ram = extraer_nombre_memoria_capacidad(titulo)
-        es_iphone = "iphone" in (nombre or "").lower()
-        if es_iphone and not ram:
-            ram = ram_por_modelo_iphone(nombre) or ""
-
-        # Si falta cap/ram, entonces sí consultamos la ficha para completar specs/imagen.
-        # IMPORTANTE: NO usar la ficha para precios (en ficha aparecen cuotas tipo 4€/mes y contamina).
-        if (not cap) or ((not ram) and (not es_iphone)) or (not img):
-            ficha = fetch_ficha_producto(url, session=session, max_retries=3)
-            if ficha:
-                cap = cap or (ficha.get("capacidad") or "")
-                ram = ram or (ficha.get("memoria") or "")
-                img = img or (ficha.get("img") or "")
-
-        if not cap:
-            razones_skip["sin_cap"] += 1
-            continue
-        if (not es_iphone) and (not ram):
-            razones_skip["sin_ram"] += 1
-            continue
-        if es_iphone and (not ram):
-            razones_skip["sin_ram"] += 1
-            continue
-
-        if precio_actual <= 0:
-            razones_skip["sin_precio"] += 1
-            continue
-        if precio_original <= 0:
-            precio_original = precio_actual
-
-        version = "IOS" if es_iphone else "Global"
-        key = (nombre.lower(), cap.upper(), ram.upper())
-        if any(p["dedupe_key"] == key for p in productos):
-            summary_duplicados.append(f"{nombre} {cap} {ram}".strip())
-            continue
-
-        productos.append({
-            "nombre": nombre,
-            "memoria": ram,
-            "capacidad": cap,
-            "precio_actual": precio_actual,
-            "precio_original": precio_original,
-            "img": img,
-            "url_imp": url,
-            "enviado_desde": ENVIADO_DESDE,
-            "enviado_desde_tg": ENVIADO_DESDE_TG,
-            "fecha": hoy,
-            "en_stock": True,
-            "dedupe_key": key,
-            "version": version,
-            "fuente": FUENTE,
-            "codigo_descuento": CODIGO_DESCUENTO,
-        })
-
-        # Log de muestra (primeros 10)
-        if len(productos) <= 10:
-            print(f"   [{len(productos)}] {nombre[:28]:28} | {precio_actual:4d}€ | {cap} | {ram}", flush=True)
-
-        time.sleep(0.12)
-
-    print("\n📊 RESUMEN EXTRACCIÓN:", flush=True)
-    print(f"   Productos únicos válidos: {len(productos)}", flush=True)
-    print(f"   Variantes/duplicados ignorados: {len(summary_duplicados)}", flush=True)
-    print(f"   Objetivo: {OBJETIVO}", flush=True)
-    if len(productos) < OBJETIVO:
-        print(f"   ⚠️  Faltan {OBJETIVO - len(productos)}", flush=True)
-        print(f"   Motivos descarte: {razones_skip}", flush=True)
-
+    print("", flush=True)
+    print("📊 RESUMEN EXTRACCIÓN:", flush=True)
+    print(f"   Productos únicos encontrados: {len(productos)}", flush=True)
     return productos
 
-# --------------------------
-# CATEGORÍAS WC
-# --------------------------
 def obtener_todas_las_categorias():
     categorias = []
     page = 1
