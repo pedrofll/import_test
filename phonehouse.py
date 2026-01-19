@@ -90,6 +90,20 @@ def parse_eur_int(txt: str) -> int:
     if not txt:
         return 0
 
+def parse_eur_all(txt: str) -> list[int]:
+    """Devuelve todos los precios en euros encontrados como enteros, priorizando patrones con €."""
+    if not txt:
+        return []
+    t = txt.replace("\xa0", " ").strip()
+    vals = []
+    for m in re.findall(r"(\d{1,5}(?:[\.,]\d{1,2})?)\s*€", t):
+        num = m.replace(".", "").replace(",", ".")
+        try:
+            vals.append(int(float(num)))
+        except Exception:
+            pass
+    return vals
+
     t = txt.replace("\xa0", " ").strip()
 
     # Prioridad 1: números inmediatamente antes de '€'
@@ -506,58 +520,70 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
         return ""
 
     def _extract_prices_html(soup: BeautifulSoup):
-        # 1) Original tachado explícito
-        original = 0
-        # <s>/<del> primero
-        for el in soup.find_all(["s", "del"]):
-            t = normalize_spaces(el.get_text(" ", strip=True))
-            if "€" not in t:
-                continue
-            if _is_bad_price_context(t):
-                continue
-            p = parse_eur_int(t)
-            if p > 0:
-                original = p
-                break
-        if original == 0:
-            for el in soup.find_all(["span", "div"], class_=re.compile(r"old|before|tachad|strike|was|previous", re.I)):
-                t = normalize_spaces(el.get_text(" ", strip=True))
-                if "€" not in t:
-                    continue
-                if _is_bad_price_context(t):
-                    continue
-                p = parse_eur_int(t)
-                if p > 0:
-                    original = p
-                    break
+        """Extrae (actual, original) con prioridad a la estructura típica de PhoneHouse.
 
-        # 2) Actual desde meta
+        Prioridad:
+          1) Bloques tipo .precios-items-mosaico (listado) o contenedores similares en ficha.
+             - actual: span.precio (no tachado) o span.precio-2
+             - original: span.precio-tachado o <s>/<del>
+          2) Meta product:price:amount
+          3) Fallback: recolectar precios con € excluyendo contextos 'desde' y cuotas.
+        """
+        # 1) PhoneHouse: bloque de precios (listado)
+        containers = soup.select(".precios-items-mosaico, .precios-items, [class*='precio']")
+        for c in containers:
+            ctext = normalize_spaces(c.get_text(" ", strip=True))
+            if "€" not in ctext:
+                continue
+
+            # Original (tachado) explícito
+            orig = 0
+            o = c.select_one(".precio-tachado, s, del")
+            if o:
+                ot = normalize_spaces(o.get_text(" ", strip=True))
+                if ("€" in ot) and (not _is_bad_price_context(ot)):
+                    vals = parse_eur_all(ot)
+                    orig = vals[0] if vals else parse_eur_int(ot)
+
+            # Actual explícito: span.precio / .precio-2 sin 'tachado'
+            act = 0
+            a = None
+            for cand in c.select("span.precio-2, span.precio"):
+                cls = " ".join(cand.get("class", [])).lower()
+                if "tach" in cls:
+                    continue
+                at = normalize_spaces(cand.get_text(" ", strip=True))
+                if ("€" in at) and (not _is_bad_price_context(at)):
+                    a = cand
+                    act = parse_eur_int(at)
+                    if act:
+                        break
+
+            # Si no ha pillado actual, intenta el texto del contenedor sin partes "desde"
+            if act == 0 and (not _is_bad_price_context(ctext)):
+                vals = parse_eur_all(ctext)
+                if vals:
+                    # suele venir: [149, 249] (actual, original) en listado
+                    # preferimos el menor como actual
+                    act = min(vals)
+                    if orig == 0:
+                        bigger = sorted({v for v in vals if v > act})
+                        orig = bigger[0] if bigger else act
+
+            if act:
+                if orig == 0:
+                    orig = act
+                return act, orig
+
+        # 2) Meta product:price:amount
         actual = 0
+        original = 0
         mp = soup.find("meta", property="product:price:amount")
         if mp and mp.get("content"):
             actual = parse_eur_int(mp["content"])
 
-        # 3) Actual desde HTML: escoger el menor precio "bueno" (evita PVP altos/financiación)
+        # 3) Fallback global (sin 'desde'/cuotas)
         if actual == 0:
-            prices = []
-            for el in soup.find_all(["span", "div", "p"]):
-                t = normalize_spaces(el.get_text(" ", strip=True))
-                if "€" not in t:
-                    continue
-                if _is_bad_price_context(t):
-                    continue
-                p = parse_eur_int(t)
-                if p > 0:
-                    prices.append(p)
-            if prices:
-                actual = min(prices)
-
-        # 4) Original fallback: si existe original y es < actual, corrige con el siguiente mayor
-        if original and actual and original < actual:
-            original = 0
-
-        if original == 0 and actual:
-            # buscar el menor precio mayor que actual en todo el HTML (sin 'desde')
             prices = []
             for el in soup.find_all(["span", "div", "p", "s", "del"]):
                 t = normalize_spaces(el.get_text(" ", strip=True))
@@ -565,11 +591,12 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
                     continue
                 if _is_bad_price_context(t):
                     continue
-                p = parse_eur_int(t)
-                if p > 0:
-                    prices.append(p)
-            bigger = sorted({p for p in prices if p > actual})
-            original = bigger[0] if bigger else actual
+                prices.extend(parse_eur_all(t))
+            prices = [p for p in prices if p > 0]
+            if prices:
+                actual = min(prices)
+                bigger = sorted({p for p in prices if p > actual})
+                original = bigger[0] if bigger else max(prices)
 
         if original == 0:
             original = actual
