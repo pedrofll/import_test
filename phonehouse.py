@@ -344,47 +344,82 @@ def obtener_html_con_scroll(url: str) -> str | None:
 PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
 
 def descubrir_urls_producto(html: str, base_url: str):
-    """Devuelve set de URLs de ficha EXTRAIDAS SOLO de las tarjetas del listado.
+    """Devuelve set de URLs de ficha asociadas a tarjetas del listado (heurística robusta).
 
-    Motivo: el HTML puede contener URLs de productos en menús, carruseles, JSON internos,
-    o secciones no visibles. Para evitar 'productos fantasma', solo aceptamos URLs que
-    estén asociadas a una tarjeta de producto del grid (h3.marca-item + precios-items-mosaico).
+    Evita 'productos fantasma' exigiendo que el enlace /movil/... esté dentro de un bloque
+    que también contenga:
+      - algún precio en euros, y
+      - un título visible (h2/h3/h4 o elemento con clase que contenga 'marca'/'item'/'title').
+
+    Además, imprime diagnósticos básicos para entender cambios de HTML.
     """
     soup = BeautifulSoup(html, "html.parser")
+
+    # Diagnósticos
+    try:
+        a_mov = soup.find_all("a", href=PRODUCT_PATH_RE)
+        print(f"   🧪 Diagnóstico: <a href='/movil/...'> encontrados: {len(a_mov)}", flush=True)
+        n_precios = len(soup.select('.precios-items-mosaico')) + len(soup.select('[class*="precios-items"]'))
+        print(f"   🧪 Diagnóstico: contenedores precios (mosaico/otros): {n_precios}", flush=True)
+        n_title_like = len(soup.select('h3[class*="marca"], h3[class*="item"], [class*="marca-item"], [class*="product-name"], [class*="title"]'))
+        print(f"   🧪 Diagnóstico: nodos título (marca/item/title): {n_title_like}", flush=True)
+    except Exception:
+        pass
+
     urls = set()
 
-    for h3 in soup.select("h3.marca-item"):
-        # Subir por el DOM hasta encontrar un contenedor que parezca una tarjeta con precios
-        card = h3
-        hops = 0
-        while card is not None and hops < 8:
-            try:
-                if hasattr(card, "select_one") and card.select_one(".precios-items-mosaico"):
-                    break
-            except Exception:
+    def _has_price(block) -> bool:
+        try:
+            txt = block.get_text(" ", strip=True)
+            if "€" not in txt:
+                return False
+            if "otras ofertas" in txt.lower():
+                # no excluye, pero evita usarlo como única señal
                 pass
-            card = getattr(card, "parent", None)
-            hops += 1
+            # debe contener al menos un patrón numero+€
+            return bool(re.search(r"\d{1,5}(?:[\.,]\d{1,2})?\s*€", txt))
+        except Exception:
+            return False
 
-        if not card or not getattr(card, "find", None):
-            continue
+    def _title_text(block) -> str:
+        # prioridad: h3/h2/h4
+        for tag in block.find_all(["h2","h3","h4"], limit=3):
+            t = normalize_spaces(tag.get_text(" ", strip=True))
+            if len(t) >= 8:
+                return t
+        # clases típicas
+        cand = block.find(attrs={"class": re.compile(r"marca|item|title|name|product", re.I)})
+        if cand:
+            t = normalize_spaces(cand.get_text(" ", strip=True))
+            if len(t) >= 8:
+                return t
+        return ""
 
-        a = card.find("a", href=True)
-        if not a:
-            continue
-
+    # Estrategia: partir de enlaces /movil/... y subir hasta un bloque que tenga precio+título
+    for a in soup.find_all("a", href=PRODUCT_PATH_RE):
         href = (a.get("href") or "").strip()
         if not href:
-            continue
-
-        if not PRODUCT_PATH_RE.search(href):
             continue
 
         u = abs_url(base_url, href).split("?")[0]
         low = u.lower()
         if any(x in low for x in ["accesorio", "funda", "cargador", "protector", "seguro", "financiacion"]):
             continue
-        urls.add(u)
+
+        block = a
+        found = False
+        for _ in range(10):
+            block = getattr(block, "parent", None)
+            if not block:
+                break
+            if not getattr(block, "get_text", None):
+                continue
+            if _has_price(block) and _title_text(block):
+                found = True
+                break
+
+        if found:
+            urls.add(u)
 
     return urls
 
@@ -710,7 +745,7 @@ def obtener_datos_remotos():
 
     # Mapa url->card para extraer precios/imagen/titulo SIN ir a la ficha (evita precios fantasma)
     card_by_url = {}
-    for h3 in soup_listado.select("h3.marca-item"):
+    for h3 in soup_listado.select("h3[class*='marca'], h3[class*='item'], h3"):
         titulo_card = normalize_spaces(h3.get_text(" ", strip=True))
         card = h3
         hops = 0
