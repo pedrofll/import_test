@@ -48,7 +48,7 @@ jobs:
           SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_PHONEHOUSE }}
         run: |
           echo ">>> EJECUTANDO phonehouse.py..."
-          python phonehouse.py
+          python -u phonehouse.py
 
       - name: Borrar historiales antiguos
         uses: Mattraks/delete-workflow-runs@v2
