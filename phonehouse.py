@@ -103,7 +103,7 @@ def registrar_log(mensaje, nivel="INFO", mostrar=True):
         elif nivel == "SUCCESS":
             print(f"\033[92m{log_entry}\033[0m", flush=True)
         else:
-            print(log_entry), flush=True)
+            print(log_entry, flush=True)
 # --- FUNCIÓN REDIMENSIÓN IMÁGENES ---
 def descargar_y_redimensionar_imagen(url_imagen, nombre_producto):
     """Descarga y redimensiona una imagen a 600x600 píxeles"""
@@ -1021,8 +1021,7 @@ def main():
     print(f"📱 Memoria iPhones: ACTIVADA", flush=True)
     print(f"📝 Sistema logs: ACTIVADO", flush=True)
     print(f"🎯 Objetivo: 72 productos", flush=True)
-    print("=" * 80 + "\n")
-   , flush=True)
+    print("=" * 80 + "\n", flush=True)
     try:
         # 1. Extraer productos
         productos = obtener_datos_remotos()
@@ -1042,8 +1041,7 @@ def main():
         print(f"📁 Logs guardados en: {archivo_log}", flush=True)
         if REDIMENSIONAR_IMAGENES:
             print(f"🖼️ Imágenes en: {DIRECTORIO_IMAGENES}/", flush=True)
-        print("=" * 80)
-       , flush=True)
+        print("=" * 80, flush=True)
     except KeyboardInterrupt:
         registrar_log("Proceso interrumpido por el usuario", "WARNING")
         mostrar_resumen_completo()
