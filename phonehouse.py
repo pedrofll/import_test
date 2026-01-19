@@ -427,13 +427,38 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
         print(f"   🔎 seemore() disponible: {'SÍ' if has_seemore else 'NO'}", flush=True)
 
         def count_items():
+            """Cuenta items del listado de forma robusta.
+
+            Phonehouse puede renderizar los productos en varios bloques (#productsList{page}),
+            y los <input data-item_list_id=...> no siempre están presentes en los items cargados por AJAX.
+            Por eso contamos por el contenedor principal de tarjetas.
+            """
             try:
-                return len(driver.find_elements(
-                    By.CSS_SELECTOR,
-                    f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
-                ))
+                return len(driver.find_elements(By.CSS_SELECTOR, "div.item-listado-final"))
             except Exception:
                 return 0
+
+        def debug_counts():
+            try:
+                c_cards = len(driver.find_elements(By.CSS_SELECTOR, "div.item-listado-final"))
+            except Exception:
+                c_cards = -1
+            try:
+                c_inputs = len(driver.find_elements(By.CSS_SELECTOR, f"input[data-item_list_id='{LIST_ID}']"))
+            except Exception:
+                c_inputs = -1
+            try:
+                c_links = len(driver.find_elements(By.CSS_SELECTOR, "a[href^='/movil/']"))
+            except Exception:
+                c_links = -1
+            try:
+                blocks = driver.execute_script(
+                    "return Array.from(document.querySelectorAll(\"div[id^='productsList']\")).map(d=>d.id);"
+                )
+                c_blocks = len(blocks) if isinstance(blocks, list) else -1
+            except Exception:
+                c_blocks = -1
+            print(f"   🧪 Diagnóstico DOM: cards={c_cards} inputs(list_id)={c_inputs} links(/movil/)={c_links} blocks={c_blocks}", flush=True)
 
         def find_scroll_container():
             """
@@ -504,6 +529,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             time.sleep(1.5)
 
             cur = count_items()
+            debug_counts()
             if cur != prev:
                 print(f"   📦 Items listado (id={LIST_ID}) ahora: {cur}", flush=True)
                 prev = cur
