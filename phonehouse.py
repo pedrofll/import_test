@@ -85,125 +85,33 @@ def abs_url(base: str, href: str) -> str:
     except Exception:
         return href
 
-def parse_eur_int(txt: str) -> int:
-    """Convierte un texto que contiene un precio en euros a entero.
-
-    Importante: evita falsos positivos como 'G54' cuando el texto contiene '€'.
-    Regla: prioriza números pegados al símbolo € (p.ej. '149€' o '149 €').
-    """
-    if not txt:
-        return 0
-
-def parse_eur_all(txt: str) -> list[int]:
-    """Devuelve todos los precios en euros encontrados como enteros, priorizando patrones con €."""
+def parse_eur_all(txt: str):
+    # Extrae todos los importes en euros que aparezcan en un texto.
+    # Acepta formatos: "799€", "691,20€", "1.099€", "1.099,00 €".
     if not txt:
         return []
-    t = txt.replace("\xa0", " ").strip()
-    vals = []
-    for m in re.findall(r"(\d{1,5}(?:[\.,]\d{1,2})?)\s*€", t):
-        num = m.replace(".", "").replace(",", ".")
+    t = txt.replace('&euro;', '€').replace(' ', ' ')
+    # Normaliza separadores: elimina separador de miles y convierte ',' decimal a '.'
+    t = t.replace('.', '').replace(' ', '')
+    # Captura números con opcional decimal.
+    matches = re.findall(r"(\d{1,5}(?:[.,]\d{1,2})?)\s*€", t)
+    out = []
+    for m in matches:
+        m2 = m.replace(',', '.')
         try:
-            vals.append(int(float(num)))
-        except Exception:
+            out.append(int(float(m2)))
+        except ValueError:
             pass
-    return vals
+    return out
 
-    t = txt.replace("\xa0", " ").strip()
 
-    # Prioridad 1: números inmediatamente antes de '€'
-    matches = re.findall(r"(\d{1,5}(?:[\.,]\d{1,2})?)\s*€", t)
-    if matches:
-        num = matches[0].replace(".", "").replace(",", ".")
-        try:
-            return int(float(num))
-        except Exception:
-            return 0
+def parse_eur_int(txt: str) -> int:
+    # Devuelve el primer importe en euros encontrado (si existe) como entero.
+    vals = parse_eur_all(txt)
+    if vals:
+        return vals[0]
+    return 0
 
-    # Prioridad 2: si hay símbolo euro pero con formato raro, intenta el último número
-    if "€" in t:
-        nums = re.findall(r"\d{1,5}(?:[\.,]\d{1,2})?", t)
-        if nums:
-            num = nums[-1].replace(".", "").replace(",", ".")
-            try:
-                return int(float(num))
-            except Exception:
-                return 0
-
-    # Fallback conservador
-    m = re.search(r"(\d{1,5}(?:[\.,]\d{1,2})?)", t)
-    if not m:
-        return 0
-    num = m.group(1).replace(".", "").replace(",", ".")
-    try:
-        return int(float(num))
-    except Exception:
-        return 0
-    t = txt.replace("\xa0", " ").strip()
-    # Ej: "1.239,00 €" o "999€"
-    m = re.search(r"(\d{1,5}(?:[.,]\d{1,2})?)", t)
-    if not m:
-        return 0
-    num = m.group(1).replace(".", "").replace(",", ".")
-    try:
-        return int(float(num))
-    except Exception:
-        return 0
-
-def acortar_url(url_larga: str) -> str:
-    """Acorta con is.gd (si falla, devuelve la original)."""
-    try:
-        url_encoded = urllib.parse.quote(url_larga, safe="")
-        r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=10)
-        return r.text.strip() if r.status_code == 200 else url_larga
-    except Exception:
-        return url_larga
-
-# --------------------------
-# RAM iPhone
-# --------------------------
-IPHONE_RAM_MAP = [
-    ("iphone 17 pro max", "12GB"),
-    ("iphone 17 pro", "12GB"),
-    ("iphone 17 air", "12GB"),
-    ("iphone air", "12GB"),
-    ("iphone 17", "8GB"),
-    ("iphone 16 pro max", "8GB"),
-    ("iphone 16 pro", "8GB"),
-    ("iphone 16 plus", "8GB"),
-    ("iphone 16e", "8GB"),
-    ("iphone 16", "8GB"),
-    ("iphone 15 pro max", "8GB"),
-    ("iphone 15 pro", "8GB"),
-    ("iphone 15 plus", "6GB"),
-    ("iphone 15", "6GB"),
-    ("iphone 14 pro max", "6GB"),
-    ("iphone 14 pro", "6GB"),
-    ("iphone 14 plus", "6GB"),
-    ("iphone 14", "6GB"),
-    ("iphone 13 pro max", "6GB"),
-    ("iphone 13 pro", "6GB"),
-    ("iphone 13 mini", "4GB"),
-    ("iphone 13", "4GB"),
-    ("iphone 12 pro max", "6GB"),
-    ("iphone 12 pro", "6GB"),
-    ("iphone 12 mini", "4GB"),
-    ("iphone 12", "4GB"),
-]
-
-def ram_por_modelo_iphone(nombre: str):
-    if not nombre:
-        return None
-    n = nombre.lower()
-    if "iphone" not in n:
-        return None
-    for needle, ram in IPHONE_RAM_MAP:
-        if needle in n:
-            return ram
-    return None
-
-# --------------------------
-# EXTRACCIÓN (título -> RAM/cap)
-# --------------------------
 def extraer_nombre_memoria_capacidad(titulo: str):
     """
     Devuelve (nombre, capacidad, memoria).
@@ -365,392 +273,341 @@ PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
 
 
 
+
+
 def obtener_productos_desde_dom(url: str, objetivo: int = 72):
-    """Extrae productos del LISTADO (cards) usando Selenium DOM.
+    """Extrae productos DIRECTAMENTE del DOM del listado (sin entrar a fichas).
 
-    Reglas clave:
-      - Solo acepta items del listado principal (input data-item_list_id=31, name=Todos los Móviles y Smartphones)
-      - Precio SOLO desde span.precio-2 / precio tachado del card (ignora 'Otras ofertas desde')
-      - Nunca usa la ficha para precios (evita cuotas 4€/mes)
+    Claves del enfoque:
+    - Usa Selenium para permitir que el JS del listado cargue más resultados.
+    - No hace click en "Ver más".
+    - Si existe la función JS seemore(), la invoca vía execute_script (equivalente a lo que haría el sitio al llegar al final).
+    - Extrae datos desde los inputs GTM (data-item_*) y su contenedor cercano.
+
+    Retorna una lista de dicts con las claves estándar usadas en la sincronización.
     """
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-    except Exception as e:
-        print(f"❌ Selenium no disponible: {e}", flush=True)
-        return []
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
 
+    hoy = datetime.now().strftime('%Y-%m-%d')
+
+    # IDs / filtros del listado
+    LIST_ID = '31'
+
+    # --------------------------
+    # Selenium
+    # --------------------------
     opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1400,2200")
-    opts.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    opts.add_argument('--headless=new')
+    opts.add_argument('--no-sandbox')
+    opts.add_argument('--disable-dev-shm-usage')
+    opts.add_argument('--disable-gpu')
+    opts.add_argument('--window-size=1400,2400')
 
     driver = webdriver.Chrome(options=opts)
+    driver.set_page_load_timeout(60)
 
-    hoy = datetime.now().strftime("%d/%m/%Y")
+    def _count_inputs():
+        try:
+            return len(driver.find_elements(By.CSS_SELECTOR, f"input[data-item_list_id='{LIST_ID}']"))
+        except Exception:
+            return 0
+
+    def _dom_diag():
+        """Diagnóstico rápido para entender qué está creciendo realmente en el DOM."""
+        try:
+            cards = len(driver.find_elements(By.CSS_SELECTOR, 'div.item-listado-final'))
+        except Exception:
+            cards = -1
+        try:
+            inputs = _count_inputs()
+        except Exception:
+            inputs = -1
+        try:
+            links = len(driver.find_elements(By.CSS_SELECTOR, "a[href^='/movil/']"))
+        except Exception:
+            links = -1
+        try:
+            blocks = driver.execute_script("return document.querySelectorAll('[id^=productsList]').length;")
+        except Exception:
+            blocks = -1
+        print(f"   🧪 Diagnóstico DOM: cards={cards} inputs(list_id)={inputs} links(/movil/)={links} blocks={blocks}")
 
     try:
+        print("--- FASE 1: ESCANEANDO PHONE HOUSE ---")
+        print(f"URL: {mask_url(url)}")
+
         driver.get(url)
         time.sleep(2)
 
-        current = getattr(driver, 'current_url', '') or ''
-        print(f"URL final (Selenium): {mask_url(current)}", flush=True)
-
-        # Forzar URL esperada si hay redirección
-        if EXPECTED_PATH not in current:
-            print(f"⚠️  Redirección detectada. Reintentando a {EXPECTED_PATH}...", flush=True)
-            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
-            time.sleep(2)
-            current = getattr(driver, 'current_url', '') or ''
-            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
-
-        if EXPECTED_PATH not in current:
-            print("❌ ERROR: no estamos en 'todos-los-smartphones'. Abortando.", flush=True)
-            return []
-
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.item-listado-final"))
-        )
-
-        print("🧭 Scroll + paginación AJAX (seemore): cargando más bloques hasta alcanzar el objetivo...", flush=True)
-
+        # Intento de aceptar cookies si aparece algún botón típico
         try:
-            has_seemore = driver.execute_script("return (typeof seemore === 'function' || typeof window.seemore === 'function');")
-        except Exception:
-            has_seemore = False
-        print(f"   🔎 seemore() disponible: {'SÍ' if has_seemore else 'NO'}", flush=True)
-
-        def count_items():
-            """Cuenta items del listado usando los <input data-item_list_id=...>.
-
-            En PhoneHouse, tras ejecutar seemore() los productos adicionales pueden renderizarse con
-            plantillas/clases distintas, pero los inputs GTM con data-item_list_id siguen creciendo.
-            """
-            try:
-                return len(driver.find_elements(By.CSS_SELECTOR, f"input[data-item_list_id='{LIST_ID}']"))
-            except Exception:
-                return 0
-
-        def debug_counts():
-            try:
-                c_cards = len(driver.find_elements(By.CSS_SELECTOR, "div.item-listado-final"))
-            except Exception:
-                c_cards = -1
-            try:
-                c_inputs = len(driver.find_elements(By.CSS_SELECTOR, f"input[data-item_list_id='{LIST_ID}']"))
-            except Exception:
-                c_inputs = -1
-            try:
-                c_links = len(driver.find_elements(By.CSS_SELECTOR, "a[href^='/movil/']"))
-            except Exception:
-                c_links = -1
-            try:
-                blocks = driver.execute_script(
-                    "return Array.from(document.querySelectorAll(\"div[id^='productsList']\")).map(d=>d.id);"
-                )
-                c_blocks = len(blocks) if isinstance(blocks, list) else -1
-            except Exception:
-                c_blocks = -1
-            print(f"   🧪 Diagnóstico DOM: cards={c_cards} inputs(list_id)={c_inputs} links(/movil/)={c_links} blocks={c_blocks}", flush=True)
-
-        def find_scroll_container():
-            """
-            PhoneHouse a veces renderiza el listado dentro de un contenedor que hace scroll,
-            no necesariamente el window. Probamos varios candidatos.
-            """
-            candidates = [
-                "#productsList",
-                "div[id^='productsList']",
-                "#productsList0",
-                "#productsList1",
-                ".productsList",
-                ".listado",
-                ".listado-items",
-                "main",
-                "body",
-            ]
-            for sel in candidates:
+            for sel in [
+                "button#onetrust-accept-btn-handler",
+                "button[aria-label*='Aceptar']",
+                "button[title*='Aceptar']",
+                "button:contains('Aceptar')",
+            ]:
                 try:
-                    el = driver.find_element(By.CSS_SELECTOR, sel)
-                    # Comprobar si es scrollable
-                    sh, ch = driver.execute_script(
-                        "return [arguments[0].scrollHeight, arguments[0].clientHeight];", el
-                    )
-                    if sh and ch and sh > ch + 50:
-                        return el
+                    btn = driver.find_element(By.CSS_SELECTOR, sel)
+                    btn.click()
+                    time.sleep(1)
+                    break
                 except Exception:
                     continue
-            return None
-
-        scroll_el = find_scroll_container()
-        if scroll_el:
-            print("   🧭 Usando contenedor scrollable del listado (no window).", flush=True)
-        else:
-            print("   🧭 Usando scroll del window (fallback).", flush=True)
-
-        prev = -1
-        stable = 0
-
-        # Estrategia: scroll al fondo -> esperar -> comprobar si aumentan items. Repetir.
-        seemore_calls = 0
-
-        for i in range(80):
-            try:
-                if scroll_el:
-                    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scroll_el)
-                else:
-                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            except Exception:
-                pass
-
-            # Espera para permitir AJAX
-            time.sleep(2.5)
-
-            # "wiggle" pequeño para disparar observers
-            try:
-                if scroll_el:
-                    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollTop - 400;", scroll_el)
-                    time.sleep(0.4)
-                    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scroll_el)
-                else:
-                    driver.execute_script("window.scrollBy(0, -400);")
-                    time.sleep(0.4)
-                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            except Exception:
-                pass
-
-            time.sleep(1.5)
-
-            cur = count_items()
-            debug_counts()
-            if cur != prev:
-                print(f"   📦 Items listado (id={LIST_ID}) ahora: {cur}", flush=True)
-                prev = cur
-                stable = 0
-            else:
-                stable += 1
-                print(f"   … sin cambios (items={cur}) stable={stable}", flush=True)
-
-            # Si no crece, intentamos cargar más ejecutando seemore() (NO es click; es JS directo)
-            if stable >= 4:
-                try:
-                    can = driver.execute_script("return (typeof seemore === 'function');")
-                except Exception:
-                    can = False
-
-                if can and seemore_calls < 20:
-                    seemore_calls += 1
-                    print(f"   🔁 Ejecutando seemore() vía JS (sin click) #{seemore_calls}...", flush=True)
-                    try:
-                        driver.execute_script("seemore();")
-                    except Exception:
-                        # en algunos casos está bajo window.seemore
-                        try:
-                            driver.execute_script("window.seemore();")
-                        except Exception:
-                            pass
-                    time.sleep(2.5)
-                    # resetear estabilidad para dar margen a crecimiento
-                    stable = 0
-                    continue
-
-            # si no hay crecimiento durante varios ciclos y no podemos seemore(), paramos
-            if stable >= 10:
-                break
-
-        # Al final, asegurarnos de estar al fondo (solo scroll)
-        try:
-            if scroll_el:
-                driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scroll_el)
-            else:
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1.0)
         except Exception:
             pass
 
-        # Items del listado principal (el <input> tiene dataset GTM)
-        items = driver.find_elements(
-            By.CSS_SELECTOR,
-            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
-        )
-        print(f"✅ Items de listado (id={LIST_ID}) detectados: {len(items)}", flush=True)
-        if len(items) == 0:
-            print("❌ No se detecta el listado esperado. Para evitar importar productos de otras secciones, se aborta.", flush=True)
-            return []
+        final_url = driver.current_url
+        print(f"URL final (Selenium): {mask_url(final_url)}")
 
-        productos = []
-        seen_urls = set()
+        # --------------------------
+        # Carga progresiva
+        # --------------------------
+        print("🧭 Scroll + paginación AJAX (seemore): cargando más bloques hasta alcanzar el objetivo...")
 
-        def _safe_text(el):
-            try:
-                return normalize_spaces(el.text or "")
-            except Exception:
-                return ""
+        try:
+            has_seemore = bool(driver.execute_script("return (typeof seemore === 'function');"))
+        except Exception:
+            has_seemore = False
 
-        for inp in items:
-            if len(productos) >= objetivo:
+        print(f"   🔎 seemore() disponible: {'SÍ' if has_seemore else 'NO'}")
+
+        stable = 0
+        last = -1
+        max_iters = 40  # suficiente para listados largos
+        seemore_calls = 0
+
+        for _ in range(max_iters):
+            _dom_diag()
+            current = _count_inputs()
+
+            if current != last:
+                print(f"   📦 Items listado (id={LIST_ID}) ahora: {current}")
+                last = current
+                stable = 0
+            else:
+                stable += 1
+                print(f"   … sin cambios (items={current}) stable={stable}")
+
+            if current >= objetivo:
                 break
 
+            # Forzamos scroll al final para que el sitio detecte que hay que cargar más
             try:
-                card = inp.find_element(By.XPATH, "..")
-            except Exception:
-                continue
-
-            # URL ficha
-            try:
-                a = cont.find_element(By.CSS_SELECTOR, "a[href^='/movil/'], a[href*='/movil/']")
-                href = (a.get_attribute("href") or "").strip()
-            except Exception:
-                continue
-
-            if not href:
-                continue
-            href = href.split("?")[0]
-
-            # evitar reacondicionados / renuevo si aparecieran en el listado
-            low = href.lower()
-            if any(x in low for x in ["reacondicionado", "reacondicionados", "renuevo", "reacond"]):
-                continue
-
-            if href in seen_urls:
-                continue
-            seen_urls.add(href)
-
-            # título del card
-            try:
-                h3 = cont.find_element(By.CSS_SELECTOR, "h3.marca-item")
-                titulo = _safe_text(h3)
-            except Exception:
-                titulo = ""
-            if len(titulo) < 6:
-                continue
-
-            # precio actual (card)
-            precio_actual = 0
-            precio_original = 0
-            try:
-                box = cont.find_element(By.CSS_SELECTOR, ".listado-precios-libre, .precios-items-mosaico, [class*='listado-precios'], [class*='precios']")
-            except Exception:
-                box = None
-
-            if box:
-                # actual: span.precio-2
-                try:
-                    el_act = box.find_element(By.CSS_SELECTOR, "span.precio-2")
-                    at = _safe_text(el_act)
-                    vals = [v for v in parse_eur_all(at) if 20 <= v <= 5000]
-                    if vals:
-                        precio_actual = vals[0]
-                except Exception:
-                    pass
-
-                if precio_actual == 0:
-                    # fallback: primer span.precio no tachado
-                    try:
-                        el_act = box.find_element(By.CSS_SELECTOR, "span.precio:not(.precio-tachado):not(.precio-tachado-finales):not(.precio-tachado-final)")
-                        at = _safe_text(el_act)
-                        vals = [v for v in parse_eur_all(at) if 20 <= v <= 5000]
-                        if vals:
-                            precio_actual = vals[0]
-                    except Exception:
-                        pass
-
-                # original tachado (si existe)
-                try:
-                    el_org = box.find_element(By.CSS_SELECTOR, "span.precio-tachado, span.precio-tachado-finales, span.precio-tachado-final, s, del")
-                    ot = _safe_text(el_org)
-                    ovals = [v for v in parse_eur_all(ot) if 20 <= v <= 5000]
-                    if ovals:
-                        precio_original = ovals[0]
-                except Exception:
-                    pass
-
-                if precio_original == 0:
-                    precio_original = precio_actual
-
-            if precio_actual < 20:
-                continue
-
-            # imagen
-            img = ""
-            try:
-                im = cont.find_element(By.CSS_SELECTOR, "img")
-                for attr in ["src", "data-src", "data-original", "data-lazy"]:
-                    v = (im.get_attribute(attr) or "").strip()
-                    if v and "logo" not in v.lower():
-                        if v.startswith("//"):
-                            v = "https:" + v
-                        img = abs_url("https://www.phonehouse.es", v)
-                        break
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             except Exception:
                 pass
 
-            # specs desde título
-            nombre, cap, ram = extraer_nombre_memoria_capacidad(titulo)
-            es_iphone = "iphone" in (nombre or "").lower()
-            if es_iphone and not ram:
-                ram = ram_por_modelo_iphone(nombre) or ""
+            # Damos tiempo a cargar
+            time.sleep(2)
 
-            # solo móviles con RAM y capacidad
-            if not cap:
+            # Si no cambia tras varios intentos, invocamos seemore() (sin click)
+            if has_seemore and stable >= 4:
+                seemore_calls += 1
+                print(f"   🔁 Ejecutando seemore() vía JS (sin click) #{seemore_calls}...")
+                try:
+                    driver.execute_script("seemore();")
+                except Exception as e:
+                    print(f"   ⚠️  seemore() falló: {e}")
+                time.sleep(3)
+                stable = 0
+
+            # Si llevamos mucho sin cambios, abortamos
+            if stable >= 10:
+                break
+
+        # --------------------------
+        # Extracción (JS)
+        # --------------------------
+        print(f"✅ Items de listado (id={LIST_ID}) detectados: {_count_inputs()}")
+
+        js_items = driver.execute_script("""
+            const listId = arguments[0];
+            const inputs = Array.from(document.querySelectorAll(`input[data-item_list_id='${listId}']`));
+
+            function findRoot(inp) {
+              let node = inp;
+              for (let i = 0; i < 12; i++) {
+                if (!node) break;
+                if (node.querySelector) {
+                  const a = node.querySelector("a[href^='/movil/'], a[href*='/movil/']");
+                  if (a) return node;
+                }
+                node = node.parentElement;
+              }
+              return inp.parentElement;
+            }
+
+            return inputs.map(inp => {
+              const root = findRoot(inp);
+              const a = root ? root.querySelector("a[href^='/movil/'], a[href*='/movil/']") : null;
+              const h = root ? root.querySelector('h3.marca-item, h3.marca-item-finales, h3[itemprop="name"]') : null;
+              const img = root ? root.querySelector('img') : null;
+              const p = root ? (root.querySelector('span.precio-2') || root.querySelector('span.precio')) : null;
+              const orig = root ? (root.querySelector('span.precio-tachado-finales') || root.querySelector('.precio-tachado') || root.querySelector('.precio-tachado-finales')) : null;
+
+              const title = (h && h.textContent ? h.textContent : (inp.getAttribute('data-item_name') || '')).trim();
+              const href = a ? (a.getAttribute('href') || '') : '';
+
+              let imgSrc = '';
+              if (img) {
+                imgSrc = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-original') || '';
+              }
+
+              let priceTxt = (p && p.textContent ? p.textContent : '').trim();
+              let origTxt = (orig && orig.textContent ? orig.textContent : '').trim();
+
+              if (!priceTxt) {
+                const dp = inp.getAttribute('data-price');
+                if (dp) priceTxt = dp;
+              }
+
+              return {
+                data_index: inp.getAttribute('data-index') || '',
+                data_item_id: inp.getAttribute('data-item_id') || '',
+                data_item_category3: (inp.getAttribute('data-item_category3') || '').trim(),
+                titulo: title,
+                href: href,
+                img: imgSrc,
+                precio_txt: priceTxt,
+                precio_orig_txt: origTxt,
+              };
+            });
+            """, LIST_ID)
+
+        productos = []
+        vistos = set()
+
+
+        def _parse_specs_from_href(href_abs: str):
+            # Intenta deducir capacidad/RAM desde el slug de la URL.
+            # Ejemplos:
+            #  - ...-256gbplus12gb-ram.html  -> (256GB, 12GB)
+            #  - ...-512gbplus8gb-ram.html   -> (512GB, 8GB)
+            #  - ...-128gb.html              -> (128GB, None)
+            if not href_abs:
+                return None, None
+            s = href_abs.lower()
+            m = re.search(r"(\d{2,4})gbplus(\d{1,2})gb(?:-ram)?", s)
+            if m:
+                return f"{m.group(1)}GB", f"{m.group(2)}GB"
+            cap = None
+            ram = None
+            mcap = re.search(r"-(\d{2,4})gb(?:\.|-|\w)", s)
+            if mcap:
+                cap = f"{mcap.group(1)}GB"
+            mram = re.search(r"plus(\d{1,2})gb-ram", s)
+            if mram:
+                ram = f"{mram.group(1)}GB"
+            return cap, ram
+        descartes = {
+            'sin_titulo': 0,
+            'sin_url': 0,
+            'sin_precio': 0,
+            'sin_cap': 0,
+            'sin_ram': 0,
+            'no_nuevo': 0,
+            'reacondicionado': 0,
+            'duplicado': 0,
+        }
+
+        for it in js_items:
+            href = (it.get('href') or '').strip()
+            if not href:
+                descartes['sin_url'] += 1
                 continue
-            if (not ram) and (not es_iphone):
-                continue
-            if es_iphone and not ram:
+            if href.startswith('/'):
+                href_abs = 'https://www.phonehouse.es' + href
+            else:
+                href_abs = href
+
+            if '/movil/' not in href_abs or not href_abs.endswith('.html'):
+                descartes['sin_url'] += 1
                 continue
 
-            version = "IOS" if es_iphone else "Global"
-            key = f"{nombre}_{cap}_{ram}"
-
-            if any(p.get('clave_unica') == key for p in productos):
-                summary_duplicados.append(f"{nombre} {cap} {ram}".strip())
+            # Filtrado por categoría (evita reacondicionados y otros listados)
+            cat3 = (it.get('data_cat3') or '').strip().lower()
+            if cat3 and cat3 != 'nuevo':
+                descartes['no_nuevo'] += 1
                 continue
+
+            titulo = normalize_spaces(it.get('titulo') or it.get('data_item_name') or '')
+            if not titulo:
+                descartes['sin_titulo'] += 1
+                continue
+
+            if 'reacondicionado' in titulo.lower() or 'reacondicionado' in href_abs.lower():
+                descartes['reacondicionado'] += 1
+                continue
+
+            precio_actual = parse_eur_int(it.get('precio_actual_txt') or '')
+            precio_regular = parse_eur_int(it.get('precio_original_txt') or '')
+            if precio_actual <= 0:
+                descartes['sin_precio'] += 1
+                continue
+            if precio_regular <= 0:
+                precio_regular = precio_actual
+
+            nombre, capacidad, memoria = extraer_nombre_memoria_capacidad(titulo)
+            cap2, ram2 = _parse_specs_from_href(href_abs)
+            if not capacidad and cap2:
+                capacidad = cap2
+            if not memoria and ram2:
+                memoria = ram2
+
+            # Si es iPhone y no trae RAM explícita, inferimos
+            if not memoria and 'iphone' in (nombre or '').lower():
+                ram = ram_por_modelo_iphone(nombre)
+                if ram:
+                    memoria = ram
+
+            if not capacidad:
+                descartes['sin_cap'] += 1
+                continue
+            if not memoria:
+                descartes['sin_ram'] += 1
+                continue
+
+            key = (nombre.lower(), capacidad.upper(), memoria.upper(), href_abs)
+            if key in vistos:
+                descartes['duplicado'] += 1
+                continue
+            vistos.add(key)
 
             productos.append({
-                "nombre": nombre,
-                "memoria": ram,
-                "capacidad": cap,
-                "precio_actual": int(precio_actual),
-                "precio_original": int(precio_original or precio_actual),
-                "img": img,
-                "url_imp": href,
-                "enviado_desde": ENVIADO_DESDE,
-                "enviado_desde_tg": ENVIADO_DESDE_TG,
-                "fecha": hoy,
-                "en_stock": True,
-                "clave_unica": key,
-                "version": version,
-                "fuente": FUENTE,
-                "codigo_descuento": CODIGO_DESCUENTO,
+                'nombre': nombre,
+                'capacidad': capacidad,
+                'memoria': memoria,
+                'version': 'IOS' if 'iphone' in nombre.lower() else 'Global',
+                'precio_actual': precio_actual,
+                'precio_regular': precio_regular,
+                'enviado_desde': ENVIADO_DESDE,
+                'cantidad': 'N/D',
+                'img': it.get('img') or '',
+                'url_imp': href_abs,
+                'fuente': 'Phone House',
+                'fecha': hoy,
             })
 
-        print(f"✅ Productos DOM válidos: {len(productos)}", flush=True)
+        print(f"✅ Productos DOM válidos: {len(productos)}")
 
-        # Listado completo de productos detectados (debug)
-        print("\n📋 LISTADO DE PRODUCTOS DETECTADOS (DOM)\n" + "-" * 70, flush=True)
-        for i, pr in enumerate(productos, 1):
-            try:
-                n = pr.get("nombre", "")
-                cap = pr.get("capacidad", "")
-                ram = pr.get("memoria", "")
-                pa = pr.get("precio_actual", "")
-                po = pr.get("precio_original", "")
-                urlp = pr.get("url_imp", "")
-                img = pr.get("img", "")
-                img_s = (img[:90] + "...") if isinstance(img, str) and len(img) > 90 else img
-                print(f"[{i:02d}] {n} | {cap} | {ram} | {pa}€ (orig {po}€)", flush=True)
-                print(f"     URL: {urlp}", flush=True)
-                if img_s:
-                    print(f"     IMG: {img_s}", flush=True)
-            except Exception:
-                continue
-        print("-" * 70 + "\n", flush=True)
+        # Log de listado completo
+        print("\nLISTADO DE PRODUCTOS DETECTADOS (DOM)")
+        print("-" * 70)
+        for i, p in enumerate(productos, 1):
+            print(f"[{i:02d}] {p['nombre']} | {p['capacidad']} | {p['memoria']} | {p['precio_actual']}€ (orig {p['precio_regular']}€)")
+            print(f"     URL: {p['url_imp']}")
+            img = p.get('img') or ''
+            if img:
+                print(f"     IMG: {img[:85]}...")
+            else:
+                print("     IMG: (vacía)")
+        print("-" * 70)
+
+        # Resumen de descartes
+        if any(v for v in descartes.values()):
+            print(f"\nDescartes: {descartes}")
 
         return productos
 
