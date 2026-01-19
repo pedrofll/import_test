@@ -2,6 +2,7 @@ import os
 import time
 import re
 import requests
+import json
 import urllib.parse
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -350,8 +351,195 @@ def descubrir_urls_producto(html: str, base_url: str):
 def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int = 3):
     """
     Devuelve dict con {titulo, precio_actual, precio_original, img, capacidad, memoria}
-    usando la página de ficha.
+    leyendo la ficha del producto.
+
+    Ajustes para PhoneHouse:
+      - Precio actual: el precio "principal" (no 'desde', no cuotas/mes, no financiación).
+      - Precio original: el precio tachado junto al actual cuando exista.
+      - Imagen: múltiples fallbacks (og:image, twitter:image, JSON-LD, <img> con products-image).
     """
+
+    def _is_bad_price_context(txt: str) -> bool:
+        t = (txt or "").lower()
+        return (
+            "desde" in t
+            or "otras ofertas" in t
+            or "€/mes" in t
+            or "/mes" in t
+            or " mes" in t
+            or "financi" in t
+            or "cuota" in t
+        )
+
+    def _extract_jsonld_product(soup: BeautifulSoup):
+        """
+        Intenta extraer nombre/imagen/precio desde JSON-LD Product.
+        Devuelve dict parcial.
+        """
+        out = {"titulo": "", "img": "", "price": 0.0, "price_original": 0.0}
+        scripts = soup.find_all("script", type=re.compile(r"ld\+json", re.I))
+        for sc in scripts:
+            raw = (sc.string or sc.get_text() or "").strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+
+            nodes = data if isinstance(data, list) else [data]
+            for node in list(nodes):
+                if isinstance(node, dict) and isinstance(node.get("@graph"), list):
+                    nodes.extend([x for x in node["@graph"] if isinstance(x, dict)])
+
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                t = node.get("@type")
+                if isinstance(t, list):
+                    t = " ".join([str(x) for x in t])
+                t = str(t or "")
+                if "Product" not in t:
+                    continue
+
+                if not out["titulo"]:
+                    out["titulo"] = normalize_spaces(node.get("name") or "")
+
+                img = node.get("image")
+                if isinstance(img, list) and img:
+                    out["img"] = str(img[0]).strip()
+                elif isinstance(img, str):
+                    out["img"] = img.strip()
+
+                offers = node.get("offers")
+                if isinstance(offers, list) and offers:
+                    offers = offers[0]
+                if isinstance(offers, dict):
+                    price = offers.get("price")
+                    try:
+                        if price is not None:
+                            out["price"] = float(str(price).replace(",", "."))
+                    except Exception:
+                        pass
+
+                    ps = offers.get("priceSpecification")
+                    vals = []
+                    if isinstance(ps, list):
+                        for spec in ps:
+                            if not isinstance(spec, dict):
+                                continue
+                            try:
+                                vals.append(float(str(spec.get("price")).replace(",", ".")))
+                            except Exception:
+                                continue
+                    elif isinstance(ps, dict):
+                        try:
+                            vals.append(float(str(ps.get("price")).replace(",", ".")))
+                        except Exception:
+                            pass
+                    if vals:
+                        out["price_original"] = max(vals)
+
+        return out
+
+    def _extract_img(soup: BeautifulSoup):
+        for tag in soup.select('meta[property="og:image"], meta[name="twitter:image"]'):
+            val = tag.get("content")
+            if val and "http" in val:
+                return val.strip()
+
+        link_img = soup.find("link", rel="image_src")
+        if link_img and link_img.get("href"):
+            return link_img["href"].strip()
+
+        j = _extract_jsonld_product(soup)
+        if j.get("img"):
+            return j["img"]
+
+        for im in soup.find_all("img", src=True):
+            s = (im.get("src") or "").strip()
+            if s and ("products-image" in s) and ("logo" not in s.lower()):
+                return s
+
+        for im in soup.find_all("img"):
+            for attr in ("data-src", "data-original", "data-lazy"):
+                s = (im.get(attr) or "").strip()
+                if s and ("products-image" in s) and ("logo" not in s.lower()):
+                    return s
+
+        return ""
+
+    def _extract_prices_html(soup: BeautifulSoup):
+        # 1) Original tachado explícito
+        original = 0
+        # <s>/<del> primero
+        for el in soup.find_all(["s", "del"]):
+            t = normalize_spaces(el.get_text(" ", strip=True))
+            if "€" not in t:
+                continue
+            if _is_bad_price_context(t):
+                continue
+            p = parse_eur_int(t)
+            if p > 0:
+                original = p
+                break
+        if original == 0:
+            for el in soup.find_all(["span", "div"], class_=re.compile(r"old|before|tachad|strike|was|previous", re.I)):
+                t = normalize_spaces(el.get_text(" ", strip=True))
+                if "€" not in t:
+                    continue
+                if _is_bad_price_context(t):
+                    continue
+                p = parse_eur_int(t)
+                if p > 0:
+                    original = p
+                    break
+
+        # 2) Actual desde meta
+        actual = 0
+        mp = soup.find("meta", property="product:price:amount")
+        if mp and mp.get("content"):
+            actual = parse_eur_int(mp["content"])
+
+        # 3) Actual desde HTML: escoger el menor precio "bueno" (evita PVP altos/financiación)
+        if actual == 0:
+            prices = []
+            for el in soup.find_all(["span", "div", "p"]):
+                t = normalize_spaces(el.get_text(" ", strip=True))
+                if "€" not in t:
+                    continue
+                if _is_bad_price_context(t):
+                    continue
+                p = parse_eur_int(t)
+                if p > 0:
+                    prices.append(p)
+            if prices:
+                actual = min(prices)
+
+        # 4) Original fallback: si existe original y es < actual, corrige con el siguiente mayor
+        if original and actual and original < actual:
+            original = 0
+
+        if original == 0 and actual:
+            # buscar el menor precio mayor que actual en todo el HTML (sin 'desde')
+            prices = []
+            for el in soup.find_all(["span", "div", "p", "s", "del"]):
+                t = normalize_spaces(el.get_text(" ", strip=True))
+                if "€" not in t:
+                    continue
+                if _is_bad_price_context(t):
+                    continue
+                p = parse_eur_int(t)
+                if p > 0:
+                    prices.append(p)
+            bigger = sorted({p for p in prices if p > actual})
+            original = bigger[0] if bigger else actual
+
+        if original == 0:
+            original = actual
+
+        return actual, original
+
     for attempt in range(1, max_retries + 1):
         try:
             r = session.get(url, headers=HEADERS, timeout=30)
@@ -364,74 +552,51 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
 
             soup = BeautifulSoup(r.text, "html.parser")
 
-            # Título: h1 o meta og:title
+            # Título
             titulo = ""
             h1 = soup.find("h1")
             if h1:
-                titulo = normalize_spaces(h1.get_text())
+                titulo = normalize_spaces(h1.get_text(" ", strip=True))
             if not titulo:
                 og = soup.find("meta", property="og:title")
                 if og and og.get("content"):
                     titulo = normalize_spaces(og["content"])
 
-            # Imagen: og:image
-            img = ""
-            ogi = soup.find("meta", property="og:image")
-            if ogi and ogi.get("content"):
-                img = ogi["content"].strip()
+            j = _extract_jsonld_product(soup)
+            if not titulo and j.get("titulo"):
+                titulo = j["titulo"]
 
-            # Precios: buscamos primero en elementos comunes
-            precio_actual = 0
-            precio_original = 0
+            # Imagen
+            img = _extract_img(soup)
+            img = abs_url(url, img) if img else ""
 
-            # 1) meta product:price:amount (si existe)
-            mp = soup.find("meta", property="product:price:amount")
-            if mp and mp.get("content"):
-                precio_actual = parse_eur_int(mp["content"])
+            # Precios HTML
+            precio_actual, precio_original = _extract_prices_html(soup)
 
-            # 2) buscar tokens con €
-            if precio_actual == 0:
-                # prioriza zonas con "price"
-                candidates = soup.find_all(["span", "div"], class_=re.compile(r"price|precio", re.I))
-                for c in candidates:
-                    t = normalize_spaces(c.get_text())
-                    if "€" in t:
-                        p = parse_eur_int(t)
-                        if p > 0:
-                            precio_actual = p
-                            break
+            # JSON-LD precio actual solo si el HTML parece vacío
+            try:
+                jprice = float(j.get("price") or 0)
+                if jprice > 0 and precio_actual == 0:
+                    precio_actual = int(round(jprice))
+            except Exception:
+                pass
 
-            # Original (tachado) si lo hay
-            candidates2 = soup.find_all(["s", "del", "span", "div"], class_=re.compile(r"old|before|tachad|price", re.I))
-            for c in candidates2:
-                t = normalize_spaces(c.get_text())
-                if "€" in t:
-                    p = parse_eur_int(t)
-                    if p > 0 and (precio_original == 0 or p > precio_original):
-                        precio_original = p
-
-            if precio_original == 0:
-                precio_original = precio_actual
-
-            # RAM/capacidad desde título
+            # RAM/capacidad
             nombre, cap, ram = extraer_nombre_memoria_capacidad(titulo or "")
             es_iphone = "iphone" in (nombre or "").lower()
-
             if es_iphone and not ram:
                 ram = ram_por_modelo_iphone(nombre) or ""
 
-            # Si falta algo, buscar en specs
-            if not cap or (not ram and not es_iphone):
+            if not cap or ((not ram) and (not es_iphone)):
                 cap2, ram2 = extraer_specs_ram_cap(soup)
                 cap = cap or cap2
                 if not ram:
                     ram = ram2
 
-            # Validación mínima
-            # DEBUG precios de ficha (para diagnosticar precios mal parseados)
+            # DEBUG
             try:
                 _t = (titulo or "").replace("\n", " ")
-                print(f"   🧾 [FICHA] {mask_url(url)} | actual={precio_actual}€ | original={precio_original}€ | titulo='{_t[:60]}'", flush=True)
+                print(f"   🧾 [FICHA] {mask_url(url)} | actual={precio_actual}€ | original={precio_original}€ | img={'OK' if img else 'VACIA'} | titulo='{_t[:60]}'", flush=True)
             except Exception:
                 pass
 
@@ -441,9 +606,9 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
                 "capacidad": cap,
                 "memoria": ram,
                 "es_iphone": es_iphone,
-                "precio_actual": precio_actual,
-                "precio_original": precio_original,
-                "img": img
+                "precio_actual": int(precio_actual or 0),
+                "precio_original": int(precio_original or 0),
+                "img": img,
             }
         except Exception:
             time.sleep(1.0 * attempt)
