@@ -332,137 +332,63 @@ def obtener_html_con_scroll(url: str) -> str | None:
         stable_rounds = 0
         max_rounds = 45
 
-        print("🧭 Haciendo scroll hasta el final...", flush=True)
+        print("🧭 Haciendo scroll (sin hacer click) hasta que aparezca 'Ver más' y/o deje de cargar...", flush=True)
 
-        for _ in range(max_rounds):
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1.6)
-            new_height = driver.execute_script("return document.body.scrollHeight")
-
-            if new_height == last_height:
-                stable_rounds += 1
-                if stable_rounds >= 3:
-                    break
-            else:
-                stable_rounds = 0
-                last_height = new_height
-
-        return driver.page_source
-    except TimeoutException:
-        return None
-    except Exception:
-        return None
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-
-# --------------------------
-# DESCUBRIR URLs de producto
-# --------------------------
-PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
-
-
-
-def obtener_productos_desde_dom(url: str, objetivo: int = 72):
-    """Extrae productos del LISTADO (cards) usando Selenium DOM.
-
-    Reglas clave:
-      - Solo acepta items del listado principal (input data-item_list_id=31, name=Todos los Móviles y Smartphones)
-      - Precio SOLO desde span.precio-2 / precio tachado del card (ignora 'Otras ofertas desde')
-      - Nunca usa la ficha para precios (evita cuotas 4€/mes)
-    """
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-    except Exception as e:
-        print(f"❌ Selenium no disponible: {e}", flush=True)
-        return []
-
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1400,2200")
-    opts.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-    driver = webdriver.Chrome(options=opts)
-
-    hoy = datetime.now().strftime("%d/%m/%Y")
-
-    try:
-        driver.get(url)
-        time.sleep(2)
-
-        current = getattr(driver, 'current_url', '') or ''
-        print(f"URL final (Selenium): {mask_url(current)}", flush=True)
-
-        # Forzar URL esperada si hay redirección
-        if EXPECTED_PATH not in current:
-            print(f"⚠️  Redirección detectada. Reintentando a {EXPECTED_PATH}...", flush=True)
-            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
-            time.sleep(2)
-            current = getattr(driver, 'current_url', '') or ''
-            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
-
-        if EXPECTED_PATH not in current:
-            print("❌ ERROR: no estamos en 'todos-los-smartphones'. Abortando.", flush=True)
-            return []
-
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.item-listado-final"))
-        )
-
-        print("🧭 Haciendo scroll hasta el final...", flush=True)
-        last_h = 0
-        stable = 0
-        for _ in range(70):
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1.2)
-            h = driver.execute_script("return document.body.scrollHeight")
-            if h == last_h:
-                stable += 1
-            else:
-                stable = 0
-            last_h = h
-            if stable >= 3:
-                break
-
-        # Algunos listados usan botón "Ver más" (paginación AJAX). Intentamos pulsarlo varias veces.
-        for _ in range(25):
+        def count_items():
             try:
-                btns = driver.find_elements(By.XPATH, "//button[contains(., 'Ver más') or contains(., 'Ver mas') or contains(., 'Ver m\u00e1s')]")
-                btn = None
+                return len(driver.find_elements(
+                    By.CSS_SELECTOR,
+                    f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
+                ))
+            except Exception:
+                return 0
+
+        prev = -1
+        stable = 0
+        seen_more = False
+
+        # Scroll progresivo: algunos listados añaden productos al acercarse al final y luego muestran el botón "Ver más"
+        for i in range(160):
+            driver.execute_script("window.scrollBy(0, 1200);")
+            time.sleep(0.8)
+
+            # comprobar si aparece el botón (NO se pulsa)
+            try:
+                btns = driver.find_elements(By.CSS_SELECTOR, "#seemorediv a.button-secondary-small, #seemore a.button-secondary-small, a.button-secondary-small[href*='seemore']")
                 for b in btns:
                     try:
-                        if b.is_displayed() and b.is_enabled():
-                            btn = b
+                        if b.is_displayed():
+                            seen_more = True
+                            if i == 0:
+                                pass
                             break
                     except Exception:
                         continue
-                if not btn:
-                    break
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                time.sleep(0.5)
-                driver.execute_script("arguments[0].click();", btn)
-                time.sleep(2.0)
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1.2)
             except Exception:
+                pass
+
+            cur = count_items()
+            if cur != prev:
+                print(f"   📦 Items listado (id={LIST_ID}) ahora: {cur}", flush=True)
+                prev = cur
+                stable = 0
+            else:
+                stable += 1
+
+            # condición de salida: no crece durante varios ciclos y ya vimos el botón (o llevamos mucho estable)
+            if stable >= 8 and seen_more:
+                print("✅ Detectado botón 'Ver más'. No se hace click (según indicación).", flush=True)
+                break
+            if stable >= 18:
+                # aunque no veamos el botón, si no crece durante mucho, paramos para evitar bucles
                 break
 
-        # scroll final por si el "Ver más" añadió elementos
+        # scroll final al fondo por seguridad
         try:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1.2)
+            time.sleep(1.0)
         except Exception:
             pass
-
 
         # Items del listado principal (el <input> tiene dataset GTM)
         items = driver.find_elements(
@@ -587,29 +513,9 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             if es_iphone and not ram:
                 ram = ram_por_modelo_iphone(nombre) or ""
 
-            # Si faltan specs o imagen, consultamos la ficha SOLO para completar (sin precios)
-            if (not cap) or ((not ram) and (not es_iphone)) or (not img):
-                try:
-                    ficha = fetch_ficha_producto(href, session=None, max_retries=2)
-                except TypeError:
-                    ficha = fetch_ficha_producto(href)
-                except Exception:
-                    ficha = None
-
-                if ficha:
-                    cap = cap or (ficha.get("capacidad") or "")
-                    ram = ram or (ficha.get("memoria") or "")
-                    img = img or (ficha.get("img") or "")
-
-
             # solo móviles con RAM y capacidad
             if not cap:
-                # intento extra: deducir capacidad desde URL
-                mcap = re.search(r"-(\d+)(gb|tb)(?:-|\.html)", href, flags=re.I)
-                if mcap:
-                    cap = f"{mcap.group(1)}{mcap.group(2).upper()}"
-                else:
-                    continue
+                continue
             if (not ram) and (not es_iphone):
                 continue
             if es_iphone and not ram:
@@ -641,6 +547,27 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             })
 
         print(f"✅ Productos DOM válidos: {len(productos)}", flush=True)
+
+        # Listado completo de productos detectados (debug)
+        print("\n📋 LISTADO DE PRODUCTOS DETECTADOS (DOM)\n" + "-" * 70, flush=True)
+        for i, pr in enumerate(productos, 1):
+            try:
+                n = pr.get("nombre", "")
+                cap = pr.get("capacidad", "")
+                ram = pr.get("memoria", "")
+                pa = pr.get("precio_actual", "")
+                po = pr.get("precio_original", "")
+                urlp = pr.get("url_imp", "")
+                img = pr.get("img", "")
+                img_s = (img[:90] + "...") if isinstance(img, str) and len(img) > 90 else img
+                print(f"[{i:02d}] {n} | {cap} | {ram} | {pa}€ (orig {po}€)", flush=True)
+                print(f"     URL: {urlp}", flush=True)
+                if img_s:
+                    print(f"     IMG: {img_s}", flush=True)
+            except Exception:
+                continue
+        print("-" * 70 + "\n", flush=True)
+
         return productos
 
     finally:
