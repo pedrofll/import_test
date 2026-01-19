@@ -418,7 +418,13 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.item-listado-final"))
         )
 
-        print("🧭 Haciendo scroll (SIN CLICK) para forzar carga de más productos...", flush=True)
+        print("🧭 Scroll + paginación AJAX (seemore): cargando más bloques hasta alcanzar el objetivo...", flush=True)
+
+        try:
+            has_seemore = driver.execute_script("return (typeof seemore === 'function' || typeof window.seemore === 'function');")
+        except Exception:
+            has_seemore = False
+        print(f"   🔎 seemore() disponible: {'SÍ' if has_seemore else 'NO'}", flush=True)
 
         def count_items():
             try:
