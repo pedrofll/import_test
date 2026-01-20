@@ -2,36 +2,41 @@ import os
 import time
 import re
 import requests
-import json
 import urllib.parse
-from datetime import datetime
+import traceback
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from woocommerce import API
 
 # ============================================================
-#  PHONEHOUSE SCRAPER (SCROLL + MASK + FULL PRODUCT FETCH)
-# ============================================================
-# Cambios clave (v2):
-#  - Selenium scroll para cargar el listado completo.
-#  - Descubrimiento de URLs más agresivo:
-#       * <a href>, atributos data-*, y búsqueda regex en el HTML completo.
-#  - Para cada URL de producto detectada, se hace fetch de la ficha (requests)
-#    para extraer precio/imagen/título y (si falta) RAM/capacidad desde specs.
-#  - Logs enmascarados: no imprime querystrings/afiliados.
+#   CONFIGURACIÓN ROBUSTA (BASE_URL, URLS_PAGINAS, IMPORTACIÓN)
 # ============================================================
 
-# --- CONFIG ---
-DEFAULT_START_URL = "https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html"
-EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
-LIST_ID = '31'
-LIST_NAME = 'Todos los Móviles y Smartphones'
-START_URL = os.getenv('SOURCE_URL_PHONEHOUSE') or 'https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html'
-EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
+# 1) Intentar leer lista completa desde TSZ_URLS (secreto opcional)
+#    Formato: url1,url2,url3
+tsz_urls_raw = os.environ.get("TSZ_URLS", "").strip()
 
-# Afiliado (secret/env). Acepta "utm=..." o "?utm=..."
-AFF_RAW = os.environ.get("AFF_PHONEHOUSE", "").strip()
-if AFF_RAW and not AFF_RAW.startswith("?") and not AFF_RAW.startswith("&"):
-    AFF_RAW = "?" + AFF_RAW
+if tsz_urls_raw:
+    # Si TSZ_URLS existe, se usa directamente
+    URLS_PAGINAS = [u.strip() for u in tsz_urls_raw.split(",") if u.strip()]
+
+    # BASE_URL derivado automáticamente de la primera URL
+    # Ejemplo: https://www.phonehouse.es/moviles-y-telefonia/moviles/novedades.html → https://www.phonehouse.es
+    primera = URLS_PAGINAS[0]
+    BASE_URL = primera.split("/en/")[0].rstrip("/")
+
+else:
+    # 2) Fallback: usar dominio base desde secreto SOURCE_URL_TRADINGSENZHEN
+    BASE_URL = os.environ["SOURCE_URL_TRADINGSENZHEN"].rstrip("/")
+
+    URLS_PAGINAS = [
+        f"{BASE_URL}/moviles-y-telefonia/moviles/novedades.html",
+        f"{BASE_URL}/moviles-y-telefonia/moviles/top-ventas.html",
+        f"{BASE_URL}/moviles-y-telefonia/moviles/todos-los-smartphones.html"
+    ]
+
+# 3) Identificador de importación (oculto)
+ID_IMPORTACION = f"{BASE_URL}/"
 
 FUENTE = "Phone House"
 ID_IMPORTACION = "https://www.phonehouse.es"
