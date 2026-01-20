@@ -26,8 +26,8 @@ if tsz_urls_raw:
     BASE_URL = primera.split("/en/")[0].rstrip("/")
 
 else:
-    # 2) Fallback: usar dominio base desde secreto SOURCE_URL_TRADINGSENZHEN
-    BASE_URL = os.environ["SOURCE_URL_TRADINGSENZHEN"].rstrip("/")
+    # 2) Fallback: usar dominio base desde secreto SOURCE_URL_PHONEHOUSE
+    BASE_URL = os.environ["SOURCE_URL_PHONEHOUSE"].rstrip("/")
 
     URLS_PAGINAS = [
         f"{BASE_URL}/moviles-y-telefonia/moviles/novedades.html",
