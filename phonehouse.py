@@ -1257,14 +1257,18 @@ def sincronizar(remotos):
     print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
     print(f"============================================================", flush=True)
     print(f"📊 TOTAL PRODUCTOS PROCESADOS: {total} (Objetivo: {OBJETIVO})", flush=True)
+    print(f"\n============================================================", flush=True)
 
+    print(f"\n============================================================", flush=True)
     print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}", flush=True)
     for item in summary_creados:
         print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
+        print(f"\n============================================================", flush=True)
 
     print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
     for item in summary_eliminados:
         print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
+        print(f"\n============================================================", flush=True)
 
     print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
     for item in summary_actualizados:
