@@ -1143,32 +1143,60 @@ def sincronizar(remotos):
             img_final_producto = img_subcat or r.get("img") or ""
 
             if match:
-                # comparar precio_actual
-                try:
-                    p_acf = int(float(match["meta"].get("precio_actual", 0) or 0))
-                except Exception:
-                    p_acf = 0
+                # Comparar precios (actual y original) y actualizar si procede
+                cambios = []
 
-                if r["precio_actual"] != p_acf:
-                    cambio_str = f"{p_acf}€ -> {r['precio_actual']}€"
-                    print(f"🔄 ACTUALIZANDO: {r['nombre']} ({cambio_str})", flush=True)
-                    wcapi.put(
-                        f"products/{match['id']}",
-                        {
-                            "sale_price": str(r["precio_actual"]),
-                            "regular_price": str(r["precio_original"]),
-                            "meta_data": [
-                                {"key": "precio_actual", "value": str(r["precio_actual"])},
-                                {"key": "precio_original", "value": str(r["precio_original"])},
-                                {"key": "enviado_desde_tg", "value": ENVIADO_DESDE_TG},
-                                {"key": "url_oferta", "value": url_oferta},
-                                {"key": "url_sin_acortar_con_mi_afiliado", "value": url_con_afiliado},
-                                {"key": "imagen_producto", "value": r.get("img","")},
-                                {"key": "version", "value": r.get("version","Global")},
-                            ],
-                        },
-                    )
-                    summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambios": cambios})
+                # precio_actual y precio_original locales (guardados en meta)
+                try:
+                    p_act = int(float(match.get('meta', {}).get('precio_actual', 0) or 0))
+                except Exception:
+                    p_act = 0
+                try:
+                    p_orig = int(float(match.get('meta', {}).get('precio_original', 0) or 0))
+                except Exception:
+                    p_orig = 0
+
+                # precios remotos (Phone House)
+                r_act = int(r.get('precio_actual') or 0)
+                r_orig = int(r.get('precio_original') or r_act or 0)
+
+                if p_act != r_act:
+                    cambios.append(f"precio_actual: {p_act}€ -> {r_act}€")
+                if p_orig != r_orig:
+                    cambios.append(f"precio_original: {p_orig}€ -> {r_orig}€")
+
+                if cambios:
+                    print(f"🔄 ACTUALIZANDO: {r['nombre']} ({p_act}€ -> {r_act}€)", flush=True)
+                    data = {
+                        "regular_price": str(r_orig),
+                        "sale_price": str(r_act),
+                        "meta_data": [
+                            {"key": "precio_actual", "value": str(r_act)},
+                            {"key": "precio_original", "value": str(r_orig)},
+                            {"key": "url_oferta", "value": r.get('url','')},
+                            {"key": "imagen_producto", "value": r.get('img','')},
+                            {"key": "version", "value": r.get('version','Global')},
+                            {"key": "enviado_desde", "value": ENVIADO_DESDE},
+                            {"key": "enviado_desde_tg", "value": ENVIADO_DESDE_TG},
+                            {"key": "importado_de", "value": ID_IMPORTACION},
+                            {"key": "fecha", "value": r.get('fecha','')},
+                            {"key": "memoria", "value": r.get('memoria','')},
+                            {"key": "capacidad", "value": r.get('capacidad','')},
+                            {"key": "fuente", "value": FUENTE},
+                            {"key": "codigo_de_descuento", "value": CODIGO_DESCUENTO},
+                            {"key": "enlace_de_compra_importado", "value": url_base},
+                            {"key": "url_importada_sin_afiliado", "value": url_base},
+                            {"key": "url_sin_acortar_con_mi_afiliado", "value": url_con_afiliado},
+                            {"key": "origen_listado", "value": r.get('origen_listado','')},
+                        ],
+                    }
+
+                    try:
+                        wcapi.put(f"products/{match['id']}", data).json()
+                        summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambios": cambios})
+                    except Exception as e:
+                        print(f"❌ ERROR en {r['nombre']}: {e}", flush=True)
+                        summary_fallidos.append({"nombre": r["nombre"], "id": match["id"], "error": str(e)})
                 else:
                     summary_ignorados.append({"nombre": r["nombre"], "id": match["id"]})
 
@@ -1257,18 +1285,14 @@ def sincronizar(remotos):
     print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
     print(f"============================================================", flush=True)
     print(f"📊 TOTAL PRODUCTOS PROCESADOS: {total} (Objetivo: {OBJETIVO})", flush=True)
-    print(f"\n============================================================", flush=True)
 
-    print(f"\n============================================================", flush=True)
     print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}", flush=True)
     for item in summary_creados:
         print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
-        print(f"\n============================================================", flush=True)
 
     print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
     for item in summary_eliminados:
         print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
-        print(f"\n============================================================", flush=True)
 
     print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
     for item in summary_actualizados:
