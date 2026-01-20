@@ -107,6 +107,40 @@ def abs_url(base: str, href: str) -> str:
     except Exception:
         return href
 
+# -----------------------------------------------------------------------------
+# Normalización de imágenes (evita thumbnails deformados en la web)
+# -----------------------------------------------------------------------------
+IMAGE_SIZE = 600
+
+def normalize_image_url(url: str, size: int = IMAGE_SIZE) -> str:
+    """Fuerza parámetros w/h a un tamaño cuadrado.
+
+    Phonehouse usa una CDN que acepta query params tipo ?w=200&h=176.
+    Aquí normalizamos a 600x600 para estabilizar el layout en WordPress.
+
+    Si la URL no tiene query o no es parseable, se devuelve tal cual.
+    """
+    if not url:
+        return url
+    try:
+        u = urllib.parse.urlsplit(url)
+        qs = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+
+        # Elimina posibles claves vacías (p.ej. query que empieza por '&').
+        qs.pop('', None)
+
+        qs['w'] = [str(size)]
+        qs['h'] = [str(size)]
+
+        # Para que sea cuadrada, muchas CDNs respetan fit=crop.
+        # Si la CDN no lo soporta, no rompe; solo ignorará el parámetro.
+        qs.setdefault('fit', ['crop'])
+
+        new_q = urllib.parse.urlencode(qs, doseq=True)
+        return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, new_q, u.fragment))
+    except Exception:
+        return url
+
 def parse_eur_int(txt: str) -> int:
     """Convierte un texto que contiene un precio en euros a entero.
 
@@ -555,7 +589,6 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
 
             if precio_actual < 20:
                 continue
-
             # imagen
             img = ""
             try:
@@ -566,6 +599,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
                         if v.startswith("//"):
                             v = "https:" + v
                         img = abs_url("https://www.phonehouse.es", v)
+                        img = normalizar_url_imagen(img)
                         break
             except Exception:
                 pass
@@ -938,6 +972,8 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
             img = _extract_img(soup)
             img = abs_url(url, img) if img else ""
 
+            if img:
+                img = normalizar_url_imagen(img)
             # Precios HTML
                         # JSON-LD (si existe) para apoyar el parseo
             j = j2
@@ -1141,7 +1177,8 @@ def sincronizar(remotos):
                 actualizar_imagen_categoria(cache_categorias, id_hijo, r["img"])
                 img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
             img_final_producto = img_subcat or r.get("img") or ""
-
+            if img_final_producto:
+                img_final_producto = normalizar_url_imagen(img_final_producto)
             if match:
                 # Comparar precios (actual y original) y actualizar si procede
                 cambios = []
@@ -1174,7 +1211,7 @@ def sincronizar(remotos):
                             {"key": "precio_actual", "value": str(r_act)},
                             {"key": "precio_original", "value": str(r_orig)},
                             {"key": "url_oferta", "value": r.get('url','')},
-                            {"key": "imagen_producto", "value": r.get('img','')},
+                            {"key": "imagen_producto", "value": img_final_producto},
                             {"key": "version", "value": r.get('version','Global')},
                             {"key": "enviado_desde", "value": ENVIADO_DESDE},
                             {"key": "enviado_desde_tg", "value": ENVIADO_DESDE_TG},
@@ -1226,7 +1263,7 @@ def sincronizar(remotos):
                         {"key": "url_importada_sin_afiliado", "value": url_base},
                         {"key": "url_sin_acortar_con_mi_afiliado", "value": url_con_afiliado},
                         {"key": "url_oferta", "value": url_oferta},
-                        {"key": "imagen_producto", "value": r.get("img","")},
+                        {"key": "imagen_producto", "value": img_final_producto},
                         {"key": "version", "value": r.get("version","Global")},
                     ],
                 }
@@ -1280,7 +1317,7 @@ def sincronizar(remotos):
     )
 
     hoy_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
+
     print(f"\n============================================================", flush=True)
     print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
     print(f"============================================================", flush=True)
@@ -1318,8 +1355,3 @@ if __name__ == "__main__":
     remotos = obtener_datos_remotos()
     if remotos:
         sincronizar(remotos)
-
-
-
-
-   
