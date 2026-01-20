@@ -107,39 +107,38 @@ def abs_url(base: str, href: str) -> str:
     except Exception:
         return href
 
-# -----------------------------------------------------------------------------
-# Normalización de imágenes (evita thumbnails deformados en la web)
-# -----------------------------------------------------------------------------
-IMAGE_SIZE = 600
+def normalizar_url_imagen(url: str, size: int = 600) -> str:
+    """Fuerza un tamaño cuadrado (por defecto 600x600) en URLs de imagen.
 
-def normalize_image_url(url: str, size: int = IMAGE_SIZE) -> str:
-    """Fuerza parámetros w/h a un tamaño cuadrado.
-
-    Phonehouse usa una CDN que acepta query params tipo ?w=200&h=176.
-    Aquí normalizamos a 600x600 para estabilizar el layout en WordPress.
-
-    Si la URL no tiene query o no es parseable, se devuelve tal cual.
+    PhoneHouse CDN suele aceptar parámetros de query tipo ?w=...&h=...
+    Si ya existen, se sobrescriben; si no, se añaden.
     """
     if not url:
         return url
-    try:
-        u = urllib.parse.urlsplit(url)
-        qs = urllib.parse.parse_qs(u.query, keep_blank_values=True)
-
-        # Elimina posibles claves vacías (p.ej. query que empieza por '&').
-        qs.pop('', None)
-
-        qs['w'] = [str(size)]
-        qs['h'] = [str(size)]
-
-        # Para que sea cuadrada, muchas CDNs respetan fit=crop.
-        # Si la CDN no lo soporta, no rompe; solo ignorará el parámetro.
-        qs.setdefault('fit', ['crop'])
-
-        new_q = urllib.parse.urlencode(qs, doseq=True)
-        return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, new_q, u.fragment))
-    except Exception:
+    url = str(url).strip()
+    if not url:
         return url
+    if url.startswith("//"):
+        url = "https:" + url
+
+    try:
+        parts = urllib.parse.urlsplit(url)
+        q = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
+
+        # Sobrescribir posibles parámetros de tamaño
+        for k in ("w", "h", "width", "height"):
+            q.pop(k, None)
+            q.pop(k.upper(), None)
+
+        q["w"] = [str(size)]
+        q["h"] = [str(size)]
+
+        new_query = urllib.parse.urlencode(q, doseq=True)
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+    except Exception:
+        # En caso de URL rara/no parseable, devolver sin tocar
+        return url
+
 
 def parse_eur_int(txt: str) -> int:
     """Convierte un texto que contiene un precio en euros a entero.
@@ -589,6 +588,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
 
             if precio_actual < 20:
                 continue
+
             # imagen
             img = ""
             try:
@@ -599,7 +599,6 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
                         if v.startswith("//"):
                             v = "https:" + v
                         img = abs_url("https://www.phonehouse.es", v)
-                        img = normalizar_url_imagen(img)
                         break
             except Exception:
                 pass
@@ -631,7 +630,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
                 "capacidad": cap,
                 "precio_actual": int(precio_actual),
                 "precio_original": int(precio_original or precio_actual),
-                "img": img,
+                "img": normalizar_url_imagen(img),
                 "url_imp": href,
                 "origen_pagina": str(source_label),
                 "origen_listado": url,
@@ -840,26 +839,26 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
         for tag in soup.select('meta[property="og:image"], meta[name="twitter:image"]'):
             val = tag.get("content")
             if val and "http" in val:
-                return val.strip()
+                return normalizar_url_imagen(val.strip())
 
         link_img = soup.find("link", rel="image_src")
         if link_img and link_img.get("href"):
-            return link_img["href"].strip()
+            return normalizar_url_imagen(link_img["href"].strip())
 
         j = _extract_jsonld_product(soup)
         if j.get("img"):
-            return j["img"]
+            return normalizar_url_imagen(j["img"])
 
         for im in soup.find_all("img", src=True):
             s = (im.get("src") or "").strip()
             if s and ("products-image" in s) and ("logo" not in s.lower()):
-                return s
+                return normalizar_url_imagen(s)
 
         for im in soup.find_all("img"):
             for attr in ("data-src", "data-original", "data-lazy"):
                 s = (im.get(attr) or "").strip()
                 if s and ("products-image" in s) and ("logo" not in s.lower()):
-                    return s
+                    return normalizar_url_imagen(s)
 
         return ""
 
@@ -972,8 +971,6 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
             img = _extract_img(soup)
             img = abs_url(url, img) if img else ""
 
-            if img:
-                img = normalizar_url_imagen(img)
             # Precios HTML
                         # JSON-LD (si existe) para apoyar el parseo
             j = j2
@@ -1021,7 +1018,7 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
                 "es_iphone": es_iphone,
                 "precio_actual": int(precio_actual or 0),
                 "precio_original": int(precio_original or 0),
-                "img": img,
+                "img": normalizar_url_imagen(img),
             }
         except Exception:
             time.sleep(1.0 * attempt)
@@ -1097,7 +1094,7 @@ def obtener_imagen_categoria(cache_categorias, cat_id):
     for c in cache_categorias:
         if c.get("id") == cat_id:
             img = c.get("image") or {}
-            return img.get("src") or ""
+            return normalizar_url_imagen(img).get("src") or ""
     return ""
 
 def actualizar_imagen_categoria(cache_categorias, cat_id, img_src):
@@ -1177,8 +1174,7 @@ def sincronizar(remotos):
                 actualizar_imagen_categoria(cache_categorias, id_hijo, r["img"])
                 img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
             img_final_producto = img_subcat or r.get("img") or ""
-            if img_final_producto:
-                img_final_producto = normalizar_url_imagen(img_final_producto)
+
             if match:
                 # Comparar precios (actual y original) y actualizar si procede
                 cambios = []
@@ -1211,7 +1207,7 @@ def sincronizar(remotos):
                             {"key": "precio_actual", "value": str(r_act)},
                             {"key": "precio_original", "value": str(r_orig)},
                             {"key": "url_oferta", "value": r.get('url','')},
-                            {"key": "imagen_producto", "value": img_final_producto},
+                            {"key": "imagen_producto", "value": r.get('img','')},
                             {"key": "version", "value": r.get('version','Global')},
                             {"key": "enviado_desde", "value": ENVIADO_DESDE},
                             {"key": "enviado_desde_tg", "value": ENVIADO_DESDE_TG},
@@ -1263,7 +1259,7 @@ def sincronizar(remotos):
                         {"key": "url_importada_sin_afiliado", "value": url_base},
                         {"key": "url_sin_acortar_con_mi_afiliado", "value": url_con_afiliado},
                         {"key": "url_oferta", "value": url_oferta},
-                        {"key": "imagen_producto", "value": img_final_producto},
+                        {"key": "imagen_producto", "value": r.get("img","")},
                         {"key": "version", "value": r.get("version","Global")},
                     ],
                 }
