@@ -26,19 +26,20 @@ EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 LIST_ID = '31'
 LIST_NAME = 'Todos los Móviles y Smartphones'
 START_URL = os.getenv('SOURCE_URL_PHONEHOUSE') or 'https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html'
-EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
-# Escaneo adicional solicitado: se añaden dos listados más sin alterar el resto del flujo.
-# Nota: START_URL se respeta (por env). Se agregan URLs extras fijas y se deduplican.
+# Además del listado principal, escaneamos también Novedades y Top Ventas
 EXTRA_SCAN_URLS = [
     "https://www.phonehouse.es/moviles-y-telefonia/moviles/novedades.html",
     "https://www.phonehouse.es/moviles-y-telefonia/moviles/top-ventas.html",
 ]
 
+# Lista final a escanear (mantiene orden y evita duplicados)
 SCAN_URLS = []
-for _u in [START_URL, *EXTRA_SCAN_URLS]:
+for _u in [START_URL] + EXTRA_SCAN_URLS:
     if _u and _u not in SCAN_URLS:
         SCAN_URLS.append(_u)
+
+EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
 # Afiliado (secret/env). Acepta "utm=..." o "?utm=..."
 AFF_RAW = os.environ.get("AFF_PHONEHOUSE", "").strip()
@@ -321,18 +322,7 @@ def obtener_html_con_scroll(url: str) -> str | None:
         current = getattr(driver, 'current_url', '') or ''
         print(f"URL final (Selenium): {mask_url(current)}", flush=True)
         if EXPECTED_PATH not in current:
-            print(f"⚠️  Redirección detectada (no estamos en {EXPECTED_PATH}). Reintentando...", flush=True)
-            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
-            time.sleep(2)
-            current = getattr(driver, 'current_url', '') or ''
-            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
-        if EXPECTED_PATH not in current:
-            print("❌ ERROR: No se pudo acceder a 'todos-los-smartphones'. Abortando.", flush=True)
-            try:
-                driver.quit()
-            except Exception:
-                pass
-            return None
+            print(f"⚠️ Redirección detectada: {mask_url(current)} (se continúa).", flush=True)
         try:
             print(f"URL final (Selenium): {mask_url(driver.current_url)}", flush=True)
         except Exception:
@@ -413,22 +403,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
 
         current = getattr(driver, 'current_url', '') or ''
         print(f"URL final (Selenium): {mask_url(current)}", flush=True)
-
-        # Cada URL tiene su propio path esperado (evita caer en /moviles.html u otras rutas)
-        expected_path = urllib.parse.urlsplit(url).path or ""
-
-        # Forzar URL esperada si hay redirección
-        if expected_path and expected_path not in current:
-            print(f"⚠️  Redirección detectada. Reintentando a {expected_path}...", flush=True)
-            driver.get('https://www.phonehouse.es' + expected_path)
-            time.sleep(2)
-            current = getattr(driver, 'current_url', '') or ''
-            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
-
-        if expected_path and expected_path not in current:
-            print(f"❌ ERROR: no estamos en la URL esperada ({expected_path}). Abortando.", flush=True)
-            return []
-
+        # Nota: no forzamos redirección a EXPECTED_PATH; cada URL se valida por LIST_ID/LIST_NAME.
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.item-listado-final"))
         )
@@ -451,7 +426,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
         # Items del listado principal (el <input> tiene dataset GTM)
         items = driver.find_elements(
             By.CSS_SELECTOR,
-            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}']",
+            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
         )
         print(f"✅ Items de listado (id={LIST_ID}) detectados: {len(items)}", flush=True)
         if len(items) == 0:
@@ -989,39 +964,36 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
 # --------------------------
 # EXTRACCIÓN REMOTA COMPLETA
 # --------------------------
+
 def obtener_datos_remotos():
-    """Extrae productos de PhoneHouse desde el listado (solo cards DOM)."""
     print("", flush=True)
     print("--- FASE 1: ESCANEANDO PHONE HOUSE ---", flush=True)
     print(f"URL base: {mask_url(START_URL)}", flush=True)
 
-    productos = []
-    vistos = set()
+    productos_total = []
+    vistos = set()  # (url, capacidad, ram)
 
-    # Escanea START_URL + las URLs extra (novedades/top-ventas) y unifica por url_imp
-    for scan_url in SCAN_URLS:
-        print("-" * 60, flush=True)
-        print(f"Escaneando listado: {mask_url(scan_url)}", flush=True)
+    for idx, scan_url in enumerate(SCAN_URLS, start=1):
+        print("------------------------------------------------------------", flush=True)
+        print(f"Escaneando listado: {scan_url}", flush=True)
+        lote = obtener_productos_desde_dom(scan_url, objetivo=OBJETIVO)
 
-        try:
-            lote = obtener_productos_desde_dom(scan_url, objetivo=OBJETIVO)
-        except Exception as e:
-            log_error(f"Fallo escaneando {mask_url(scan_url)}: {e}")
-            lote = []
+        # Marcar origen (1..N) y URL de listado
+        for p in lote:
+            p["pagina"] = idx
+            p["origen_listado"] = scan_url
 
-        for p in (lote or []):
-            key = (p.get('url_imp') or p.get('url') or '').strip()
-            if not key:
-                continue
+        for p in lote:
+            key = (p.get("url"), p.get("capacidad"), p.get("ram"))
             if key in vistos:
                 continue
             vistos.add(key)
-            productos.append(p)
+            productos_total.append(p)
 
     print("", flush=True)
     print("📊 RESUMEN EXTRACCIÓN:", flush=True)
-    print(f"   Productos únicos encontrados: {len(productos)}", flush=True)
-    return productos
+    print(f"   Productos únicos encontrados: {len(productos_total)}", flush=True)
+    return productos_total
 
 def obtener_todas_las_categorias():
     categorias = []
@@ -1126,7 +1098,7 @@ def sincronizar(remotos):
             print(f"5) Precio Actual:   {r.get('precio_actual',0)}€", flush=True)
             print(f"6) Precio Original: {r.get('precio_original',0)}€", flush=True)
             print(f"7) Enviado desde:   {r.get('enviado_desde','')}", flush=True)
-            print(f"8) Stock Real:      {r.get('cantidad','N/D')}", flush=True)
+            print(f"8) Importado de la página: {r.get('pagina','?')} | {mask_url(r.get('origen_listado',''))}", flush=True)
             img = (r.get('img','') or '')
             print(f"9) URL Imagen:      {(img[:75] + '...') if img else '(vacía)'}", flush=True)
             print(f"10) Enlace Compra:  {mask_url(r.get('url_imp',''))}", flush=True)
@@ -1261,19 +1233,40 @@ def sincronizar(remotos):
         len(summary_duplicados)
     )
 
-    print("\n============================================================", flush=True)
-    print(f"📋 RESUMEN DE EJECUCIÓN ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
+    hoy_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    print("", flush=True)
+    print("============================================================", flush=True)
+    print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
+    print("============================================================", flush=True)
+
+    print("", flush=True)
+    print(f"a) ARTICULOS CREADOS: {len(summary_creados)}", flush=True)
+    for item in summary_creados:
+        print(f"- {item.get('nombre')} (ID: {item.get('id')})", flush=True)
+
+    print("", flush=True)
+    print(f"b) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
+    for item in summary_eliminados:
+        print(f"- {item.get('nombre')} (ID: {item.get('id')})", flush=True)
+
+    print("", flush=True)
+    print(f"c) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
+    for item in summary_actualizados:
+        cambios = item.get('cambios') or item.get('cambio') or []
+        if isinstance(cambios, str):
+            cambios = [cambios]
+        cambios_txt = ', '.join(cambios) if cambios else 'N/D'
+        print(f"- {item.get('nombre')} (ID: {item.get('id')}): {cambios_txt}", flush=True)
+
+    print("", flush=True)
+    print(f"d) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}", flush=True)
+    for item in summary_ignorados:
+        print(f"- {item.get('nombre')} (ID: {item.get('id')})", flush=True)
+
     print("============================================================", flush=True)
     print(f"📊 TOTAL PRODUCTOS PROCESADOS: {total} (Objetivo: {OBJETIVO})", flush=True)
     print("------------------------------------------------------------", flush=True)
-    print(f"a) CREADOS: {len(summary_creados)}", flush=True)
-    print(f"c) ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
-    print(f"d) IGNORADOS: {len(summary_ignorados)}", flush=True)
-    print(f"f) DUPLICADOS: {len(summary_duplicados)}", flush=True)
-    print(f"g) FALLIDOS: {len(summary_fallidos)}", flush=True)
+    print(f"e) DUPLICADOS: {len(summary_duplicados)}", flush=True)
+    print(f"f) FALLIDOS: {len(summary_fallidos)}", flush=True)
     print("============================================================", flush=True)
-
-if __name__ == "__main__":
-    remotos = obtener_datos_remotos()
-    if remotos:
-        sincronizar(remotos)
