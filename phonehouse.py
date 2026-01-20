@@ -2,41 +2,58 @@ import os
 import time
 import re
 import requests
+import json
 import urllib.parse
-import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from bs4 import BeautifulSoup
 from woocommerce import API
 
 # ============================================================
-#   CONFIGURACIÓN ROBUSTA (BASE_URL, URLS_PAGINAS, IMPORTACIÓN)
+#  PHONEHOUSE SCRAPER (SCROLL + MASK + FULL PRODUCT FETCH)
+# ============================================================
+# Cambios clave (v2):
+#  - Selenium scroll para cargar el listado completo.
+#  - Descubrimiento de URLs más agresivo:
+#       * <a href>, atributos data-*, y búsqueda regex en el HTML completo.
+#  - Para cada URL de producto detectada, se hace fetch de la ficha (requests)
+#    para extraer precio/imagen/título y (si falta) RAM/capacidad desde specs.
+#  - Logs enmascarados: no imprime querystrings/afiliados.
 # ============================================================
 
-# 1) Intentar leer lista completa desde TSZ_URLS (secreto opcional)
-#    Formato: url1,url2,url3
-tsz_urls_raw = os.environ.get("TSZ_URLS", "").strip()
+# --- CONFIG ---
+DEFAULT_START_URL = "https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html"
+LIST_ID = '31'
+LIST_NAME = 'Todos los Móviles y Smartphones'
 
-if tsz_urls_raw:
-    # Si TSZ_URLS existe, se usa directamente
-    URLS_PAGINAS = [u.strip() for u in tsz_urls_raw.split(",") if u.strip()]
+# 1) URLs de listado (opcional, separadas por comas)
+#    PHONEHOUSE_URLS="https://www.phonehouse.es/.../novedades.html,https://www.phonehouse.es/.../top-ventas.html,https://www.phonehouse.es/.../todos-los-smartphones.html"
+PHONEHOUSE_URLS_RAW = (os.getenv("PHONEHOUSE_URLS") or "").strip()
 
-    # BASE_URL derivado automáticamente de la primera URL
-    # Ejemplo: https://www.phonehouse.es/moviles-y-telefonia/moviles/novedades.html → https://www.phonehouse.es
-    primera = URLS_PAGINAS[0]
-    BASE_URL = primera.split("/en/")[0].rstrip("/")
-
+if PHONEHOUSE_URLS_RAW:
+    URLS_PAGINAS = [u.strip() for u in PHONEHOUSE_URLS_RAW.split(",") if u.strip()]
+    _u0 = urllib.parse.urlsplit(URLS_PAGINAS[0])
+    BASE_URL = (f"{_u0.scheme}://{_u0.netloc}" if _u0.scheme and _u0.netloc else "https://www.phonehouse.es").rstrip("/")
 else:
-    # 2) Fallback: usar dominio base desde secreto SOURCE_URL_PHONEHOUSE
-    BASE_URL = os.environ["SOURCE_URL_PHONEHOUSE"].rstrip("/")
-
+    # 2) Fallback: derivar dominio base del secreto SOURCE_URL_PHONEHOUSE (si contiene ruta, se ignora)
+    _src = (os.getenv("SOURCE_URL_PHONEHOUSE") or "https://www.phonehouse.es").strip()
+    _u = urllib.parse.urlsplit(_src)
+    BASE_URL = (f"{_u.scheme}://{_u.netloc}" if _u.scheme and _u.netloc else _src).rstrip("/")
     URLS_PAGINAS = [
         f"{BASE_URL}/moviles-y-telefonia/moviles/novedades.html",
         f"{BASE_URL}/moviles-y-telefonia/moviles/top-ventas.html",
-        f"{BASE_URL}/moviles-y-telefonia/moviles/todos-los-smartphones.html"
+        f"{BASE_URL}/moviles-y-telefonia/moviles/todos-los-smartphones.html",
     ]
 
-# 3) Identificador de importación (oculto)
-ID_IMPORTACION = f"{BASE_URL}/"
+# Por compatibilidad: START_URL apunta a la primera URL configurada
+START_URL = URLS_PAGINAS[0] if URLS_PAGINAS else DEFAULT_START_URL
+
+# Permitimos únicamente las rutas de los listados configurados (seguridad anti-importación accidental)
+ALLOWED_PATHS = {urllib.parse.urlsplit(u).path for u in URLS_PAGINAS if u}
+
+# Afiliado (secret/env). Acepta "utm=..." o "?utm=..."
+AFF_RAW = os.environ.get("AFF_PHONEHOUSE", "").strip()
+if AFF_RAW and not AFF_RAW.startswith("?") and not AFF_RAW.startswith("&"):
+    AFF_RAW = "?" + AFF_RAW
 
 FUENTE = "Phone House"
 ID_IMPORTACION = "https://www.phonehouse.es"
@@ -370,7 +387,7 @@ PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
 
 
 
-def obtener_productos_desde_dom(url: str, objetivo: int = 72):
+def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str = "1"):
     """Extrae productos del LISTADO (cards) usando Selenium DOM.
 
     Reglas clave:
@@ -407,16 +424,13 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
         current = getattr(driver, 'current_url', '') or ''
         print(f"URL final (Selenium): {mask_url(current)}", flush=True)
 
-        # Forzar URL esperada si hay redirección
-        if EXPECTED_PATH not in current:
-            print(f"⚠️  Redirección detectada. Reintentando a {EXPECTED_PATH}...", flush=True)
-            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
-            time.sleep(2)
-            current = getattr(driver, 'current_url', '') or ''
-            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
-
-        if EXPECTED_PATH not in current:
-            print("❌ ERROR: no estamos en 'todos-los-smartphones'. Abortando.", flush=True)
+        # Validación: la URL final debe corresponder con el listado solicitado (y estar en la whitelist)
+        requested_path = urllib.parse.urlsplit(url).path
+        final_path = urllib.parse.urlsplit(current).path
+        if (final_path != requested_path) or (final_path not in ALLOWED_PATHS):
+            print("❌ No se detecta el listado esperado. Para evitar importar productos de otras secciones, se aborta.", flush=True)
+            print(f"   Path solicitado: {requested_path}", flush=True)
+            print(f"   Path final:      {final_path}", flush=True)
             return []
 
         WebDriverWait(driver, 20).until(
@@ -438,12 +452,13 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
             if stable >= 3:
                 break
 
-        # Items del listado principal (el <input> tiene dataset GTM)
+        # Items del listado: el <input> contiene dataset GTM (data-item_name/data-item_id/data-price...).
+        # No se fuerza data-item_list_id/data-item_list_name porque cambian entre listados (novedades/top-ventas/todos).
         items = driver.find_elements(
             By.CSS_SELECTOR,
-            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
+            "div.item-listado-final > input[data-item_name][data-item_id]",
         )
-        print(f"✅ Items de listado (id={LIST_ID}) detectados: {len(items)}", flush=True)
+        print(f"✅ Items de listado detectados (página {source_label}): {len(items)}", flush=True)
         if len(items) == 0:
             print("❌ No se detecta el listado esperado. Para evitar importar productos de otras secciones, se aborta.", flush=True)
             return []
@@ -584,6 +599,8 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
                 "precio_original": int(precio_original or precio_actual),
                 "img": img,
                 "url_imp": href,
+                "origen_pagina": str(source_label),
+                "origen_listado": url,
                 "enviado_desde": ENVIADO_DESDE,
                 "enviado_desde_tg": ENVIADO_DESDE_TG,
                 "fecha": hoy,
@@ -983,9 +1000,13 @@ def obtener_datos_remotos():
     """Extrae productos de PhoneHouse desde el listado (solo cards DOM)."""
     print("", flush=True)
     print("--- FASE 1: ESCANEANDO PHONE HOUSE ---", flush=True)
-    print(f"URL: {mask_url(START_URL)}", flush=True)
+    print(f"URL base: {BASE_URL}", flush=True)
 
-    productos = obtener_productos_desde_dom(START_URL, objetivo=OBJETIVO)
+    productos: List[Dict] = []
+    for idx, url in enumerate(URLS_PAGINAS, start=1):
+        print("------------------------------------------------------------", flush=True)
+        print(f"Escaneando listado: {mask_url(url)}", flush=True)
+        productos.extend(obtener_productos_desde_dom(url, objetivo=OBJETIVO, source_label=str(idx)))
 
     print("", flush=True)
     print("📊 RESUMEN EXTRACCIÓN:", flush=True)
@@ -1095,7 +1116,7 @@ def sincronizar(remotos):
             print(f"5) Precio Actual:   {r.get('precio_actual',0)}€", flush=True)
             print(f"6) Precio Original: {r.get('precio_original',0)}€", flush=True)
             print(f"7) Enviado desde:   {r.get('enviado_desde','')}", flush=True)
-            print(f"8) Stock Real:      {r.get('cantidad','N/D')}", flush=True)
+            print(f"8) Importado de la página: {r.get('origen_pagina','?')}", flush=True)
             img = (r.get('img','') or '')
             print(f"9) URL Imagen:      {(img[:75] + '...') if img else '(vacía)'}", flush=True)
             print(f"10) Enlace Compra:  {mask_url(r.get('url_imp',''))}", flush=True)
@@ -1147,7 +1168,7 @@ def sincronizar(remotos):
                             ],
                         },
                     )
-                    summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambio": cambio_str})
+                    summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambios": cambios})
                 else:
                     summary_ignorados.append({"nombre": r["nombre"], "id": match["id"]})
 
@@ -1223,43 +1244,46 @@ def sincronizar(remotos):
             summary_fallidos.append(r.get("nombre", "desconocido"))
             print(f"❌ ERROR en {r.get('nombre','?')}: {e}", flush=True)
 
-       # Resumen
+    # Resumen
+    total = (
+        len(summary_creados) + len(summary_eliminados) + len(summary_actualizados) +
+        len(summary_ignorados) + len(summary_sin_stock_nuevos) + len(summary_fallidos) +
+        len(summary_duplicados)
+    )
+
     hoy_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     print(f"\n============================================================", flush=True)
     print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
     print(f"============================================================", flush=True)
+    print(f"📊 TOTAL PRODUCTOS PROCESADOS: {total} (Objetivo: {OBJETIVO})", flush=True)
 
     print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}", flush=True)
     for item in summary_creados:
-        print(f"- {item['nombre']} (ID: {item.get('id')})", flush=True)
+        print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
 
     print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
     for item in summary_eliminados:
-        print(f"- {item['nombre']} (ID: {item.get('id')})", flush=True)
+        print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
 
     print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
     for item in summary_actualizados:
-        cambios = item.get('cambios') or []
-        if isinstance(cambios, str):
-            cambios = [cambios]
-        print(f"- {item['nombre']} (ID: {item.get('id')}): {', '.join(cambios)}", flush=True)
+        cambios = item.get('cambios')
+        if isinstance(cambios, list):
+            cambios_str = ', '.join(cambios)
+        else:
+            cambios_str = str(cambios) if cambios is not None else ''
+        print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')}): {cambios_str}", flush=True)
 
     print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}", flush=True)
     for item in summary_ignorados:
-        print(f"- {item['nombre']} (ID: {item.get('id')})", flush=True)
+        print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
 
-    # Extras (manteniendo el mismo resumen detallado pedido)
-    if summary_duplicados:
-        print(f"\nf) DUPLICADOS: {len(summary_duplicados)}", flush=True)
-        for nombre in summary_duplicados:
-            print(f"- {nombre}", flush=True)
-
-    if summary_fallidos:
-        print(f"\ng) FALLIDOS: {len(summary_fallidos)}", flush=True)
-        for nombre in summary_fallidos:
-            print(f"- {nombre}", flush=True)
-
+    # Mantener contadores adicionales útiles
+    print(f"\nOtros:", flush=True)
+    print(f"- Duplicados: {len(summary_duplicados)}", flush=True)
+    print(f"- Fallidos: {len(summary_fallidos)}", flush=True)
+    print(f"- Sin stock (nuevos): {len(summary_sin_stock_nuevos)}", flush=True)
     print(f"============================================================", flush=True)
 
 if __name__ == "__main__":
