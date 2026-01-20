@@ -27,17 +27,16 @@ LIST_ID = '31'
 LIST_NAME = 'Todos los Móviles y Smartphones'
 START_URL = os.getenv('SOURCE_URL_PHONEHOUSE') or 'https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
-# Además del listado principal, escaneamos también Novedades y Top Ventas
-EXTRA_SCAN_URLS = [
-    "https://www.phonehouse.es/moviles-y-telefonia/moviles/novedades.html",
-    "https://www.phonehouse.es/moviles-y-telefonia/moviles/top-ventas.html",
+# URLs de listados a escanear (1=principal, 2=novedades, 3=top-ventas)
+LISTING_URLS = [
+    ('1', START_URL),
+    ('2', 'https://www.phonehouse.es/moviles-y-telefonia/moviles/novedades.html'),
+    ('3', 'https://www.phonehouse.es/moviles-y-telefonia/moviles/top-ventas.html'),
 ]
 
-# Lista final a escanear (mantiene orden y evita duplicados)
-SCAN_URLS = []
-for _u in [START_URL] + EXTRA_SCAN_URLS:
-    if _u and _u not in SCAN_URLS:
-        SCAN_URLS.append(_u)
+# Para evitar importar productos de otras secciones: solo aceptamos páginas cuyo path coincida con alguno de estos listados
+from urllib.parse import urlsplit as _urlsplit
+ALLOWED_LISTING_PATHS = { _urlsplit(u).path for _, u in LISTING_URLS }
 
 EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
@@ -298,7 +297,7 @@ def extraer_specs_ram_cap(soup: BeautifulSoup):
 # --------------------------
 # SCROLL: obtener HTML renderizado
 # --------------------------
-def obtener_html_con_scroll(url: str) -> str | None:
+def obtener_html_con_scroll(url: str, allowed_paths: set[str] | None = None) -> str | None:
     """Carga con Selenium y scrollea hasta estabilizar altura."""
     try:
         from selenium import webdriver
@@ -321,12 +320,15 @@ def obtener_html_con_scroll(url: str) -> str | None:
         time.sleep(2)
         current = getattr(driver, 'current_url', '') or ''
         print(f"URL final (Selenium): {mask_url(current)}", flush=True)
-        if EXPECTED_PATH not in current:
-            print(f"⚠️ Redirección detectada: {mask_url(current)} (se continúa).", flush=True)
-        try:
-            print(f"URL final (Selenium): {mask_url(driver.current_url)}", flush=True)
-        except Exception:
-            pass
+        if allowed_paths:
+            final_path = urlsplit(current).path
+            if final_path not in allowed_paths:
+                print(f"❌ No se detecta el listado esperado (path='{final_path}'). Para evitar importar productos de otras secciones, se aborta.", flush=True)
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                return None
 
         time.sleep(2)
 
@@ -367,7 +369,7 @@ PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
 
 
 
-def obtener_productos_desde_dom(url: str, objetivo: int = 72):
+def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str = '1'):
     """Extrae productos del LISTADO (cards) usando Selenium DOM.
 
     Reglas clave:
@@ -403,7 +405,12 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
 
         current = getattr(driver, 'current_url', '') or ''
         print(f"URL final (Selenium): {mask_url(current)}", flush=True)
-        # Nota: no forzamos redirección a EXPECTED_PATH; cada URL se valida por LIST_ID/LIST_NAME.
+        # Validación: mantenernos dentro de los listados permitidos
+        final_path = urlsplit(current).path
+        if final_path not in ALLOWED_PATHS:
+            print(f"❌ No se detecta el listado esperado. Para evitar importar productos de otras secciones, se aborta. (path='{final_path}')", flush=True)
+            return []
+
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.item-listado-final"))
         )
@@ -424,13 +431,10 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
                 break
 
         # Items del listado principal (el <input> tiene dataset GTM)
-        items = driver.find_elements(
-            By.CSS_SELECTOR,
-            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
-        )
-        print(f"✅ Items de listado (id={LIST_ID}) detectados: {len(items)}", flush=True)
+        items = driver.find_elements(By.CSS_SELECTOR, 'div.item-listado-final > input[data-item_id][data-item_name]')
+        print(f"✅ Items de listado detectados (página {source_label}): {len(items)}", flush=True)
         if len(items) == 0:
-            print("❌ No se detecta el listado esperado. Para evitar importar productos de otras secciones, se aborta.", flush=True)
+            print("❌ No se detecta el listado esperado en esta página. Para evitar importar productos de otras secciones, se aborta.", flush=True)
             return []
 
         productos = []
@@ -577,6 +581,8 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
                 "version": version,
                 "fuente": FUENTE,
                 "codigo_descuento": CODIGO_DESCUENTO,
+                "origen_pagina": source_label,
+                "origen_listado": url_listado,
             })
 
         print(f"✅ Productos DOM válidos: {len(productos)}", flush=True)
@@ -964,36 +970,45 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
 # --------------------------
 # EXTRACCIÓN REMOTA COMPLETA
 # --------------------------
-
 def obtener_datos_remotos():
+    """Extrae productos de PhoneHouse desde el listado (solo cards DOM)."""
     print("", flush=True)
     print("--- FASE 1: ESCANEANDO PHONE HOUSE ---", flush=True)
     print(f"URL base: {mask_url(START_URL)}", flush=True)
 
-    productos_total = []
-    vistos = set()  # (url, capacidad, ram)
-
-    for idx, scan_url in enumerate(SCAN_URLS, start=1):
-        print("------------------------------------------------------------", flush=True)
-        print(f"Escaneando listado: {scan_url}", flush=True)
-        lote = obtener_productos_desde_dom(scan_url, objetivo=OBJETIVO)
-
-        # Marcar origen (1..N) y URL de listado
-        for p in lote:
-            p["pagina"] = idx
-            p["origen_listado"] = scan_url
-
-        for p in lote:
-            key = (p.get("url"), p.get("capacidad"), p.get("ram"))
-            if key in vistos:
+    productos_por_clave = {}
+    for label, url in LISTING_URLS:
+        print('-' * 60, flush=True)
+        print(f"Escaneando listado: {mask_url(url)}", flush=True)
+        productos_lista = obtener_productos_desde_dom(url, objetivo=OBJETIVO, source_label=label)
+        for p in productos_lista:
+            k = p.get('clave_unica') or p.get('url_imp')
+            if not k:
                 continue
-            vistos.add(key)
-            productos_total.append(p)
+            if k in productos_por_clave:
+                ex = productos_por_clave[k]
+                # Merge orígenes
+                ex_labels = set(str(ex.get('origen_pagina','')).split(',')) if ex.get('origen_pagina') else set()
+                p_labels = set(str(p.get('origen_pagina','')).split(',')) if p.get('origen_pagina') else set()
+                merged_labels = sorted([x for x in (ex_labels | p_labels) if x])
+                ex['origen_pagina'] = ','.join(merged_labels)
+                # Si aparece en varias páginas, preferimos el precio más bajo como precio actual
+                try:
+                    if int(p.get('precio_actual', 10**9)) < int(ex.get('precio_actual', 10**9)):
+                        for fld in ['precio_actual','precio_original','img','url_imp','nombre','memoria','capacidad','version']:
+                            if p.get(fld):
+                                ex[fld] = p[fld]
+                except Exception:
+                    pass
+            else:
+                productos_por_clave[k] = p
+
+    productos = list(productos_por_clave.values())
 
     print("", flush=True)
     print("📊 RESUMEN EXTRACCIÓN:", flush=True)
-    print(f"   Productos únicos encontrados: {len(productos_total)}", flush=True)
-    return productos_total
+    print(f"   Productos únicos encontrados: {len(productos)}", flush=True)
+    return productos
 
 def obtener_todas_las_categorias():
     categorias = []
@@ -1098,7 +1113,7 @@ def sincronizar(remotos):
             print(f"5) Precio Actual:   {r.get('precio_actual',0)}€", flush=True)
             print(f"6) Precio Original: {r.get('precio_original',0)}€", flush=True)
             print(f"7) Enviado desde:   {r.get('enviado_desde','')}", flush=True)
-            print(f"8) Importado de la página: {r.get('pagina','?')} | {mask_url(r.get('origen_listado',''))}", flush=True)
+            print(f"8) Importado de la página: {r.get('origen_pagina','?')}", flush=True)
             img = (r.get('img','') or '')
             print(f"9) URL Imagen:      {(img[:75] + '...') if img else '(vacía)'}", flush=True)
             print(f"10) Enlace Compra:  {mask_url(r.get('url_imp',''))}", flush=True)
@@ -1150,7 +1165,7 @@ def sincronizar(remotos):
                             ],
                         },
                     )
-                    summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambio": cambio_str})
+                    summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambios": [cambio_str]})
                 else:
                     summary_ignorados.append({"nombre": r["nombre"], "id": match["id"]})
 
@@ -1234,39 +1249,30 @@ def sincronizar(remotos):
     )
 
     hoy_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    print("", flush=True)
-    print("============================================================", flush=True)
+    print("\n============================================================", flush=True)
     print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
-    print("============================================================", flush=True)
-
-    print("", flush=True)
-    print(f"a) ARTICULOS CREADOS: {len(summary_creados)}", flush=True)
-    for item in summary_creados:
-        print(f"- {item.get('nombre')} (ID: {item.get('id')})", flush=True)
-
-    print("", flush=True)
-    print(f"b) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
-    for item in summary_eliminados:
-        print(f"- {item.get('nombre')} (ID: {item.get('id')})", flush=True)
-
-    print("", flush=True)
-    print(f"c) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
-    for item in summary_actualizados:
-        cambios = item.get('cambios') or item.get('cambio') or []
-        if isinstance(cambios, str):
-            cambios = [cambios]
-        cambios_txt = ', '.join(cambios) if cambios else 'N/D'
-        print(f"- {item.get('nombre')} (ID: {item.get('id')}): {cambios_txt}", flush=True)
-
-    print("", flush=True)
-    print(f"d) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}", flush=True)
-    for item in summary_ignorados:
-        print(f"- {item.get('nombre')} (ID: {item.get('id')})", flush=True)
-
     print("============================================================", flush=True)
     print(f"📊 TOTAL PRODUCTOS PROCESADOS: {total} (Objetivo: {OBJETIVO})", flush=True)
     print("------------------------------------------------------------", flush=True)
-    print(f"e) DUPLICADOS: {len(summary_duplicados)}", flush=True)
-    print(f"f) FALLIDOS: {len(summary_fallidos)}", flush=True)
+    print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}", flush=True)
+    for item in summary_creados:
+        print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
+    print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
+    for item in summary_eliminados:
+        print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
+    print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
+    for item in summary_actualizados:
+        cambios = item.get('cambios') or ([] if not item.get('cambio') else [item.get('cambio')])
+        cambios_txt = ", ".join([c for c in cambios if c])
+        print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')}): {cambios_txt}", flush=True)
+    print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}", flush=True)
+    for item in summary_ignorados:
+        print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
+    print("------------------------------------------------------------", flush=True)
+    print(f"f) DUPLICADOS: {len(summary_duplicados)}", flush=True)
+    print(f"g) FALLIDOS: {len(summary_fallidos)}", flush=True)
     print("============================================================", flush=True)
+if __name__ == "__main__":
+    remotos = obtener_datos_remotos()
+    if remotos:
+        sincronizar(remotos)
