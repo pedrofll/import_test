@@ -35,8 +35,8 @@ LISTING_URLS = [
 ]
 
 # Para evitar importar productos de otras secciones: solo aceptamos páginas cuyo path coincida con alguno de estos listados
-from urllib.parse import urlsplit as _urlsplit
-ALLOWED_LISTING_PATHS = { _urlsplit(u).path for _, u in LISTING_URLS }
+from urllib.parse import urlsplit
+ALLOWED_LISTING_PATHS = { urlsplit(u).path for _, u in LISTING_URLS }
 
 EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
