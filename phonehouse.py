@@ -22,32 +22,11 @@ from woocommerce import API
 
 # --- CONFIG ---
 DEFAULT_START_URL = "https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html"
-
-# URLs a escanear (se pueden sobreescribir con env PHONEHOUSE_URLS, separadas por comas)
-phonehouse_urls_raw = os.getenv("PHONEHOUSE_URLS", "").strip()
-if phonehouse_urls_raw:
-    # Si PHONEHOUSE_URLS existe, se usa directamente
-    URLS_PAGINAS = [u.strip() for u in phonehouse_urls_raw.split(",") if u.strip()]
-
-    # BASE_URL derivado automáticamente de la primera URL
-    primera = URLS_PAGINAS[0]
-    parsed = urllib.parse.urlsplit(primera)
-    BASE_URL = f"{parsed.scheme}://{parsed.netloc}"
-else:
-    # Fallback: usar dominio base desde secreto SOURCE_URL_PHONEHOUSE, si existe
-    fallback = (os.getenv("SOURCE_URL_PHONEHOUSE") or DEFAULT_START_URL).strip()
-    parsed = urllib.parse.urlsplit(fallback)
-    BASE_URL = f"{parsed.scheme}://{parsed.netloc}"
-
-    URLS_PAGINAS = [
-        f"{BASE_URL}/moviles-y-telefonia/moviles/novedades.html",
-        f"{BASE_URL}/moviles-y-telefonia/moviles/top-ventas.html",
-        f"{BASE_URL}/moviles-y-telefonia/moviles/todos-los-smartphones.html",
-    ]
-
-# Por compatibilidad con el resto del script
-START_URL = URLS_PAGINAS[0]
-ALLOWED_PATHS = set(urllib.parse.urlsplit(u).path for u in URLS_PAGINAS)
+EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
+LIST_ID = '31'
+LIST_NAME = 'Todos los Móviles y Smartphones'
+START_URL = os.getenv('SOURCE_URL_PHONEHOUSE') or 'https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html'
+EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
 # Afiliado (secret/env). Acepta "utm=..." o "?utm=..."
 AFF_RAW = os.environ.get("AFF_PHONEHOUSE", "").strip()
@@ -55,7 +34,7 @@ if AFF_RAW and not AFF_RAW.startswith("?") and not AFF_RAW.startswith("&"):
     AFF_RAW = "?" + AFF_RAW
 
 FUENTE = "Phone House"
-ID_IMPORTACION = BASE_URL
+ID_IMPORTACION = "https://www.phonehouse.es"
 ENVIADO_DESDE = "España"
 ENVIADO_DESDE_TG = "🇪🇸 España"
 CODIGO_DESCUENTO = "OFERTA PROMO"
@@ -306,211 +285,318 @@ def extraer_specs_ram_cap(soup: BeautifulSoup):
 # --------------------------
 # SCROLL: obtener HTML renderizado
 # --------------------------
-def obtener_html_con_scroll(url: str, allowed_paths: set[str] | None = None) -> str | None:
-    """Carga con Selenium y scrollea hasta estabilizar altura.
-
-    Nota: para evitar importar productos de otras secciones, se puede
-    proporcionar `allowed_paths` con los paths aceptados.
-    """
-    driver = None
+def obtener_html_con_scroll(url: str) -> str | None:
+    """Carga con Selenium y scrollea hasta estabilizar altura."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.common.exceptions import TimeoutException
+    except Exception:
+        return None
 
-        chrome_options = Options()
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1400,900")
 
-        driver = webdriver.Chrome(options=chrome_options)
-        driver.set_page_load_timeout(60)
-
+    driver = webdriver.Chrome(options=chrome_options)
+    try:
+        driver.set_page_load_timeout(40)
         driver.get(url)
-        time.sleep(3)
-
-        current_url = driver.current_url
-        if allowed_paths:
-            current_path = urllib.parse.urlsplit(current_url).path
-            if current_path not in allowed_paths:
-                print("❌ URL fuera de los paths permitidos. Se aborta para evitar importar otras secciones.", flush=True)
-                print(f"   URL: {mask_url(url)}", flush=True)
-                print(f"   URL final: {mask_url(current_url)}", flush=True)
-                return None
-
-        last_height = driver.execute_script("return document.body.scrollHeight")
-        nochange = 0
-
-        while nochange < 8:
-            driver.execute_script("window.scrollBy(0, 800);")
-            time.sleep(1.0)
-            new_height = driver.execute_script("return document.body.scrollHeight")
-            if new_height == last_height:
-                nochange += 1
-            else:
-                nochange = 0
-                last_height = new_height
-
-        return driver.page_source
-
-    except TimeoutException:
-        print("⏳ Timeout cargando la página.", flush=True)
-        return None
-    except Exception as e:
-        print(f"❌ Error Selenium: {e}", flush=True)
-        return None
-    finally:
-        try:
-            if driver is not None:
+        time.sleep(2)
+        current = getattr(driver, 'current_url', '') or ''
+        print(f"URL final (Selenium): {mask_url(current)}", flush=True)
+        if EXPECTED_PATH not in current:
+            print(f"⚠️  Redirección detectada (no estamos en {EXPECTED_PATH}). Reintentando...", flush=True)
+            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
+            time.sleep(2)
+            current = getattr(driver, 'current_url', '') or ''
+            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
+        if EXPECTED_PATH not in current:
+            print("❌ ERROR: No se pudo acceder a 'todos-los-smartphones'. Abortando.", flush=True)
+            try:
                 driver.quit()
+            except Exception:
+                pass
+            return None
+        try:
+            print(f"URL final (Selenium): {mask_url(driver.current_url)}", flush=True)
         except Exception:
             pass
 
-def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str = "1"):
-    """Extrae productos del LISTADO (cards) desde DOM renderizado.
+        time.sleep(2)
 
-    - NO usa la ficha del producto para precios.
-    - Filtra únicamente enlaces /movil/.
-    - Añade metadato `source_label` para saber de qué página proviene.
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        stable_rounds = 0
+        max_rounds = 45
+
+        print("🧭 Haciendo scroll hasta el final...", flush=True)
+
+        for _ in range(max_rounds):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.6)
+            new_height = driver.execute_script("return document.body.scrollHeight")
+
+            if new_height == last_height:
+                stable_rounds += 1
+                if stable_rounds >= 3:
+                    break
+            else:
+                stable_rounds = 0
+                last_height = new_height
+
+        return driver.page_source
+    except TimeoutException:
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+# --------------------------
+# DESCUBRIR URLs de producto
+# --------------------------
+PRODUCT_PATH_RE = re.compile(r"/movil/[^/]+/[^/?#]+\.html", re.I)
+
+
+
+def obtener_productos_desde_dom(url: str, objetivo: int = 72):
+    """Extrae productos del LISTADO (cards) usando Selenium DOM.
+
+    Reglas clave:
+      - Solo acepta items del listado principal (input data-item_list_id=31, name=Todos los Móviles y Smartphones)
+      - Precio SOLO desde span.precio-2 / precio tachado del card (ignora 'Otras ofertas desde')
+      - Nunca usa la ficha para precios (evita cuotas 4€/mes)
     """
-
-    print("------------------------------------------------------------", flush=True)
-    print(f"Escaneando listado: {mask_url(url)}", flush=True)
-
-    html = obtener_html_con_scroll(url, allowed_paths=ALLOWED_PATHS)
-    if not html:
-        print("❌ No se pudo obtener HTML renderizado.", flush=True)
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+    except Exception as e:
+        print(f"❌ Selenium no disponible: {e}", flush=True)
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1400,2200")
+    opts.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-    # Candidatos de card (estructura común)
-    inputs = soup.select("div.item-listado-final > input[data-item_id]")
-    if not inputs:
-        inputs = soup.select("input[data-item_id][data-item_name]")
-
-    print(f"✅ Items de listado detectados (página {source_label}): {len(inputs)}", flush=True)
-
-    productos = []
-    vistos = set()
-    descartes = {
-        "sin_titulo": 0,
-        "sin_url": 0,
-        "sin_precio": 0,
-        "sin_cap": 0,
-        "sin_ram": 0,
-        "no_nuevo": 0,
-        "reacondicionado": 0,
-        "duplicado": 0,
-    }
+    driver = webdriver.Chrome(options=opts)
 
     hoy = datetime.now().strftime("%d/%m/%Y")
 
-    for inp in inputs:
-        parent = getattr(inp, "parent", None)
-        if parent is None:
-            continue
+    try:
+        driver.get(url)
+        time.sleep(2)
 
-        a = parent.find("a", href=re.compile(r"^/movil/")) or parent.find("a", href=re.compile(r"/movil/"))
-        if not a:
-            descartes["sin_url"] += 1
-            continue
+        current = getattr(driver, 'current_url', '') or ''
+        print(f"URL final (Selenium): {mask_url(current)}", flush=True)
 
-        href = (a.get("href") or "").strip()
-        if not href:
-            descartes["sin_url"] += 1
-            continue
+        # Forzar URL esperada si hay redirección
+        if EXPECTED_PATH not in current:
+            print(f"⚠️  Redirección detectada. Reintentando a {EXPECTED_PATH}...", flush=True)
+            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
+            time.sleep(2)
+            current = getattr(driver, 'current_url', '') or ''
+            print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
 
-        url_producto = href if href.startswith("http") else urllib.parse.urljoin(ID_IMPORTACION, href)
+        if EXPECTED_PATH not in current:
+            print("❌ ERROR: no estamos en 'todos-los-smartphones'. Abortando.", flush=True)
+            return []
 
-        h3 = parent.select_one("h3.marca-item")
-        titulo = (h3.get_text(" ", strip=True) if h3 else (inp.get("data-item_name") or "").strip())
-        if not titulo:
-            descartes["sin_titulo"] += 1
-            continue
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.item-listado-final"))
+        )
 
-        titulo_lower = titulo.lower()
-        if "reacondicionado" in titulo_lower or "reacondicionado" in href.lower():
-            descartes["reacondicionado"] += 1
-            continue
+        print("🧭 Haciendo scroll hasta el final...", flush=True)
+        last_h = 0
+        stable = 0
+        for _ in range(70):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1.2)
+            h = driver.execute_script("return document.body.scrollHeight")
+            if h == last_h:
+                stable += 1
+            else:
+                stable = 0
+            last_h = h
+            if stable >= 3:
+                break
 
-        # Precio actual (SOLO precio-2)
-        precio_actual = None
-        sp_actual = parent.select_one("span.precio.precio-2")
-        if sp_actual:
-            precio_actual = parse_eur_int(sp_actual.get_text(" ", strip=True))
+        # Items del listado principal (el <input> tiene dataset GTM)
+        items = driver.find_elements(
+            By.CSS_SELECTOR,
+            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
+        )
+        print(f"✅ Items de listado (id={LIST_ID}) detectados: {len(items)}", flush=True)
+        if len(items) == 0:
+            print("❌ No se detecta el listado esperado. Para evitar importar productos de otras secciones, se aborta.", flush=True)
+            return []
 
-        if precio_actual is None:
-            # Fallback (por si cambia markup): data-price suele ser numérico
-            dp = inp.get("data-price")
-            if dp:
+        productos = []
+        seen_urls = set()
+
+        def _safe_text(el):
+            try:
+                return normalize_spaces(el.text or "")
+            except Exception:
+                return ""
+
+        for inp in items:
+            if len(productos) >= objetivo:
+                break
+
+            try:
+                card = inp.find_element(By.XPATH, "..")
+            except Exception:
+                continue
+
+            # URL ficha
+            try:
+                a = card.find_element(By.CSS_SELECTOR, "a[href^='/movil/'], a[href*='/movil/']")
+                href = (a.get_attribute("href") or "").strip()
+            except Exception:
+                continue
+
+            if not href:
+                continue
+            href = href.split("?")[0]
+
+            # evitar reacondicionados / renuevo si aparecieran en el listado
+            low = href.lower()
+            if any(x in low for x in ["reacondicionado", "reacondicionados", "renuevo", "reacond"]):
+                continue
+
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
+
+            # título del card
+            try:
+                h3 = card.find_element(By.CSS_SELECTOR, "h3.marca-item")
+                titulo = _safe_text(h3)
+            except Exception:
+                titulo = ""
+            if len(titulo) < 6:
+                continue
+
+            # precio actual (card)
+            precio_actual = 0
+            precio_original = 0
+            try:
+                box = card.find_element(By.CSS_SELECTOR, ".listado-precios-libre, .precios-items-mosaico, [class*='listado-precios'], [class*='precios']")
+            except Exception:
+                box = None
+
+            if box:
+                # actual: span.precio-2
                 try:
-                    precio_actual = int(round(float(str(dp).replace(",", "."))))
+                    el_act = box.find_element(By.CSS_SELECTOR, "span.precio-2")
+                    at = _safe_text(el_act)
+                    vals = [v for v in parse_eur_all(at) if 20 <= v <= 5000]
+                    if vals:
+                        precio_actual = vals[0]
                 except Exception:
-                    precio_actual = None
+                    pass
 
-        if precio_actual is None:
-            descartes["sin_precio"] += 1
-            continue
+                if precio_actual == 0:
+                    # fallback: primer span.precio no tachado
+                    try:
+                        el_act = box.find_element(By.CSS_SELECTOR, "span.precio:not(.precio-tachado):not(.precio-tachado-finales):not(.precio-tachado-final)")
+                        at = _safe_text(el_act)
+                        vals = [v for v in parse_eur_all(at) if 20 <= v <= 5000]
+                        if vals:
+                            precio_actual = vals[0]
+                    except Exception:
+                        pass
 
-        # Precio original (tachado)
-        precio_original = None
-        sp_orig = parent.select_one(".precio-tachado-finales, .precio-tachado")
-        if sp_orig:
-            precio_original = parse_eur_int(sp_orig.get_text(" ", strip=True))
-        if precio_original is None:
-            precio_original = precio_actual
+                # original tachado (si existe)
+                try:
+                    el_org = box.find_element(By.CSS_SELECTOR, "span.precio-tachado, span.precio-tachado-finales, span.precio-tachado-final, s, del")
+                    ot = _safe_text(el_org)
+                    ovals = [v for v in parse_eur_all(ot) if 20 <= v <= 5000]
+                    if ovals:
+                        precio_original = ovals[0]
+                except Exception:
+                    pass
 
-        # Imagen
-        img = parent.select_one("img")
-        img_url = ""
-        if img and img.get("src"):
-            img_url = img.get("src").strip()
-            if img_url.startswith("//"):
-                img_url = "https:" + img_url
-            elif img_url.startswith("/"):
-                img_url = urllib.parse.urljoin(ID_IMPORTACION, img_url)
+                if precio_original == 0:
+                    precio_original = precio_actual
 
-        cap, ram = extraer_capacidad_y_ram(titulo)
-        if not cap:
-            descartes["sin_cap"] += 1
-        if not ram:
-            descartes["sin_ram"] += 1
+            if precio_actual < 20:
+                continue
 
-        # ROM/OS
-        rom = "IOS" if ("apple" in titulo_lower or "iphone" in titulo_lower) else "Global"
+            # imagen
+            img = ""
+            try:
+                im = card.find_element(By.CSS_SELECTOR, "img")
+                for attr in ["src", "data-src", "data-original", "data-lazy"]:
+                    v = (im.get_attribute(attr) or "").strip()
+                    if v and "logo" not in v.lower():
+                        if v.startswith("//"):
+                            v = "https:" + v
+                        img = abs_url("https://www.phonehouse.es", v)
+                        break
+            except Exception:
+                pass
 
-        clave_unica = f"{titulo}|{cap}|{ram}|{url_producto}".lower()
-        if clave_unica in vistos:
-            descartes["duplicado"] += 1
-            continue
-        vistos.add(clave_unica)
+            # specs desde título
+            nombre, cap, ram = extraer_nombre_memoria_capacidad(titulo)
+            es_iphone = "iphone" in (nombre or "").lower()
+            if es_iphone and not ram:
+                ram = ram_por_modelo_iphone(nombre) or ""
 
-        productos.append({
-            "nombre": limpiar_nombre_base(titulo),
-            "ram": ram,
-            "capacidad": cap,
-            "rom": rom,
-            "precio_actual": f"{precio_actual}€",
-            "precio_original": f"{precio_original}€",
-            "enviado_desde": ENVIADO_DESDE_TG,
-            "cantidad": "N/D",
-            "url_imagen": img_url,
-            "url_producto": url_producto,
-            "fecha": hoy,
-            "fuente": FUENTE,
-            "clave_unica": clave_unica,
-            "source_label": str(source_label),
-            "origen_listado": url,
-        })
+            # solo móviles con RAM y capacidad
+            if not cap:
+                continue
+            if (not ram) and (not es_iphone):
+                continue
+            if es_iphone and not ram:
+                continue
 
-    print(f"✅ Productos DOM válidos: {len(productos)}", flush=True)
-    # Para diagnóstico en el log
-    if not productos:
-        print(f"Descartes: {descartes}", flush=True)
+            version = "IOS" if es_iphone else "Global"
+            key = f"{nombre}_{cap}_{ram}"
 
-    return productos
+            if any(p.get('clave_unica') == key for p in productos):
+                summary_duplicados.append(f"{nombre} {cap} {ram}".strip())
+                continue
+
+            productos.append({
+                "nombre": nombre,
+                "memoria": ram,
+                "capacidad": cap,
+                "precio_actual": int(precio_actual),
+                "precio_original": int(precio_original or precio_actual),
+                "img": img,
+                "url_imp": href,
+                "enviado_desde": ENVIADO_DESDE,
+                "enviado_desde_tg": ENVIADO_DESDE_TG,
+                "fecha": hoy,
+                "en_stock": True,
+                "clave_unica": key,
+                "version": version,
+                "fuente": FUENTE,
+                "codigo_descuento": CODIGO_DESCUENTO,
+            })
+
+        print(f"✅ Productos DOM válidos: {len(productos)}", flush=True)
+        return productos
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 def descubrir_urls_producto(html: str, base_url: str):
     """Devuelve set de URLs de ficha asociadas a tarjetas del listado (heurística robusta).
@@ -889,33 +975,15 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
 # EXTRACCIÓN REMOTA COMPLETA
 # --------------------------
 def obtener_datos_remotos():
+    """Extrae productos de PhoneHouse desde el listado (solo cards DOM)."""
+    print("", flush=True)
     print("--- FASE 1: ESCANEANDO PHONE HOUSE ---", flush=True)
-    print(f"URL base: {mask_url(BASE_URL)}", flush=True)
+    print(f"URL: {mask_url(START_URL)}", flush=True)
 
-    remotos = []
-    for idx, url in enumerate(URLS_PAGINAS, start=1):
-        print("------------------------------------------------------------", flush=True)
-        productos_lista = obtener_productos_desde_dom(url, objetivo=OBJETIVO, source_label=str(idx))
-        remotos.extend(productos_lista)
+    productos = obtener_productos_desde_dom(START_URL, objetivo=OBJETIVO)
 
-    # Deduplicar entre páginas (misma clave_unica)
-    unidos = {}
-    for prod in remotos:
-        key = prod.get("clave_unica") or prod.get("url_producto")
-        if not key:
-            continue
-        if key in unidos:
-            # merge labels (ej: 1,2)
-            prev = unidos[key]
-            labels = set(filter(None, str(prev.get('source_label','')).split(',')))
-            labels.update(filter(None, str(prod.get('source_label','')).split(',')))
-            prev['source_label'] = ",".join(sorted(labels, key=lambda x: int(x) if x.isdigit() else x))
-            continue
-        unidos[key] = prod
-
-    productos = list(unidos.values())
-
-    print("\n📊 RESUMEN EXTRACCIÓN:", flush=True)
+    print("", flush=True)
+    print("📊 RESUMEN EXTRACCIÓN:", flush=True)
     print(f"   Productos únicos encontrados: {len(productos)}", flush=True)
     return productos
 
@@ -1022,7 +1090,7 @@ def sincronizar(remotos):
             print(f"5) Precio Actual:   {r.get('precio_actual',0)}€", flush=True)
             print(f"6) Precio Original: {r.get('precio_original',0)}€", flush=True)
             print(f"7) Enviado desde:   {r.get('enviado_desde','')}", flush=True)
-            print(f"8) Importado de la página: {r.get('source_label','N/D')}", flush=True)
+            print(f"8) Stock Real:      {r.get('cantidad','N/D')}", flush=True)
             img = (r.get('img','') or '')
             print(f"9) URL Imagen:      {(img[:75] + '...') if img else '(vacía)'}", flush=True)
             print(f"10) Enlace Compra:  {mask_url(r.get('url_imp',''))}", flush=True)
@@ -1074,7 +1142,7 @@ def sincronizar(remotos):
                             ],
                         },
                     )
-                    summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambios": [cambio_str]})
+                    summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambio": cambio_str})
                 else:
                     summary_ignorados.append({"nombre": r["nombre"], "id": match["id"]})
 
@@ -1150,7 +1218,7 @@ def sincronizar(remotos):
             summary_fallidos.append(r.get("nombre", "desconocido"))
             print(f"❌ ERROR en {r.get('nombre','?')}: {e}", flush=True)
 
-    # Resumen
+       # Resumen
     hoy_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     print(f"\n============================================================", flush=True)
