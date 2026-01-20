@@ -107,39 +107,6 @@ def abs_url(base: str, href: str) -> str:
     except Exception:
         return href
 
-def normalizar_url_imagen(url: str, size: int = 600) -> str:
-    """Fuerza un tamaño cuadrado (por defecto 600x600) en URLs de imagen.
-
-    PhoneHouse CDN suele aceptar parámetros de query tipo ?w=...&h=...
-    Si ya existen, se sobrescriben; si no, se añaden.
-    """
-    if not url:
-        return url
-    url = str(url).strip()
-    if not url:
-        return url
-    if url.startswith("//"):
-        url = "https:" + url
-
-    try:
-        parts = urllib.parse.urlsplit(url)
-        q = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
-
-        # Sobrescribir posibles parámetros de tamaño
-        for k in ("w", "h", "width", "height"):
-            q.pop(k, None)
-            q.pop(k.upper(), None)
-
-        q["w"] = [str(size)]
-        q["h"] = [str(size)]
-
-        new_query = urllib.parse.urlencode(q, doseq=True)
-        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
-    except Exception:
-        # En caso de URL rara/no parseable, devolver sin tocar
-        return url
-
-
 def parse_eur_int(txt: str) -> int:
     """Convierte un texto que contiene un precio en euros a entero.
 
@@ -630,7 +597,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
                 "capacidad": cap,
                 "precio_actual": int(precio_actual),
                 "precio_original": int(precio_original or precio_actual),
-                "img": normalizar_url_imagen(img),
+                "img": img,
                 "url_imp": href,
                 "origen_pagina": str(source_label),
                 "origen_listado": url,
@@ -839,26 +806,26 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
         for tag in soup.select('meta[property="og:image"], meta[name="twitter:image"]'):
             val = tag.get("content")
             if val and "http" in val:
-                return normalizar_url_imagen(val.strip())
+                return val.strip()
 
         link_img = soup.find("link", rel="image_src")
         if link_img and link_img.get("href"):
-            return normalizar_url_imagen(link_img["href"].strip())
+            return link_img["href"].strip()
 
         j = _extract_jsonld_product(soup)
         if j.get("img"):
-            return normalizar_url_imagen(j["img"])
+            return j["img"]
 
         for im in soup.find_all("img", src=True):
             s = (im.get("src") or "").strip()
             if s and ("products-image" in s) and ("logo" not in s.lower()):
-                return normalizar_url_imagen(s)
+                return s
 
         for im in soup.find_all("img"):
             for attr in ("data-src", "data-original", "data-lazy"):
                 s = (im.get(attr) or "").strip()
                 if s and ("products-image" in s) and ("logo" not in s.lower()):
-                    return normalizar_url_imagen(s)
+                    return s
 
         return ""
 
@@ -1018,7 +985,7 @@ def fetch_ficha_producto(url: str, session: requests.Session, max_retries: int =
                 "es_iphone": es_iphone,
                 "precio_actual": int(precio_actual or 0),
                 "precio_original": int(precio_original or 0),
-                "img": normalizar_url_imagen(img),
+                "img": img,
             }
         except Exception:
             time.sleep(1.0 * attempt)
@@ -1094,7 +1061,7 @@ def obtener_imagen_categoria(cache_categorias, cat_id):
     for c in cache_categorias:
         if c.get("id") == cat_id:
             img = c.get("image") or {}
-            return normalizar_url_imagen(img).get("src") or ""
+            return img.get("src") or ""
     return ""
 
 def actualizar_imagen_categoria(cache_categorias, cat_id, img_src):
@@ -1313,7 +1280,7 @@ def sincronizar(remotos):
     )
 
     hoy_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
+    
     print(f"\n============================================================", flush=True)
     print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
     print(f"============================================================", flush=True)
@@ -1351,3 +1318,8 @@ if __name__ == "__main__":
     remotos = obtener_datos_remotos()
     if remotos:
         sincronizar(remotos)
+
+
+
+
+   
