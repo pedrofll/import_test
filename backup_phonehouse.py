@@ -1218,24 +1218,44 @@ def sincronizar(remotos):
             summary_fallidos.append(r.get("nombre", "desconocido"))
             print(f"❌ ERROR en {r.get('nombre','?')}: {e}", flush=True)
 
-    # Resumen
-    total = (
-        len(summary_creados) + len(summary_eliminados) + len(summary_actualizados) +
-        len(summary_ignorados) + len(summary_sin_stock_nuevos) + len(summary_fallidos) +
-        len(summary_duplicados)
-    )
+       # Resumen
+    hoy_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    print("\n============================================================", flush=True)
-    print(f"📋 RESUMEN DE EJECUCIÓN ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
-    print("============================================================", flush=True)
-    print(f"📊 TOTAL PRODUCTOS PROCESADOS: {total} (Objetivo: {OBJETIVO})", flush=True)
-    print("------------------------------------------------------------", flush=True)
-    print(f"a) CREADOS: {len(summary_creados)}", flush=True)
-    print(f"c) ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
-    print(f"d) IGNORADOS: {len(summary_ignorados)}", flush=True)
-    print(f"f) DUPLICADOS: {len(summary_duplicados)}", flush=True)
-    print(f"g) FALLIDOS: {len(summary_fallidos)}", flush=True)
-    print("============================================================", flush=True)
+    print(f"\n============================================================", flush=True)
+    print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
+    print(f"============================================================", flush=True)
+
+    print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}", flush=True)
+    for item in summary_creados:
+        print(f"- {item['nombre']} (ID: {item.get('id')})", flush=True)
+
+    print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
+    for item in summary_eliminados:
+        print(f"- {item['nombre']} (ID: {item.get('id')})", flush=True)
+
+    print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
+    for item in summary_actualizados:
+        cambios = item.get('cambios') or []
+        if isinstance(cambios, str):
+            cambios = [cambios]
+        print(f"- {item['nombre']} (ID: {item.get('id')}): {', '.join(cambios)}", flush=True)
+
+    print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}", flush=True)
+    for item in summary_ignorados:
+        print(f"- {item['nombre']} (ID: {item.get('id')})", flush=True)
+
+    # Extras (manteniendo el mismo resumen detallado pedido)
+    if summary_duplicados:
+        print(f"\nf) DUPLICADOS: {len(summary_duplicados)}", flush=True)
+        for nombre in summary_duplicados:
+            print(f"- {nombre}", flush=True)
+
+    if summary_fallidos:
+        print(f"\ng) FALLIDOS: {len(summary_fallidos)}", flush=True)
+        for nombre in summary_fallidos:
+            print(f"- {nombre}", flush=True)
+
+    print(f"============================================================", flush=True)
 
 if __name__ == "__main__":
     remotos = obtener_datos_remotos()
