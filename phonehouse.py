@@ -1280,7 +1280,7 @@ def sincronizar(remotos):
     )
 
     hoy_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
+    
     print(f"\n============================================================", flush=True)
     print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})", flush=True)
     print(f"============================================================", flush=True)
@@ -1290,11 +1290,11 @@ def sincronizar(remotos):
     for item in summary_creados:
         print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
 
-    print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
+    print(f"\n\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}", flush=True)
     for item in summary_eliminados:
         print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
 
-    print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
+    print(f"\n\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}", flush=True)
     for item in summary_actualizados:
         cambios = item.get('cambios')
         if isinstance(cambios, list):
@@ -1303,12 +1303,12 @@ def sincronizar(remotos):
             cambios_str = str(cambios) if cambios is not None else ''
         print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')}): {cambios_str}", flush=True)
 
-    print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}", flush=True)
+    print(f"\n\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}", flush=True)
     for item in summary_ignorados:
         print(f"- {item.get('nombre','?')} (ID: {item.get('id','?')})", flush=True)
 
     # Mantener contadores adicionales útiles
-    print(f"\nOtros:", flush=True)
+    print(f"\n\nOtros:", flush=True)
     print(f"- Duplicados: {len(summary_duplicados)}", flush=True)
     print(f"- Fallidos: {len(summary_fallidos)}", flush=True)
     print(f"- Sin stock (nuevos): {len(summary_sin_stock_nuevos)}", flush=True)
@@ -1318,3 +1318,8 @@ if __name__ == "__main__":
     remotos = obtener_datos_remotos()
     if remotos:
         sincronizar(remotos)
+
+
+
+
+   
