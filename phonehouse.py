@@ -407,7 +407,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
         print(f"URL final (Selenium): {mask_url(current)}", flush=True)
         # Validación: mantenernos dentro de los listados permitidos
         final_path = urlsplit(current).path
-        if final_path not in ALLOWED_PATHS:
+        if final_path not in ALLOWED_LISTING_PATHS:
             print(f"❌ No se detecta el listado esperado. Para evitar importar productos de otras secciones, se aborta. (path='{final_path}')", flush=True)
             return []
 
