@@ -28,6 +28,18 @@ LIST_NAME = 'Todos los Móviles y Smartphones'
 START_URL = os.getenv('SOURCE_URL_PHONEHOUSE') or 'https://www.phonehouse.es/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 EXPECTED_PATH = '/moviles-y-telefonia/moviles/todos-los-smartphones.html'
 
+# Escaneo adicional solicitado: se añaden dos listados más sin alterar el resto del flujo.
+# Nota: START_URL se respeta (por env). Se agregan URLs extras fijas y se deduplican.
+EXTRA_SCAN_URLS = [
+    "https://www.phonehouse.es/moviles-y-telefonia/moviles/novedades.html",
+    "https://www.phonehouse.es/moviles-y-telefonia/moviles/top-ventas.html",
+]
+
+SCAN_URLS = []
+for _u in [START_URL, *EXTRA_SCAN_URLS]:
+    if _u and _u not in SCAN_URLS:
+        SCAN_URLS.append(_u)
+
 # Afiliado (secret/env). Acepta "utm=..." o "?utm=..."
 AFF_RAW = os.environ.get("AFF_PHONEHOUSE", "").strip()
 if AFF_RAW and not AFF_RAW.startswith("?") and not AFF_RAW.startswith("&"):
@@ -402,16 +414,19 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
         current = getattr(driver, 'current_url', '') or ''
         print(f"URL final (Selenium): {mask_url(current)}", flush=True)
 
+        # Cada URL tiene su propio path esperado (evita caer en /moviles.html u otras rutas)
+        expected_path = urllib.parse.urlsplit(url).path or ""
+
         # Forzar URL esperada si hay redirección
-        if EXPECTED_PATH not in current:
-            print(f"⚠️  Redirección detectada. Reintentando a {EXPECTED_PATH}...", flush=True)
-            driver.get('https://www.phonehouse.es' + EXPECTED_PATH)
+        if expected_path and expected_path not in current:
+            print(f"⚠️  Redirección detectada. Reintentando a {expected_path}...", flush=True)
+            driver.get('https://www.phonehouse.es' + expected_path)
             time.sleep(2)
             current = getattr(driver, 'current_url', '') or ''
             print(f"URL final (Selenium) tras reintento: {mask_url(current)}", flush=True)
 
-        if EXPECTED_PATH not in current:
-            print("❌ ERROR: no estamos en 'todos-los-smartphones'. Abortando.", flush=True)
+        if expected_path and expected_path not in current:
+            print(f"❌ ERROR: no estamos en la URL esperada ({expected_path}). Abortando.", flush=True)
             return []
 
         WebDriverWait(driver, 20).until(
@@ -436,7 +451,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72):
         # Items del listado principal (el <input> tiene dataset GTM)
         items = driver.find_elements(
             By.CSS_SELECTOR,
-            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}'][data-item_list_name='{LIST_NAME}']",
+            f"div.item-listado-final > input[data-item_list_id='{LIST_ID}']",
         )
         print(f"✅ Items de listado (id={LIST_ID}) detectados: {len(items)}", flush=True)
         if len(items) == 0:
@@ -978,9 +993,30 @@ def obtener_datos_remotos():
     """Extrae productos de PhoneHouse desde el listado (solo cards DOM)."""
     print("", flush=True)
     print("--- FASE 1: ESCANEANDO PHONE HOUSE ---", flush=True)
-    print(f"URL: {mask_url(START_URL)}", flush=True)
+    print(f"URL base: {mask_url(START_URL)}", flush=True)
 
-    productos = obtener_productos_desde_dom(START_URL, objetivo=OBJETIVO)
+    productos = []
+    vistos = set()
+
+    # Escanea START_URL + las URLs extra (novedades/top-ventas) y unifica por url_imp
+    for scan_url in SCAN_URLS:
+        print("-" * 60, flush=True)
+        print(f"Escaneando listado: {mask_url(scan_url)}", flush=True)
+
+        try:
+            lote = obtener_productos_desde_dom(scan_url, objetivo=OBJETIVO)
+        except Exception as e:
+            log_error(f"Fallo escaneando {mask_url(scan_url)}: {e}")
+            lote = []
+
+        for p in (lote or []):
+            key = (p.get('url_imp') or p.get('url') or '').strip()
+            if not key:
+                continue
+            if key in vistos:
+                continue
+            vistos.add(key)
+            productos.append(p)
 
     print("", flush=True)
     print("📊 RESUMEN EXTRACCIÓN:", flush=True)
