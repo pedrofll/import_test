@@ -1,25 +1,3 @@
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Amazon (ES) scraper - MODO SOLO LOGS (sin publicar)
-
-- Lee SOURCE_URL_AMAZON desde variables de entorno (GitHub Secrets).
-- Extrae productos de resultados de búsqueda de Amazon.
-- Normaliza:
-  - nombre (antes de guión/coma; si no, sin el bloque RAM/ROM)
-  - RAM / ROM (p.ej. 8+256GB, 16GB + 512GB, 12GB RAM 256GB, etc.)
-  - iPhone: RAM por mapeo (IPHONE_RAM_MAP) y ROM por "de XXX GB/TB"
-  - precio_actual y precio_original (si no hay tachado, *1.20)
-  - cupón (si no hay, "OFERTA PROMO")
-  - url limpia sin query (/dp/ASIN), afiliado (?tag=...), y acortado (is.gd)
-- Identificador recomendado: ASIN + page_id (hash de la URL origen)
-- NO crea / actualiza / elimina nada en WordPress: solo imprime logs.
-
-Requisitos: selenium, requests (y navegador/driver disponibles en runner).
-"""
-
 import os
 import re
 import time
