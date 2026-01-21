@@ -3,6 +3,7 @@ import os
 import time
 import requests
 import urllib.parse
+import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from woocommerce import API
@@ -43,14 +44,98 @@ def acortar_url(url):
     except:
         return url
 
-def expandir_url(url):
+def strip_query(url: str) -> str:
+    """Devuelve la URL sin parámetros ni fragmento (todo lo posterior a '?' o '#')."""
+    if not url:
+        return url
+    url = url.split('#', 1)[0]
+    url = url.split('?', 1)[0]
+    return url.rstrip()
+
+def unir_afiliado(base: str, afiliado: str) -> str:
+    """Concatena afiliado a una URL base, manejando prefijos típicos ('?', '&')."""
+    if not afiliado:
+        return base
+    if afiliado.startswith('&'):
+        return f"{base}?{afiliado[1:]}"
+    if afiliado.startswith('?') or afiliado.startswith('#'):
+        return f"{base}{afiliado}"
+    return f"{base}{afiliado}"
+
+def _extraer_url_tradedoubler(click_url: str) -> str | None:
+    """Extrae y decodifica la URL real embebida en enlaces de pdt.tradedoubler.com/click ... url(ENCODED)."""
+    if not click_url:
+        return None
+    m = re.search(r"url\(([^)]+)\)", click_url)
+    if not m:
+        return None
+    encoded = m.group(1)
     try:
-        r = requests.get(url, allow_redirects=True, timeout=10, stream=True)
-        return r.url
-    except:
+        return urllib.parse.unquote(encoded)
+    except Exception:
+        return encoded
+
+def expandir_url(url):
+    """Intenta expandir/normalizar URLs de tracking/shorteners para obtener la URL final de destino.
+
+    Para TradeDoubler (clk/pdt) extrae la URL real del parámetro `url` aunque el click no redirija.
+    """
+    url = (url or "").strip()
+    if not url:
+        return ""
+
+    def _extraer_destino_tradedoubler(click_url: str) -> str:
+        if not click_url:
+            return ""
+        cu = click_url.strip()
+
+        # Formato 1: https://clk.tradedoubler.com/click?...&url=https%3A%2F%2F...
+        #          o   https://clk.tradedoubler.com/click?...&url=https://www....
+        # Nota: `url` suele ser el último parámetro; capturamos hasta el final.
+        m = re.search(r"(?:\?|&)url=([^#]+)$", cu)
+        if m:
+            return urllib.parse.unquote(m.group(1))
+
+        # Formato 2 (legacy): https://pdt.tradedoubler.com/click?...url(https%3A%2F%2F...)
+        m = re.search(r"url\(([^)]+)\)", cu)
+        if m:
+            return urllib.parse.unquote(m.group(1))
+
+        return ""
+
+    # Si ya es un click de tradedoubler, extraemos sin requests
+    if "tradedoubler.com" in url and "/click" in url:
+        destino = _extraer_destino_tradedoubler(url)
+        if destino:
+            return destino
+
+    # Intento de expansión vía HTTP (shorteners, etc.)
+    try:
+        resp = requests.get(url, allow_redirects=True, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        final = resp.url or url
+
+        # Si el resultado sigue siendo tradedoubler click, extraemos el destino
+        if "tradedoubler.com" in final and "/click" in final:
+            destino = _extraer_destino_tradedoubler(final)
+            if destino:
+                return destino
+
+        return final
+    except Exception:
         return url
 
-# --- GESTIÓN DE CATEGORÍAS ---
+    # Caso especial: TradeDoubler click con URL embebida (no siempre redirige en un GET simple)
+    if url.startswith('https://pdt.tradedoubler.com/click'):
+        real = _extraer_url_tradedoubler(url)
+        if real:
+            return real
+
+    try:
+        resp = requests.get(url, allow_redirects=True, timeout=10)
+        return resp.url
+    except Exception:
+        return url
+
 def obtener_todas_las_categorias():
     categorias = []
     page = 1
@@ -149,25 +234,23 @@ def obtener_datos_remotos():
                 fuente = btn.get_text(strip=True).replace("Cómpralo en", "").strip() if btn else "Tienda"
                 url_importada_sin_afiliado = url_exp 
 
-                # Normalización de URL sin parámetros según fuente
-                if fuente == "MediaMarkt":
-                    url_importada_sin_afiliado = url_exp.split('?')[0]
-                elif fuente == "AliExpress Plaza":
-                    url_importada_sin_afiliado = url_exp.split(".html")[0] + ".html" if ".html" in url_exp else url_exp.split('?')[0]
-                elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
-                    url_importada_sin_afiliado = url_exp.split('?')[0]
+                # Normalización de URL sin parámetros (sin '?' / '#') según fuente
+                # - MediaMarkt: el enlace importado suele ser TradeDoubler; expandir_url ya extrae la URL real del merchant.
+                # - AliExpress / AliExpress Plaza: expandir y eliminar parámetros.
+                if fuente in ["MediaMarkt", "AliExpress", "AliExpress Plaza", "PcComponentes", "Fnac", "Amazon", "Phone House"]:
+                    url_importada_sin_afiliado = strip_query(url_exp)
                 else:
                     url_importada_sin_afiliado = url_exp
 
                 # Construir URL con afiliado usando variables de entorno
                 if fuente == "MediaMarkt" and ID_AFILIADO_MEDIAMARKT:
-                    url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_MEDIAMARKT}"
-                elif fuente == "AliExpress Plaza" and ID_AFILIADO_ALIEXPRESS:
-                    url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_ALIEXPRESS}"
+                    url_sin_acortar_con_mi_afiliado = unir_afiliado(url_importada_sin_afiliado, ID_AFILIADO_MEDIAMARKT)
+                elif fuente in ["AliExpress", "AliExpress Plaza"] and ID_AFILIADO_ALIEXPRESS:
+                    url_sin_acortar_con_mi_afiliado = unir_afiliado(url_importada_sin_afiliado, ID_AFILIADO_ALIEXPRESS)
                 elif fuente == "Fnac" and ID_AFILIADO_FNAC:
-                    url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
+                    url_sin_acortar_con_mi_afiliado = unir_afiliado(url_importada_sin_afiliado, ID_AFILIADO_FNAC)
                 elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
-                    url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
+                    url_sin_acortar_con_mi_afiliado = unir_afiliado(url_importada_sin_afiliado, ID_AFILIADO_AMAZON)
                 else:
                     url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
@@ -195,7 +278,26 @@ def obtener_datos_remotos():
                 cup = item.select_one("button.border-fluor-green").get_text(strip=True).replace("Código", "").strip() if item.select_one("button.border-fluor-green") else "OFERTA PROMO"
 
                 # Evitar imprimir URLs o códigos de afiliado en logs públicos
-                print(f"Detectado {nombre} — {ram} / {rom} — {fuente} — precio {p_act}")
+                print(f"Detectado {nombre}")
+                print(f"1) Nombre: {nombre}")
+                print(f"2) Memoria: {ram}")
+                print(f"3) Capacidad: {rom}")
+                print(f"4) Versión: {ver}")
+                print(f"5) Fuente: {fuente}")
+                print(f"6) Precio actual: {p_act}")
+                print(f"7) Precio original: {p_reg}")
+                print(f"8) Código de descuento: {cup}")
+                print(f"9) Version: {ver}")
+                print(f"10) URL Imagen: {img_src}")
+                print(f"11) Enlace Importado: {url_imp}")
+                print(f"12) Enlace Expandido: {url_exp}")
+                print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
+                print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
+                print(f"15) URL acortada con mi afiliado: {url_oferta}")
+                print(f"16) Enviado desde: {enviado_desde}")
+                print(f"17) Encolado para comparar con base de datos...")
+                print("-" * 60)
+
 
                 productos_lista.append({
                     "nombre": nombre, "p_act": p_act, "p_reg": p_reg,
