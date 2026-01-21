@@ -10,7 +10,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: "scraper-phonehouse"
+  group: "scraper-amazon"
   cancel-in-progress: true
 
 jobs:
@@ -38,14 +38,14 @@ jobs:
           echo ">>> LISTADO DE ARCHIVOS:"
           ls -R .
 
-      - name: Ejecutar Script PhoneHouse
+      - name: Ejecutar Script Amazon
         env:
           WP_URL: ${{ secrets.WP_URL }}
           WP_KEY: ${{ secrets.WP_KEY }}
           WP_SECRET: ${{ secrets.WP_SECRET }}
-          PHONEHOUSE_URL: ${{ secrets.SOURCE_URL_AMAZON }}
-          AFF_PHONEHOUSE: ${{ secrets.AFF_AMAZON }}
-          SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_AMAZON }}
+          AMAZON_URL: ${{ secrets.SOURCE_URL_AMAZON }}
+          AFF_AMAZON: ${{ secrets.AFF_AMAZON }}
+          SOURCE_URL_AMAZON: ${{ secrets.SOURCE_URL_AMAZON }}
         run: |
           echo ">>> EJECUTANDO amazon.py..."
           python -u amazon.py
