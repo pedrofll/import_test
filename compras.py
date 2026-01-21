@@ -3,6 +3,7 @@ import os
 import time
 import requests
 import urllib.parse
+import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from woocommerce import API
@@ -75,8 +76,52 @@ def _extraer_url_tradedoubler(click_url: str) -> str | None:
         return encoded
 
 def expandir_url(url):
-    """Intenta expandir/normalizar URLs de tracking/shorteners para obtener la URL final de destino."""
+    """Intenta expandir/normalizar URLs de tracking/shorteners para obtener la URL final de destino.
+
+    Para TradeDoubler (clk/pdt) extrae la URL real del parámetro `url` aunque el click no redirija.
+    """
+    url = (url or "").strip()
     if not url:
+        return ""
+
+    def _extraer_destino_tradedoubler(click_url: str) -> str:
+        if not click_url:
+            return ""
+        cu = click_url.strip()
+
+        # Formato 1: https://clk.tradedoubler.com/click?...&url=https%3A%2F%2F...
+        #          o   https://clk.tradedoubler.com/click?...&url=https://www....
+        # Nota: `url` suele ser el último parámetro; capturamos hasta el final.
+        m = re.search(r"(?:\?|&)url=([^#]+)$", cu)
+        if m:
+            return urllib.parse.unquote(m.group(1))
+
+        # Formato 2 (legacy): https://pdt.tradedoubler.com/click?...url(https%3A%2F%2F...)
+        m = re.search(r"url\(([^)]+)\)", cu)
+        if m:
+            return urllib.parse.unquote(m.group(1))
+
+        return ""
+
+    # Si ya es un click de tradedoubler, extraemos sin requests
+    if "tradedoubler.com" in url and "/click" in url:
+        destino = _extraer_destino_tradedoubler(url)
+        if destino:
+            return destino
+
+    # Intento de expansión vía HTTP (shorteners, etc.)
+    try:
+        resp = requests.get(url, allow_redirects=True, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        final = resp.url or url
+
+        # Si el resultado sigue siendo tradedoubler click, extraemos el destino
+        if "tradedoubler.com" in final and "/click" in final:
+            destino = _extraer_destino_tradedoubler(final)
+            if destino:
+                return destino
+
+        return final
+    except Exception:
         return url
 
     # Caso especial: TradeDoubler click con URL embebida (no siempre redirige en un GET simple)
