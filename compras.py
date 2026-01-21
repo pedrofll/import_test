@@ -279,8 +279,27 @@ def obtener_datos_remotos():
                         else "OFERTA PROMO"
                     )
 
-                    # Evitar imprimir URLs o códigos de afiliado en logs públicos
-                    print(f"Detectado {nombre} — {ram} / {rom} — {fuente} — precio {p_act} (Página: {label})")
+                    # --- LOGS DETALLADOS SOLICITADOS ---
+                    print(f"Detectado {nombre}")
+                    print(f"1) Nombre: {nombre}")
+                    print(f"2) Memoria: {ram}")
+                    print(f"3) Capacidad: {rom}")
+                    print(f"4) Versión: {ver}")
+                    print(f"5) Fuente: {fuente}")
+                    print(f"6) Precio actual: {p_act}")
+                    print(f"7) Precio original: {p_reg}")
+                    print(f"8) Código de descuento: {cup}")
+                    print(f"9) Version: {ver}")
+                    print(f"10) URL Imagen: {img_src}")
+                    print(f"11) Enlace Importado: {url_imp}")
+                    print(f"12) Enlace Expandido: {url_exp}")
+                    print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
+                    print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
+                    print(f"15) URL acortada con mi afiliado: {url_oferta}")
+                    print(f"16) Enviado desde: {enviado_desde}")
+                    print(f"17) Encolado para comparar con base de datos...")
+                    print("-" * 60)
+                    # -----------------------------------
 
                     clave = f"{nombre}|{ram}|{rom}|{fuente}".lower()
                     if clave not in productos_por_clave:
