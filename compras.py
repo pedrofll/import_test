@@ -433,7 +433,7 @@ def sincronizar(remotos):
             except Exception as e:
                 print(f"❌ Excepción durante la creación. Reintentando...", flush=True)
             
-            time.sleep(30)
+            time.sleep(60)
 
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n============================================================")
