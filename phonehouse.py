@@ -1179,7 +1179,7 @@ def sincronizar(remotos):
                                 {"key": "precio_original", "value": str(r["precio_original"])},
                             ],
                         }
-                        wc.put(f'products/{match["id"]}', payload)
+                        wcapi.put(f'products/{match["id"]}', payload)
                         summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambios": cambios})
                     except Exception as e:
                         print(f"❌ ERROR actualizando {r['nombre']}: {e}", flush=True)
