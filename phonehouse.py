@@ -594,7 +594,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
                 "fuente": FUENTE,
                 "codigo_descuento": CODIGO_DESCUENTO,
                 "origen_pagina": source_label,
-                "origen_listado": url_listado,
+                "origen_listado": url,
             })
 
         print(f"✅ Productos DOM válidos: {len(productos)}", flush=True)
