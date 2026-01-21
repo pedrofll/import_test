@@ -148,16 +148,21 @@ def obtener_datos_remotos():
                 
                 fuente = btn.get_text(strip=True).replace("Cómpralo en", "").strip() if btn else "Tienda"
                 url_importada_sin_afiliado = url_exp 
-
                 # Normalización de URL sin parámetros según fuente
-                if fuente == "MediaMarkt":
-                    url_importada_sin_afiliado = url_exp.split('?')[0]
-                elif fuente == "AliExpress Plaza":
-                    url_importada_sin_afiliado = url_exp.split(".html")[0] + ".html" if ".html" in url_exp else url_exp.split('?')[0]
-                elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
-                    url_importada_sin_afiliado = url_exp.split('?')[0]
+                # Regla especial: si el enlace importado es Tradedoubler (pdt.tradedoubler.com/click),
+                # trabajamos sobre la URL expandida y eliminamos el querystring (afiliación/trackers).
+                is_tradedoubler_click = url_imp.startswith("https://pdt.tradedoubler.com/click")
+                if is_tradedoubler_click:
+                    url_importada_sin_afiliado = url_exp.split('?', 1)[0]
                 else:
-                    url_importada_sin_afiliado = url_exp
+                    if fuente == "MediaMarkt":
+                        url_importada_sin_afiliado = url_exp.split('?', 1)[0]
+                    elif fuente == "AliExpress Plaza":
+                        url_importada_sin_afiliado = (url_exp.split("...")[0] + ".html") if ".html" in url_exp else url_exp.split('?', 1)[0]
+                    elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
+                        url_importada_sin_afiliado = url_exp.split('?', 1)[0]
+                    else:
+                        url_importada_sin_afiliado = url_exp
 
                 # Construir URL con afiliado usando variables de entorno
                 if fuente == "MediaMarkt" and ID_AFILIADO_MEDIAMARKT:
@@ -194,8 +199,25 @@ def obtener_datos_remotos():
                 
                 cup = item.select_one("button.border-fluor-green").get_text(strip=True).replace("Código", "").strip() if item.select_one("button.border-fluor-green") else "OFERTA PROMO"
 
-                # Evitar imprimir URLs o códigos de afiliado en logs públicos
-                print(f"Detectado {nombre} — {ram} / {rom} — {fuente} — precio {p_act}")
+                print(f"Detectado {nombre}", flush=True)
+                print(f"1) Nombre: {nombre}", flush=True)
+                print(f"2) Memoria: {ram}", flush=True)
+                print(f"3) Capacidad: {rom}", flush=True)
+                print(f"4) Versión: {ver}", flush=True)
+                print(f"5) Fuente: {fuente}", flush=True)
+                print(f"6) Precio actual: {p_act}", flush=True)
+                print(f"7) Precio original: {p_reg}", flush=True)
+                print(f"8) Código de descuento: {cup}", flush=True)
+                print(f"9) Version: {ver}", flush=True)
+                print(f"10) URL Imagen: {img_src}", flush=True)
+                print(f"11) Enlace Importado: {url_imp}", flush=True)
+                print(f"12) Enlace Expandido: {url_exp}", flush=True)
+                print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}", flush=True)
+                print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}", flush=True)
+                print(f"15) URL acortada con mi afiliado: {url_oferta}", flush=True)
+                print(f"16) Enviado desde: {enviado_desde}", flush=True)
+                print(f"17) Encolado para comparar con base de datos...", flush=True)
+                print("-" * 60, flush=True)
 
                 productos_lista.append({
                     "nombre": nombre, "p_act": p_act, "p_reg": p_reg,
