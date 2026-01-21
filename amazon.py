@@ -1,3 +1,25 @@
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Amazon (ES) scraper - MODO SOLO LOGS (sin publicar)
+
+- Lee SOURCE_URL_AMAZON desde variables de entorno (GitHub Secrets).
+- Extrae productos de resultados de búsqueda de Amazon.
+- Normaliza:
+  - nombre (antes de guión/coma; si no, sin el bloque RAM/ROM)
+  - RAM / ROM (p.ej. 8+256GB, 16GB + 512GB, 12GB RAM 256GB, etc.)
+  - iPhone: RAM por mapeo (IPHONE_RAM_MAP) y ROM por "de XXX GB/TB"
+  - precio_actual y precio_original (si no hay tachado, *1.20)
+  - cupón (si no hay, "OFERTA PROMO")
+  - url limpia sin query (/dp/ASIN), afiliado (?tag=...), y acortado (is.gd)
+- Identificador recomendado: ASIN + page_id (hash de la URL origen)
+- NO crea / actualiza / elimina nada en WordPress: solo imprime logs.
+
+Requisitos: selenium, requests (y navegador/driver disponibles en runner).
+"""
+
 import os
 import re
 import time
@@ -313,16 +335,45 @@ class ItemAmazon:
 # -----------------------------
 
 def build_driver() -> webdriver.Chrome:
+    """Crea un Chrome headless intentando minimizar bloqueos (Amazon es sensible a bots)."""
     opts = Options()
+
+    # Headless moderno (Chrome >= 109). En algunos entornos puede fallar; si fuera necesario,
+    # se puede cambiar a "--headless" clásico.
     opts.add_argument("--headless=new")
+    opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1365,900")
+
+    # Idioma / región (ayuda a que el HTML coincida con selectores esperados)
     opts.add_argument("--lang=es-ES")
+
+    # Anti-automation flags comunes
     opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+
+    # User-Agent de escritorio “realista”
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+    opts.add_argument(f"--user-agent={user_agent}")
+
+    # Preferencias (idioma)
+    prefs = {"intl.accept_languages": "es-ES,es;q=0.9,en;q=0.8"}
+    opts.add_experimental_option("prefs", prefs)
+
     driver = webdriver.Chrome(options=opts)
-    driver.set_page_load_timeout(60)
+
+    # Reducir huellas de automatización
+    try:
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    except Exception:
+        pass
+
     return driver
 
 def scroll_to_bottom(driver: webdriver.Chrome) -> None:
