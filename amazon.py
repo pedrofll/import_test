@@ -1,3 +1,25 @@
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Amazon (ES) scraper - MODO SOLO LOGS (sin publicar)
+
+- Lee SOURCE_URL_AMAZON desde variables de entorno (GitHub Secrets).
+- Extrae productos de resultados de búsqueda de Amazon.
+- Normaliza:
+  - nombre (antes de guión/coma; si no, sin el bloque RAM/ROM)
+  - RAM / ROM (p.ej. 8+256GB, 16GB + 512GB, 12GB RAM 256GB, etc.)
+  - iPhone: RAM por mapeo (IPHONE_RAM_MAP) y ROM por "de XXX GB/TB"
+  - precio_actual y precio_original (si no hay tachado, *1.20)
+  - cupón (si no hay, "OFERTA PROMO")
+  - url limpia sin query (/dp/ASIN), afiliado (?tag=...), y acortado (is.gd)
+- Identificador recomendado: ASIN + page_id (hash de la URL origen)
+- NO crea / actualiza / elimina nada en WordPress: solo imprime logs.
+
+Requisitos: selenium, requests (y navegador/driver disponibles en runner).
+"""
+
 import os
 import re
 import time
@@ -369,6 +391,57 @@ def extraer_items(driver: webdriver.Chrome, page_url: str) -> List[webdriver.rem
     return driver.find_elements(By.CSS_SELECTOR, 'div[data-component-type="s-search-result"][data-asin]')
 
 
+# ------------------------
+# ESPERA / DETECCIÓN BLOQUEO AMAZON
+# ------------------------
+def detectar_robot_check(driver) -> str:
+    """Devuelve un string con el motivo si hay bloqueo/captcha, o '' si no."""
+    try:
+        title = (driver.title or '').lower()
+        src = (driver.page_source or '').lower()
+        if "robot check" in title or "robot check" in src:
+            return "Robot Check"
+        if "captchacharacters" in src or "/errors/validatecaptcha" in src:
+            return "Captcha"
+        if "enter the characters you see below" in src:
+            return "Captcha"
+        if "to discuss automated access" in src or "automated access" in src:
+            return "Bloqueo por automatización"
+    except Exception:
+        pass
+    return ""
+
+def esperar_resultados_o_bloqueo(driver, timeout: int = 25) -> bool:
+    """Espera a que aparezcan resultados o detecta bloqueo. True si hay resultados."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        motivo = detectar_robot_check(driver)
+        if motivo:
+            print(f"⚠️ Posible bloqueo de Amazon detectado: {motivo}", flush=True)
+            try:
+                print(f"   Título: {driver.title}", flush=True)
+            except Exception:
+                pass
+            return False
+        try:
+            elems = driver.find_elements(By.CSS_SELECTOR, "div.s-main-slot div[data-component-type='s-search-result']")
+            if elems:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+
+    # Timeout
+    print("⚠️ Timeout esperando resultados de Amazon.", flush=True)
+    try:
+        print(f"   Título: {driver.title}", flush=True)
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        snippet = re.sub(r"\s+", " ", body_text)[:250]
+        print(f"   Snippet: {snippet}", flush=True)
+    except Exception:
+        pass
+    return False
+
 # -----------------------------
 # Extracción Amazon
 # -----------------------------
@@ -487,10 +560,16 @@ def obtener_datos_remotos() -> List[ItemAmazon]:
     driver = build_driver()
     try:
         driver.get(SOURCE_URL_AMAZON)
-        time.sleep(2.5)
-        scroll_to_bottom(driver)
+        # Esperar resultados o detectar bloqueo (Amazon puede bloquear headless en CI)
+        ok = esperar_resultados_o_bloqueo(driver, timeout=25)
+        if ok:
+            time.sleep(1.0)
+            scroll_to_bottom(driver)
 
-        items = extraer_items(driver, SOURCE_URL_AMAZON)
+        if ok:
+            items = extraer_items(driver, SOURCE_URL_AMAZON)
+        else:
+            items = []
         print(f"✅ Resultados detectados: {len(items)}", flush=True)
 
         out: List[ItemAmazon] = []
