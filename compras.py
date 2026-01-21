@@ -56,6 +56,14 @@ else:
 # 3) Identificador de importación (oculto)
 #    Sirve para agrupar importaciones sin que lo vea el usuario; se usa en meta "importado_de".
 ID_IMPORTACION = f"{BASE_URL}/ofertas/"
+
+
+def _norm_import_id(v: str) -> str:
+    """Normaliza el identificador de importación para evitar duplicados por / finales."""
+    return (v or "").strip().rstrip("/")
+
+
+ID_IMPORTACION_NORM = _norm_import_id(ID_IMPORTACION)
 ID_AFILIADO_ALIEXPRESS = os.environ.get("AFF_ALIEXPRESS", "")
 ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
@@ -331,10 +339,12 @@ def sincronizar(remotos):
         except:
             break
 
-    propios_en_wc = [
-        p for p in locales_wc
-        if any(m.get('key') == 'importado_de' and m.get('value') == ID_IMPORTACION for m in p.get('meta_data', []))
-    ]
+    propios_en_wc = []
+    for p in locales_wc:
+        meta = {m.get('key'): m.get('value') for m in (p.get('meta_data') or []) if isinstance(m, dict)}
+        imp = _norm_import_id(str(meta.get('importado_de', '') or ''))
+        if imp == ID_IMPORTACION_NORM:
+            propios_en_wc.append(p)
 
     for local in propios_en_wc:
         meta = {m['key']: str(m['value']) for m in local.get('meta_data', [])}
@@ -388,7 +398,7 @@ def sincronizar(remotos):
             "categories": [{"id": id_cat_padre}, {"id": id_cat_hijo}] if id_cat_hijo else [{"id": id_cat_padre}],
             "images": [{"src": p['imagen']}] if p['imagen'] else [],
             "meta_data": [
-                {"key": "importado_de", "value": ID_IMPORTACION},
+                {"key": "importado_de", "value": ID_IMPORTACION_NORM},
                 {"key": "memoria", "value": p['ram']},
                 {"key": "capacidad", "value": p['rom']},
                 {"key": "version", "value": p['ver']},
@@ -435,7 +445,7 @@ def sincronizar(remotos):
             except Exception as e:
                 print(f"❌ Excepción durante la creación. Reintentando...", flush=True)
             
-            time.sleep(15)
+            time.sleep(60)
 
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n============================================================")
