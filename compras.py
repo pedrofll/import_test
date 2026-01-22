@@ -31,7 +31,7 @@ if compras_urls_raw:
     URLS_PAGINAS = [u.strip().rstrip("/") for u in compras_urls_raw.split(",") if u.strip()]
 
     # BASE_URL derivado automáticamente de la primera URL
-    # Ejemplo: https://comprasmartphone.com/ofertas/xiaomi → https://comprasmartphone.com
+    # Ejemplo: https://XXX.com/ofertas/xiaomi → https://XXX.com
     primera = URLS_PAGINAS[0]
     BASE_URL = primera.split("/ofertas")[0].rstrip("/")
 
