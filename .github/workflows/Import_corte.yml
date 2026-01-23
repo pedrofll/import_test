@@ -1,0 +1,57 @@
+name: Import Corte
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Todos los días a las 07:15 UTC (08:15 en Madrid invierno, 09:15 verano aprox.)
+    - cron: "15 7 * * *"
+
+concurrency:
+  group: corte-scraper
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # Dependencias típicas para scrapers + redimensionado de imágenes
+            pip install requests beautifulsoup4 lxml pillow python-slugify
+          fi
+
+      - name: Run corte.py (DRY RUN)
+        env:
+          # Afiliado El Corte Inglés (ya lo creaste como secret)
+          AFF_ELCORTEINGLES: ${{ secrets.AFF_ELCORTEINGLES }}
+
+          # Opcionales (si decides crearlos)
+          START_URL_CORTEINGLES: ${{ vars.START_URL_CORTEINGLES }}
+          CORTEINGLES_URLS: ${{ vars.CORTEINGLES_URLS }}
+
+          # Si tu corte.py usa estas variables para autenticación WordPress/WooCommerce
+          WP_URL: ${{ secrets.WP_URL }}
+          WC_KEY: ${{ secrets.WC_KEY }}
+          WC_SECRET: ${{ secrets.WC_SECRET }}
+
+          # Recomendado para que el workflow NO publique productos
+          DRY_RUN: "true"
+
+        run: |
+          echo ">>> EJECUTANDO corte.py..."
+          python corte.py
