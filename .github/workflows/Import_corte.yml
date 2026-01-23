@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Todos los días a las 07:15 UTC (08:15 en Madrid invierno, 09:15 verano aprox.)
-    - cron: "15 7 * * *"
+    #- cron: "15 7 * * *"
 
 concurrency:
   group: corte-scraper
