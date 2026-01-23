@@ -3,8 +3,8 @@ name: Import Corte
 on:
   workflow_dispatch:
   schedule:
-    # Todos los días a las 07:15 UTC (08:15 en Madrid invierno, 09:15 verano aprox.)
-    #- cron: "15 7 * * *"
+    # Todos los días a las 23:15 UTC (08:15 en Madrid invierno, 09:15 verano aprox.)
+    #- cron: "15 23 * * *"
 
 concurrency:
   group: corte-scraper
