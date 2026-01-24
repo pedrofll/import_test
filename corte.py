@@ -1,27 +1,27 @@
 """
 Scraper para El Corte Inglés — Móviles
-ESTRATEGIA: "Caballo de Troya" (Google Translate Bypass).
-Usamos los servidores de Google como proxy de alta calidad para evadir el bloqueo de GitHub.
+ESTRATEGIA: Rotación Masiva de Proxies (Fuente: Monosans/TheSpeedX).
+Supera el bloqueo 403 de GitHub Actions usando fuerza bruta de IPs.
 """
 
 import os
 import re
 import time
 import random
-import urllib.parse
+import requests as std_requests
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 from bs4 import BeautifulSoup
 
-# curl_cffi es vital para que Google no nos pida Captcha
+# Intentamos importar curl_cffi para mejor huella TLS
 try:
     from curl_cffi import requests
     USAR_CURL_CFFI = True
 except ImportError:
     import requests
     USAR_CURL_CFFI = False
-    print("⚠️ ADVERTENCIA: 'curl_cffi' no instalado. Google podría bloquearnos.")
+    print("⚠️ ADVERTENCIA: 'curl_cffi' no instalado. Usando requests estándar.")
 
 # =========================
 # CONFIGURACIÓN
@@ -38,17 +38,80 @@ DEFAULT_URLS = [
 CORTEINGLES_URLS_RAW = os.environ.get("CORTEINGLES_URLS", "").strip()
 START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
-TIMEOUT = 40
+
+# Timeout alto porque los proxies gratuitos son lentos
+TIMEOUT = 25 
 
 BASE_URL = "https://www.elcorteingles.es"
 ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
+# Headers rotatorios básicos
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+]
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
-    "Referer": "https://translate.google.com/",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
+
+# =========================
+# GESTOR DE PROXIES (MEJORADO)
+# =========================
+class ProxyManager:
+    def __init__(self):
+        self.proxies = []
+        self.blacklist = set()
+        self.cargar_proxies()
+
+    def cargar_proxies(self):
+        print("🌍 Descargando listas de proxies de alta calidad...")
+        # Fuentes de proxies más fiables (actualizadas frecuentemente)
+        urls = [
+            "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+            "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt"
+        ]
+        
+        found = set()
+        for u in urls:
+            try:
+                print(f"   ⬇️  Bajando de: {u} ...")
+                r = std_requests.get(u, timeout=10)
+                if r.status_code == 200:
+                    lines = r.text.strip().split('\n')
+                    for line in lines:
+                        p = line.strip()
+                        # Validación básica de formato IP:PUERTO
+                        if p and ":" in p and "." in p:
+                            found.add(p)
+            except: pass
+        
+        self.proxies = list(found)
+        random.shuffle(self.proxies)
+        print(f"✅ Total proxies cargados: {len(self.proxies)}")
+
+    def get_proxy(self):
+        # Filtra los que no están en blacklist
+        validos = [p for p in self.proxies if p not in self.blacklist]
+        
+        if len(validos) < 10:
+            print("⚠️ Quedan pocos proxies. Reciclando lista...")
+            self.blacklist.clear()
+            validos = self.proxies
+            random.shuffle(validos)
+        
+        return random.choice(validos) if validos else None
+
+    def report_fail(self, proxy):
+        self.blacklist.add(proxy)
+
+proxy_manager = ProxyManager()
 
 # =========================
 # MODELO
@@ -72,59 +135,8 @@ class ProductoECI:
     page_id: str
 
 # =========================
-# HELPERS DE LIMPIEZA GOOGLE
+# HELPERS
 # =========================
-
-def make_google_url(original_url: str) -> str:
-    """Convierte una URL de ECI en una URL de Google Translate Proxy."""
-    # Formato: https://www-elcorteingles-es.translate.goog/rest_del_path?_x_tr_sl=es&_x_tr_tl=es
-    
-    parsed = urlparse(original_url)
-    clean_path = parsed.path
-    
-    # El dominio se convierte sustituyendo puntos por guiones y añadiendo .translate.goog
-    google_domain = "https://www-elcorteingles-es.translate.goog"
-    
-    params = {
-        "_x_tr_sl": "es",    # Source Lang
-        "_x_tr_tl": "es",    # Target Lang
-        "_x_tr_hl": "es",    # Host Lang
-        "_x_tr_pto": "wapp"  # Proxy option
-    }
-    
-    return f"{google_domain}{clean_path}?{urlencode(params)}"
-
-def clean_google_url(google_messy_url: str) -> str:
-    """Restaura la URL original limpiando la basura de Google Translate."""
-    if not google_messy_url: return ""
-    
-    # Si la URL viene relativa o empieza por translate.goog
-    u = google_messy_url
-    
-    # 1. Recuperar dominio original
-    if "translate.goog" in u:
-        u = u.replace("https://www-elcorteingles-es.translate.goog", "https://www.elcorteingles.es")
-        u = u.replace("http://www-elcorteingles-es.translate.goog", "https://www.elcorteingles.es")
-    
-    # 2. Limpiar parámetros de Google (_x_tr_...)
-    try:
-        parsed = urlparse(u)
-        q = dict(parse_qsl(parsed.query))
-        keys_to_remove = [k for k in q.keys() if k.startswith("_x_tr")]
-        for k in keys_to_remove:
-            del q[k]
-        
-        # Reconstruir
-        clean = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", urlencode(q), ""))
-        
-        # Asegurar dominio si quedó relativo
-        if clean.startswith("/"):
-            clean = urljoin(BASE_URL, clean)
-            
-        return clean
-    except:
-        return u
-
 def mask_url(u: str) -> str:
     try:
         p = urlparse(u)
@@ -143,7 +155,6 @@ def build_urls_paginas() -> List[str]:
 
 URLS_PAGINAS = build_urls_paginas()
 
-# Regex
 RE_GB = re.compile(r"(\d{1,3})\s*GB", re.IGNORECASE)
 RE_RAM_PLUS = re.compile(r"(\d{1,3})\s*GB\s*\+\s*(\d{1,4})\s*GB", re.IGNORECASE)
 RE_12GB_512GB = re.compile(r"(\d{1,3})\s*GB\s*[+xX]\s*(\d{1,4})\s*GB", re.IGNORECASE)
@@ -185,9 +196,6 @@ def parse_precio(texto: str) -> Optional[float]:
 
 def normalizar_url_imagen_600(img_url: str) -> str:
     if not img_url: return ""
-    # Limpiar URL de google si viene wrappeada
-    img_url = clean_google_url(img_url)
-    
     if img_url.startswith("//"): img_url = "https:" + img_url
     try:
         p = urlparse(img_url)
@@ -199,10 +207,8 @@ def normalizar_url_imagen_600(img_url: str) -> str:
     except: return img_url
 
 def limpiar_url_producto(url_rel_o_abs: str) -> str:
-    # Primero quitamos la capa de google
-    clean = clean_google_url(url_rel_o_abs)
-    # Luego quitamos query params
-    return urlunparse(urlparse(clean)._replace(query="", fragment=""))
+    if not url_rel_o_abs: return ""
+    return urlunparse(urlparse(urljoin(BASE_URL, url_rel_o_abs))._replace(query="", fragment=""))
 
 def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     if not url_sin or not aff: return url_sin
@@ -211,48 +217,70 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# LÓGICA DE CONEXIÓN
+# LÓGICA DE CONEXIÓN CON REINTENTOS AGRESIVOS
 # =========================
 
-def fetch_via_google_translate(url: str) -> str:
-    """Descarga la página a través de Google Translate para cambiar la IP."""
+def fetch_html_robust(url: str, max_retries=15) -> str:
+    """Intenta descargar la URL rotando proxies hasta que uno funcione."""
     
-    google_url = make_google_url(url)
+    # Randomizamos user agent para cada intento
+    ua = random.choice(USER_AGENTS)
     
-    session = requests.Session(impersonate="chrome120", headers=HEADERS) if USAR_CURL_CFFI else requests.Session()
-    if not USAR_CURL_CFFI: session.headers.update(HEADERS)
+    if USAR_CURL_CFFI:
+        # Alternamos entre versiones de Chrome para parecer diferentes usuarios
+        impersonations = ["chrome110", "chrome120", "safari15_5"]
+        imp = random.choice(impersonations)
+        session = requests.Session(impersonate=imp)
+        session.headers.update(HEADERS)
+    else:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        session.headers["User-Agent"] = ua
 
-    print(f"   🛡️  Enrutando vía Google: {google_url[:60]}...")
-    
-    try:
-        # Pausa de cortesía
-        time.sleep(random.uniform(4, 8))
+    for i in range(max_retries):
+        proxy = proxy_manager.get_proxy()
+        if not proxy: return ""
+
+        proxy_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
         
-        r = session.get(google_url, timeout=TIMEOUT)
+        print(f"   🔄 Intento {i+1}/{max_retries} | Proxy: {proxy} ...")
         
-        if r.status_code != 200:
-            print(f"      ❌ Google devolvió estado {r.status_code}")
-            return ""
+        try:
+            # Timeout estricto para no perder tiempo con proxies muertos
+            r = session.get(url, proxies=proxy_dict, timeout=15)
             
-        # Verificar si Google nos dio el contenido o un error
-        if "El Corte Inglés" not in r.text and "moviles" not in r.text:
-            # A veces google muestra una pagina de advertencia
-            print("      ⚠️  Google devolvió HTML, pero no parece ECI.")
-            # print(r.text[:500]) # Descomentar para debug
-            return ""
+            # Chequeos de bloqueo ECI
+            if r.status_code in [403, 401] or "Access Denied" in r.text or "bm-verify" in r.text:
+                print(f"      ⛔ Bloqueado/Captcha ({r.status_code}).")
+                proxy_manager.report_fail(proxy)
+                continue
             
-        return r.text
+            if r.status_code == 200:
+                # Comprobación de contenido válido
+                if len(r.content) < 1000:
+                    print("      ⚠️  Respuesta demasiado corta (posible error).")
+                    proxy_manager.report_fail(proxy)
+                    continue
+
+                if "moviles" in r.text.lower() or "smartphones" in r.text.lower() or "card" in r.text:
+                    return r.text
+                else:
+                    print("      ⚠️  HTML basura (proxy transparente).")
+                    proxy_manager.report_fail(proxy)
             
-    except Exception as e:
-        print(f"      ❌ Error conectando con Google: {e}")
-        return ""
+        except Exception:
+            # Error de conexión (timeout, reset, etc) - Muy común en proxies free
+            proxy_manager.report_fail(proxy)
+            pass
+            
+    print("❌ IMPOSIBLE CONECTAR: Se agotaron los reintentos.")
+    return ""
 
 # =========================
 # SCRAPING
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
-    # Google inserta iframes y headers, buscamos profundamente
     cards = soup.select('div.card') or soup.select('li.products_list-item') or soup.select('.product-preview') or soup.select('.grid-item')
     return cards
 
@@ -294,15 +322,14 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     return tit, href, p_act, p_org, img_url
 
 def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
-    # Usamos la técnica de Google
-    html = fetch_via_google_translate(url)
+    html = fetch_html_robust(url)
     if not html: return []
     
     soup = BeautifulSoup(html, "html.parser")
     cards = detectar_cards(soup)
     
     if not cards:
-        print(f"⚠️  HTML descargado pero sin productos en {etiqueta}. ¿Google ha cambiado el DOM?")
+        print(f"⚠️  HTML descargado pero sin productos en {etiqueta}. ¿Estructura cambió?")
         return []
 
     productos = []
@@ -318,24 +345,20 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
         nombre = extraer_nombre(t_clean, ram)
         if p_act is None: continue
         
-        # IMPORTANTE: La URL vendrá "googleada", hay que limpiarla
         url_sin = limpiar_url_producto(href)
         url_con = build_url_con_afiliado(url_sin, AFF_ELCORTEINGLES)
-        
-        # Limpiar imagen también
-        img_clean = normalizar_url_imagen_600(img)
         
         productos.append(ProductoECI(
             nombre=nombre, memoria=ram, capacidad=rom, version="Global",
             precio_actual=p_act, precio_original=p_org, enviado_desde="España",
-            origen_pagina=etiqueta, img=img_clean, url_imp=url_con, url_exp=url_con,
+            origen_pagina=etiqueta, img=img, url_imp=url_con, url_exp=url_con,
             url_importada_sin_afiliado=url_sin, url_sin_acortar_con_mi_afiliado=url_con,
             url_oferta=url_con, page_id=ID_IMPORTACION
         ))
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ECI VÍA GOOGLE TRANSLATE (BYPASS) ---", flush=True)
+    print("--- FASE 1: ECI CON ROTACIÓN DE PROXIES (LISTAS MASSIVAS) ---", flush=True)
     
     total = 0
     for i, url in enumerate(URLS_PAGINAS, start=1):
