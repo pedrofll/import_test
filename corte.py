@@ -1,7 +1,7 @@
 """
 Scraper para El Corte Inglés — Móviles
-ESTRATEGIA: Bing Translate (No-SSL) + Google Cache (Text Mode).
-Corrige el error de certificado SSL y evita el bloqueo JS de Akamai.
+ESTRATEGIA: Bing Translate (Frame Jumping).
+Soluciona el problema de descargar solo la 'carcasa' del traductor.
 """
 
 import os
@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 from bs4 import BeautifulSoup
 import warnings
 
-# Suprimir advertencias de SSL inseguro (ya que lo vamos a forzar)
+# Ignorar warnings de SSL
 warnings.filterwarnings("ignore")
 
 try:
@@ -41,11 +41,10 @@ CORTEINGLES_URLS_RAW = os.environ.get("CORTEINGLES_URLS", "").strip()
 START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
 
-TIMEOUT = 30
+TIMEOUT = 40
 BASE_URL = "https://www.elcorteingles.es"
 ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
-# Headers genéricos para parecer un navegador estándar
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -135,7 +134,14 @@ def parse_precio(texto: str) -> Optional[float]:
 
 def normalizar_url_imagen_600(img_url: str) -> str:
     if not img_url: return ""
+    
+    # Si viene con prefijo Bing, lo limpiamos
+    if "translatetheweb" in img_url:
+        # Intentamos buscar si es una URL absoluta encodeada dentro
+        pass 
+
     if img_url.startswith("//"): img_url = "https:" + img_url
+    
     try:
         p = urlparse(img_url)
         q = dict(parse_qsl(p.query))
@@ -147,14 +153,18 @@ def normalizar_url_imagen_600(img_url: str) -> str:
 
 def limpiar_url_producto(url_rel_o_abs: str) -> str:
     if not url_rel_o_abs: return ""
-    # Limpiar prefijos de bing o google si quedan
     u = url_rel_o_abs
-    if "translatetheweb" in u:
-        pass # Logica compleja, normalmente bing respeta rutas relativas
     
+    # Limpiar basura de Bing
+    if "translatetheweb.com" in u:
+        # Bing a veces reescribe los links como: https://www.translatetheweb.com/...&a=https://elcorte...
+        # O los deja relativos.
+        pass 
+
     if u.startswith("/"):
         u = urljoin(BASE_URL, u)
-        
+    
+    # Quitamos query params para dejarla limpia
     return urlunparse(urlparse(u)._replace(query="", fragment=""))
 
 def build_url_con_afiliado(url_sin: str, aff: str) -> str:
@@ -164,82 +174,50 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# LÓGICA DE CONEXIÓN HÍBRIDA
+# LÓGICA DE CONEXIÓN (BING FRAME JUMPER)
 # =========================
 
 def fetch_html_hybrid(url: str) -> str:
-    # Usamos requests.Session normal o curl_cffi sin impersonate estricto para evitar problemas de certs
-    if USAR_CURL_CFFI:
-        # 'chrome110' suele ser estable. IMPRESCINDIBLE: verify=False para evitar error de Bing
-        session = requests.Session(impersonate="chrome110") 
-    else:
-        session = requests.Session()
-    
+    session = requests.Session(impersonate="chrome120") if USAR_CURL_CFFI else requests.Session()
     session.headers.update(HEADERS)
 
-    # ---------------------------------------------------------
-    # 1. INTENTO: BING TRANSLATE (Con verify=False para saltar error SSL)
-    # ---------------------------------------------------------
+    # 1. BING TRANSLATE
     bing_url = f"https://www.translatetheweb.com/?from=es&to=es&a={urllib.parse.quote(url)}"
-    print(f"   🛡️  Bing Translate (SSL Off)...")
+    print(f"   🛡️  Bing Translate (Entrando)...")
     
     try:
-        # verify=False es la clave para arreglar el error "certificate has expired"
-        r = session.get(bing_url, timeout=25, verify=False)
+        r = session.get(bing_url, timeout=30, verify=False)
+        html = r.text
         
-        if r.status_code == 200:
-            if "moviles" in r.text.lower() or "card" in r.text:
-                print("      ✅ Bing funcionó!")
-                return r.text
-            else:
-                print("      ⚠️  Bing devolvió HTML vacío/extraño.")
-        else:
-            print(f"      ❌ Bing falló con status {r.status_code}")
+        # --- DETECCIÓN DE FRAME ---
+        if "<frameset" in html or "<frame " in html:
+            print("      ↪️  Detectado marco de Bing. Saltando al contenido...")
+            soup_frame = BeautifulSoup(html, "html.parser")
+            # Bing suele poner el contenido en un frame llamado "c"
+            frame = soup_frame.find("frame", {"name": "c"})
+            if frame and frame.get("src"):
+                inner_url = frame.get("src")
+                # A veces la URL es relativa a bing
+                if inner_url.startswith("/"):
+                    inner_url = "https://www.translatetheweb.com" + inner_url
+                
+                print(f"      🚀 Fetching frame interno...")
+                r2 = session.get(inner_url, timeout=30, verify=False)
+                return r2.text
+        
+        # Si no hay frames, devolvemos lo que hay (quizas ya es el contenido)
+        return html
+
     except Exception as e:
         print(f"      ❌ Error Bing: {e}")
 
-    # ---------------------------------------------------------
-    # 2. INTENTO: GOOGLE CACHE "TEXT ONLY" (strip=1)
-    # ---------------------------------------------------------
-    # strip=1 elimina CSS/JS/Imágenes. Akamai no suele bloquear esto porque parece un bot tonto.
-    # vwsrc=0 asegura que no es la vista de código fuente.
-    clean_url = url.split("?")[0]
-    cache_url = f"http://webcache.googleusercontent.com/search?q=cache:{urllib.parse.quote(clean_url)}&strip=1&vwsrc=0"
-    
-    print(f"   👻 Google Cache (Modo Texto)...")
-    try:
-        # Random sleep para no saturar
-        time.sleep(random.uniform(2, 5))
-        r = session.get(cache_url, timeout=20, verify=False)
-        
-        if r.status_code == 200:
-            # En modo texto, la estructura cambia un poco, pero el HTML básico suele estar
-            if "moviles" in r.text.lower() or "smartphones" in r.text.lower():
-                print("      ✅ Google Cache (Texto) funcionó!")
-                return r.text
-            elif "404" in r.text:
-                print("      ⚠️  Google no tiene esta página cacheada.")
-        elif r.status_code == 404:
-            print("      ⚠️  404 Not Found en Cache.")
-        elif r.status_code == 429:
-            print("      ⛔ Google nos bloqueó (429).")
-    except Exception as e:
-        print(f"      ❌ Error Google Cache: {e}")
-
-    # ---------------------------------------------------------
-    # 3. INTENTO: GATEWAY (CodeTabs)
-    # ---------------------------------------------------------
-    # Ya sabemos que CodeTabs da "Access Denied" a veces, pero lo dejamos como último recurso
-    print("   🌐 CodeTabs Gateway...")
+    # 2. FALLBACK: GATEWAY
+    print("   🌐 Fallback: CodeTabs Gateway...")
     try:
         gw_url = f"https://api.codetabs.com/v1/proxy?quest={url}"
-        r = requests.get(gw_url, timeout=20, verify=False) # Requests standard
-        if r.status_code == 200:
-            if "Access Denied" not in r.text and ("moviles" in r.text.lower() or "card" in r.text):
-                print("      ✅ CodeTabs funcionó!")
-                return r.text
-            else:
-                print("      ⛔ CodeTabs devolvió bloqueo (Access Denied).")
+        r = requests.get(gw_url, timeout=20, verify=False)
+        if r.status_code == 200 and "Access Denied" not in r.text:
+            return r.text
     except: pass
 
     return ""
@@ -249,18 +227,18 @@ def fetch_html_hybrid(url: str) -> str:
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
-    # Selectores ampliados
     cards = soup.select('div.card') 
     if not cards: cards = soup.select('li.products_list-item')
     if not cards: cards = soup.select('.product-preview')
     if not cards: cards = soup.select('.grid-item')
-    # Selector específico ECI antiguo/texto
     if not cards: cards = soup.select('.product_tile')
     return cards
 
 def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]:
     tit, href = "", ""
-    # Títulos
+    
+    # En Bing, los atributos a veces cambian (ej: href -> rhref o similar), pero bs4 suele normalizar
+    
     for sel in ["a.product_preview-title", "h2 a", ".product-name a", "a.js-product-link", ".product_tile-title"]:
         a = card.select_one(sel)
         if a:
@@ -268,7 +246,6 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
             href = a.get("href") or ""
             break
             
-    # Precios
     p_act, p_org = None, None
     for sel in [".js-preview-pricing", ".pricing", ".price", ".product-price", ".prices-price", ".product_tile-price"]:
         pricing = card.select_one(sel)
@@ -290,7 +267,8 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     for sel in ["img.js_preview_image", "img[data-variant-image-src]", "img", ".product_tile-image"]:
         img = card.select_one(sel)
         if img:
-            src = img.get("src") or img.get("data-variant-image-src")
+            # Bing a veces cambia src por data-src para lazy loading
+            src = img.get("src") or img.get("data-src") or img.get("data-variant-image-src")
             if src: 
                 img_url = normalizar_url_imagen_600(src)
                 break
@@ -301,7 +279,7 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     html = fetch_html_hybrid(url)
     
     if not html: 
-        print(f"❌ Fallo total en {etiqueta}.")
+        print(f"❌ Fallo al descargar {etiqueta}.")
         return []
     
     soup = BeautifulSoup(html, "html.parser")
@@ -309,9 +287,8 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     
     if not cards:
         print(f"⚠️  HTML obtenido pero sin productos en {etiqueta}.", flush=True)
-        # Debug
         title = soup.title.string.strip() if soup.title else "SIN TÍTULO"
-        print(f"   🔎 Título: '{title}' | Longitud: {len(html)}")
+        print(f"   🔎 Título: '{title}' (Probablemente sigamos en el wrapper de Bing)")
         return []
 
     productos = []
@@ -340,7 +317,7 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ECI (SSL BYPASS & TEXT-MODE) ---", flush=True)
+    print("--- FASE 1: ECI (BING FRAME JUMPER) ---", flush=True)
     
     total = 0
     for i, url in enumerate(URLS_PAGINAS, start=1):
