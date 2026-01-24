@@ -2,8 +2,8 @@ name: Import Corte
 
 on:
   workflow_dispatch:        # Botón manual para ejecutar cuando quieras
-  schedule:
-    - cron: '0 21 * * *'  # Ejecuta auto a las 9, 15 y 21
+ # schedule:
+ #   - cron: '0 21 * * *'  # Ejecuta auto a las 9, 15 y 21
 
 jobs:
   run-eci:
