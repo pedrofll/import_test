@@ -1,7 +1,7 @@
 """
 Scraper para El Corte Inglés — Móviles
-ESTRATEGIA: Bing Translate Proxy + Gateways + Debugging.
-Intenta usar la infraestructura de Microsoft para saltar el bloqueo.
+ESTRATEGIA: Bing Translate (No-SSL) + Google Cache (Text Mode).
+Corrige el error de certificado SSL y evita el bloqueo JS de Akamai.
 """
 
 import os
@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 from bs4 import BeautifulSoup
+import warnings
+
+# Suprimir advertencias de SSL inseguro (ya que lo vamos a forzar)
+warnings.filterwarnings("ignore")
 
 try:
     from curl_cffi import requests
@@ -41,8 +45,9 @@ TIMEOUT = 30
 BASE_URL = "https://www.elcorteingles.es"
 ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
+# Headers genéricos para parecer un navegador estándar
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
 }
@@ -89,7 +94,6 @@ def build_urls_paginas() -> List[str]:
 
 URLS_PAGINAS = build_urls_paginas()
 
-# Regex
 RE_GB = re.compile(r"(\d{1,3})\s*GB", re.IGNORECASE)
 RE_RAM_PLUS = re.compile(r"(\d{1,3})\s*GB\s*\+\s*(\d{1,4})\s*GB", re.IGNORECASE)
 RE_12GB_512GB = re.compile(r"(\d{1,3})\s*GB\s*[+xX]\s*(\d{1,4})\s*GB", re.IGNORECASE)
@@ -131,11 +135,6 @@ def parse_precio(texto: str) -> Optional[float]:
 
 def normalizar_url_imagen_600(img_url: str) -> str:
     if not img_url: return ""
-    # Si viene de proxy, a veces trae la url del proxy delante
-    if "translatetheweb" in img_url or "codetabs" in img_url:
-        # Intentar buscar la url real dentro
-        pass 
-    
     if img_url.startswith("//"): img_url = "https:" + img_url
     try:
         p = urlparse(img_url)
@@ -148,18 +147,11 @@ def normalizar_url_imagen_600(img_url: str) -> str:
 
 def limpiar_url_producto(url_rel_o_abs: str) -> str:
     if not url_rel_o_abs: return ""
+    # Limpiar prefijos de bing o google si quedan
     u = url_rel_o_abs
-    # Limpiar prefijos de gateways
-    if "api.codetabs.com" in u:
-        # Extraer lo que hay despues de quest=
-        parts = u.split("quest=")
-        if len(parts) > 1: u = parts[1]
-    
-    # Limpiar prefijos de bing
     if "translatetheweb" in u:
-        # Normalmente Bing mantiene los links relativos, pero si no:
-        pass
-
+        pass # Logica compleja, normalmente bing respeta rutas relativas
+    
     if u.startswith("/"):
         u = urljoin(BASE_URL, u)
         
@@ -172,46 +164,83 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# LÓGICA DE CONEXIÓN (BING + GATEWAYS)
+# LÓGICA DE CONEXIÓN HÍBRIDA
 # =========================
 
 def fetch_html_hybrid(url: str) -> str:
-    session = requests.Session(impersonate="chrome120") if USAR_CURL_CFFI else requests.Session()
+    # Usamos requests.Session normal o curl_cffi sin impersonate estricto para evitar problemas de certs
+    if USAR_CURL_CFFI:
+        # 'chrome110' suele ser estable. IMPRESCINDIBLE: verify=False para evitar error de Bing
+        session = requests.Session(impersonate="chrome110") 
+    else:
+        session = requests.Session()
+    
     session.headers.update(HEADERS)
 
-    # 1. INTENTO: BING TRANSLATE (Microsoft Proxy)
-    # URL Format: https://www.translatetheweb.com/?from=es&to=es&a=[URL_ENCODED]
+    # ---------------------------------------------------------
+    # 1. INTENTO: BING TRANSLATE (Con verify=False para saltar error SSL)
+    # ---------------------------------------------------------
     bing_url = f"https://www.translatetheweb.com/?from=es&to=es&a={urllib.parse.quote(url)}"
-    print(f"   🛡️  Probando vía Bing Translate...")
+    print(f"   🛡️  Bing Translate (SSL Off)...")
     
     try:
-        r = session.get(bing_url, timeout=25)
+        # verify=False es la clave para arreglar el error "certificate has expired"
+        r = session.get(bing_url, timeout=25, verify=False)
+        
         if r.status_code == 200:
-            if "moviles" in r.text.lower() or "smartphones" in r.text.lower() or "card" in r.text:
+            if "moviles" in r.text.lower() or "card" in r.text:
                 print("      ✅ Bing funcionó!")
                 return r.text
             else:
-                print("      ⚠️  Bing devolvió HTML sin productos.")
+                print("      ⚠️  Bing devolvió HTML vacío/extraño.")
+        else:
+            print(f"      ❌ Bing falló con status {r.status_code}")
     except Exception as e:
-        print(f"      ❌ Falló Bing: {e}")
+        print(f"      ❌ Error Bing: {e}")
 
-    # 2. INTENTO: GATEWAYS CORS (Respaldo)
-    gateways = [
-        "https://api.codetabs.com/v1/proxy?quest={}",
-        "https://corsproxy.io/?{}",
-        "https://api.allorigins.win/raw?url={}"
-    ]
+    # ---------------------------------------------------------
+    # 2. INTENTO: GOOGLE CACHE "TEXT ONLY" (strip=1)
+    # ---------------------------------------------------------
+    # strip=1 elimina CSS/JS/Imágenes. Akamai no suele bloquear esto porque parece un bot tonto.
+    # vwsrc=0 asegura que no es la vista de código fuente.
+    clean_url = url.split("?")[0]
+    cache_url = f"http://webcache.googleusercontent.com/search?q=cache:{urllib.parse.quote(clean_url)}&strip=1&vwsrc=0"
     
-    print("   🌐 Probando Gateways CORS...")
-    for gw in gateways:
-        target = gw.format(url)
-        try:
-            r = requests.get(target, timeout=20) # Usamos requests normal o curl_cffi sin impersonate aqui
-            if r.status_code == 200:
-                if "moviles" in r.text.lower() or "card" in r.text:
-                    print(f"      ✅ Gateway exitoso: {gw.split('/')[2]}")
-                    return r.text
-        except: pass
+    print(f"   👻 Google Cache (Modo Texto)...")
+    try:
+        # Random sleep para no saturar
+        time.sleep(random.uniform(2, 5))
+        r = session.get(cache_url, timeout=20, verify=False)
+        
+        if r.status_code == 200:
+            # En modo texto, la estructura cambia un poco, pero el HTML básico suele estar
+            if "moviles" in r.text.lower() or "smartphones" in r.text.lower():
+                print("      ✅ Google Cache (Texto) funcionó!")
+                return r.text
+            elif "404" in r.text:
+                print("      ⚠️  Google no tiene esta página cacheada.")
+        elif r.status_code == 404:
+            print("      ⚠️  404 Not Found en Cache.")
+        elif r.status_code == 429:
+            print("      ⛔ Google nos bloqueó (429).")
+    except Exception as e:
+        print(f"      ❌ Error Google Cache: {e}")
+
+    # ---------------------------------------------------------
+    # 3. INTENTO: GATEWAY (CodeTabs)
+    # ---------------------------------------------------------
+    # Ya sabemos que CodeTabs da "Access Denied" a veces, pero lo dejamos como último recurso
+    print("   🌐 CodeTabs Gateway...")
+    try:
+        gw_url = f"https://api.codetabs.com/v1/proxy?quest={url}"
+        r = requests.get(gw_url, timeout=20, verify=False) # Requests standard
+        if r.status_code == 200:
+            if "Access Denied" not in r.text and ("moviles" in r.text.lower() or "card" in r.text):
+                print("      ✅ CodeTabs funcionó!")
+                return r.text
+            else:
+                print("      ⛔ CodeTabs devolvió bloqueo (Access Denied).")
+    except: pass
 
     return ""
 
@@ -220,11 +249,12 @@ def fetch_html_hybrid(url: str) -> str:
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
-    # Selectores ampliados para cuando la estructura cambia o es version movil
+    # Selectores ampliados
     cards = soup.select('div.card') 
     if not cards: cards = soup.select('li.products_list-item')
     if not cards: cards = soup.select('.product-preview')
     if not cards: cards = soup.select('.grid-item')
+    # Selector específico ECI antiguo/texto
     if not cards: cards = soup.select('.product_tile')
     return cards
 
@@ -271,7 +301,7 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     html = fetch_html_hybrid(url)
     
     if not html: 
-        print(f"❌ No se pudo descargar {etiqueta} con ningún método.")
+        print(f"❌ Fallo total en {etiqueta}.")
         return []
     
     soup = BeautifulSoup(html, "html.parser")
@@ -279,21 +309,9 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     
     if not cards:
         print(f"⚠️  HTML obtenido pero sin productos en {etiqueta}.", flush=True)
-        
-        # --- DEBUG VITAL ---
-        # Imprimimos el título de la página para saber qué nos están devolviendo
-        # (ej: "Access Denied", "Challenge", "Verify you are human")
-        page_title = soup.title.string.strip() if soup.title else "SIN TÍTULO"
-        print(f"   🔎 Título de la página recibida: '{page_title}'")
-        print(f"   🔎 Longitud del HTML: {len(html)} caracteres")
-        
-        # Check de patrones de bloqueo conocidos
-        if "Access Denied" in html: print("   ⛔ Diagnóstico: BLOQUEO AKAMAI (Access Denied)")
-        elif "captcha" in html.lower(): print("   ⛔ Diagnóstico: CAPTCHA DETECTADO")
-        elif "robot" in html.lower(): print("   ⛔ Diagnóstico: DETECCION DE BOT")
-        else: print("   ❓ Diagnóstico: Posible cambio de estructura HTML o página vacía.")
-        # -------------------
-        
+        # Debug
+        title = soup.title.string.strip() if soup.title else "SIN TÍTULO"
+        print(f"   🔎 Título: '{title}' | Longitud: {len(html)}")
         return []
 
     productos = []
@@ -322,7 +340,7 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ECI (BING + GATEWAYS + DEBUG) ---", flush=True)
+    print("--- FASE 1: ECI (SSL BYPASS & TEXT-MODE) ---", flush=True)
     
     total = 0
     for i, url in enumerate(URLS_PAGINAS, start=1):
