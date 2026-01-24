@@ -1,6 +1,6 @@
 """
 Scraper para El Corte Inglés — móviles y smartphones
-SOLUCIÓN ANTI-BLOQUEO: Usa curl_cffi para imitar huella TLS de navegador real.
+SOLUCIÓN DIAGNÓSTICA: Ampliación de selectores y volcado de HTML para debug.
 
 Requisitos:
     pip install curl_cffi beautifulsoup4 requests
@@ -9,6 +9,7 @@ Requisitos:
 import os
 import re
 import time
+import json
 import random
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -23,7 +24,7 @@ try:
 except ImportError:
     import requests
     USAR_CURL_CFFI = False
-    print("⚠️ ADVERTENCIA: 'curl_cffi' no está instalado. Se usará 'requests' estándar (probable bloqueo en ECI).")
+    print("⚠️ ADVERTENCIA: 'curl_cffi' no está instalado. Se usará 'requests' estándar.")
 
 # =========================
 # Configuración / Variables
@@ -42,35 +43,16 @@ START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
 
 DRY_RUN = True
-TIMEOUT = 40  # Aumentado para dar margen
+TIMEOUT = 45
 
-# Headers básicos (curl_cffi se encarga del resto)
+# Headers para curl_cffi
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
-
-def mask_url(u: str) -> str:
-    if not u: return ""
-    try:
-        p = urlparse(u)
-        return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
-    except: return u
-
-def build_urls_paginas() -> List[str]:
-    if CORTEINGLES_URLS_RAW:
-        return [u.strip() for u in CORTEINGLES_URLS_RAW.split(",") if u.strip()]
-    if START_URL_CORTEINGLES:
-        base = START_URL_CORTEINGLES.rstrip("/")
-        if base.endswith("moviles-y-smartphones"):
-            return [base + "/"] + [f"{base}/{i}/" for i in range(2, 11)]
-        return [START_URL_CORTEINGLES]
-    return DEFAULT_URLS
-
-URLS_PAGINAS = build_urls_paginas()
-BASE_URL = "https://www.elcorteingles.es"
-ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
 # ===========
 # Modelo dato
@@ -92,6 +74,31 @@ class ProductoECI:
     url_sin_acortar_con_mi_afiliado: str
     url_oferta: str
     page_id: str
+
+# =========================
+# Helpers
+# =========================
+
+def mask_url(u: str) -> str:
+    if not u: return ""
+    try:
+        p = urlparse(u)
+        return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+    except: return u
+
+def build_urls_paginas() -> List[str]:
+    if CORTEINGLES_URLS_RAW:
+        return [u.strip() for u in CORTEINGLES_URLS_RAW.split(",") if u.strip()]
+    if START_URL_CORTEINGLES:
+        base = START_URL_CORTEINGLES.rstrip("/")
+        if base.endswith("moviles-y-smartphones"):
+            return [base + "/"] + [f"{base}/{i}/" for i in range(2, 11)]
+        return [START_URL_CORTEINGLES]
+    return DEFAULT_URLS
+
+URLS_PAGINAS = build_urls_paginas()
+BASE_URL = "https://www.elcorteingles.es"
+ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
 # =========================
 # Parsing (Regex)
@@ -160,19 +167,17 @@ def limpiar_url_producto(url_rel_o_abs: str) -> str:
 
 def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     if not url_sin: return ""
-    # Lógica simplificada de afiliado
     if not aff: return url_sin
     sep = "&" if "?" in url_sin else "?"
     if re.fullmatch(r"\d+", aff): return f"{url_sin}{sep}aff_id={aff}"
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# Red / Descarga (IMPERSONATE)
+# Red / Descarga
 # =========================
 
 def get_session():
     if USAR_CURL_CFFI:
-        # 'impersonate="chrome"' es la clave para pasar como un navegador real
         return requests.Session(impersonate="chrome110", headers=HEADERS)
     else:
         s = requests.Session()
@@ -180,11 +185,10 @@ def get_session():
         return s
 
 def fetch_html(session, url: str) -> str:
-    time.sleep(random.uniform(3, 6)) # Pausa humana
-    # En curl_cffi el timeout y verify se manejan igual
+    time.sleep(random.uniform(4, 7))
     r = session.get(url, timeout=TIMEOUT)
     if r.status_code == 403:
-        raise Exception("Bloqueo 403 (Access Denied) - El servidor detectó el bot.")
+        raise Exception("Bloqueo 403 (Access Denied).")
     r.raise_for_status()
     return r.text
 
@@ -193,67 +197,96 @@ def fetch_html(session, url: str) -> str:
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
+    # Intentamos múltiples selectores de contenedor
+    # 1. Selector clásico
     cards = soup.select('div.card[data-synth="LOCATOR_PRODUCT_PREVIEW_LIST"]')
-    return cards if cards else soup.select("div.card")
+    if cards: return cards
+    
+    # 2. Selector genérico de cards
+    cards = soup.select("div.card")
+    if cards: return cards
+    
+    # 3. Selector para estructura grid moderna (ul > li)
+    cards = soup.select("ul.products-list li")
+    if cards: return cards
 
-def extraer_img(card: BeautifulSoup) -> str:
+    # 4. Busqueda por clases de producto genéricas
+    cards = soup.select(".product-preview")
+    return cards
+
+def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]:
+    # Título y URL
+    tit, href = "", ""
+    for sel in ["a.product_preview-title", "h2 a", "a.js-product-link", ".product-name a"]:
+        a = card.select_one(sel)
+        if a:
+            tit = a.get("title") or a.get_text(" ", strip=True)
+            href = a.get("href") or ""
+            break
+            
+    # Precios
+    p_act, p_org = None, None
+    for sel in [".js-preview-pricing", ".pricing", ".product-price"]:
+        pricing = card.select_one(sel)
+        if pricing:
+            texts = [normalizar_espacios(t) for t in pricing.stripped_strings if t]
+            precios = []
+            for t in texts:
+                p = parse_precio(t)
+                if p: precios.append(p)
+            if precios:
+                p_act = min(precios)
+                p_org = max(precios)
+                break
+    
+    if p_act and not p_org: p_org = p_act
+    if p_act and p_org and p_org == p_act: p_org = round(p_act * 1.2, 2)
+
+    # Imagen
+    img_url = ""
     for sel in ["img.js_preview_image", "img[data-variant-image-src]", "img"]:
         img = card.select_one(sel)
         if img:
             src = img.get("src") or img.get("data-variant-image-src")
-            if src: return normalizar_url_imagen_600(src)
-    return ""
+            if src: 
+                img_url = normalizar_url_imagen_600(src)
+                break
 
-def extraer_titulo_y_url(card: BeautifulSoup) -> Tuple[str, str]:
-    for sel in ["a.product_preview-title", "h2 a"]:
-        a = card.select_one(sel)
-        if a:
-            t = a.get("title") or a.get_text(" ", strip=True)
-            h = a.get("href") or ""
-            return normalizar_espacios(t), h
-    return "", ""
-
-def extraer_precio(card: BeautifulSoup) -> Tuple[Optional[float], Optional[float]]:
-    pricing = card.select_one(".js-preview-pricing") or card.select_one(".pricing")
-    texts = [normalizar_espacios(t) for t in (pricing.stripped_strings if pricing else card.stripped_strings) if t]
-    precios = []
-    for t in texts:
-        if "€" in t or re.search(r"\d", t):
-            p = parse_precio(t)
-            if p is not None: precios.append(p)
-    if not precios: return None, None
-    p_act = min(precios)
-    p_org = max(precios)
-    if p_org == p_act: p_org = round(p_act * 1.20, 2)
-    return p_act, p_org
+    return tit, href, p_act, p_org, img_url
 
 def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
     html = fetch_html(session, url)
     soup = BeautifulSoup(html, "html.parser")
-    productos = []
     
+    # DEBUG: Si no encontramos productos, ver qué página nos devolvieron
     cards = detectar_cards(soup)
+    
     if not cards:
-        print(f"⚠️  No se detectaron tarjetas en {etiqueta}. ¿Cambio de HTML?", flush=True)
+        print(f"⚠️  DEBUG: No se detectaron tarjetas en {etiqueta}.", flush=True)
+        title = soup.title.string.strip() if soup.title else "SIN TITULO"
+        print(f"    Título de la página: {title}")
+        print(f"    Inicio del HTML: {html[:300].replace(chr(10), ' ')}")
+        return []
 
+    productos = []
     for card in cards:
-        tit, href = extraer_titulo_y_url(card)
+        tit, href, p_act, p_org, img = extraer_info_card(card)
+        
         if not tit or not href: continue
         
         t_clean = titulo_limpio(tit)
         specs = extraer_ram_rom(t_clean)
+        
+        # Filtro: debe tener RAM/ROM para ser móvil válido
         if not specs: continue
         
         ram, rom = specs
         nombre = extraer_nombre(t_clean, ram)
         
-        p_act, p_org = extraer_precio(card)
         if p_act is None: continue
-        if p_org is None: p_org = round(p_act * 1.2, 2)
         
         url_sin = limpiar_url_producto(href)
         url_con = build_url_con_afiliado(url_sin, AFF_ELCORTEINGLES)
-        img = extraer_img(card)
         
         productos.append(ProductoECI(
             nombre=nombre, memoria=ram, capacidad=rom, version="Global",
@@ -265,11 +298,7 @@ def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ESCANEANDO EL CORTE INGLÉS (MODO STEALTH) ---", flush=True)
-    if not USAR_CURL_CFFI:
-        print("⚠️  ATENCIÓN: 'curl_cffi' no detectado. Es probable que falle por timeout.", flush=True)
-    
-    print(f"Páginas: {len(URLS_PAGINAS)}", flush=True)
+    print("--- FASE 1: ESCANEANDO EL CORTE INGLÉS (MODO DIAGNÓSTICO) ---", flush=True)
     session = get_session()
     
     total = 0
