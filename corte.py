@@ -1,7 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
 Scraper (DRY RUN) para El Corte Inglés — móviles y smartphones
 
 Objetivo (fase 1):
