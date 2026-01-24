@@ -3,6 +3,7 @@ import re
 import time
 import json
 import random
+import sys
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse, urljoin
@@ -31,7 +32,7 @@ class ProductoECI:
     page_id: str
 
 # ==============================================================================
-# 2. CONFIGURACIÓN Y CONSTANTES
+# 2. CONFIGURACIÓN
 # ==============================================================================
 BASE_URL = "https://www.elcorteingles.es"
 BASE_CAT = "https://www.elcorteingles.es/electronica/moviles-y-smartphones/"
@@ -39,7 +40,7 @@ AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
 ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
 # ==============================================================================
-# 3. HELPERS DE LIMPIEZA Y EXTRACCIÓN
+# 3. HELPERS DE EXTRACCIÓN Y LIMPIEZA
 # ==============================================================================
 RE_GB = re.compile(r"(\d{1,3})\s*GB", re.IGNORECASE)
 RE_RAM_PLUS = re.compile(r"(\d{1,3})\s*GB\s*\+\s*(\d{1,4})\s*GB", re.IGNORECASE)
@@ -66,12 +67,14 @@ def extraer_nombre(titulo: str, ram: str) -> str:
     return titulo
 
 # ==============================================================================
-# 4. PARSER DE HTML (EXTRACCIÓN JSON)
+# 4. PARSER DE CONTENIDO (DATA-JSON)
 # ==============================================================================
 def parse_productos_from_html(html: str, etiqueta: str) -> List[ProductoECI]:
     soup = BeautifulSoup(html, "html.parser")
     productos = []
     seen_ids = set()
+    
+    # ECI inyecta los datos en atributos data-json de los contenedores
     elements = soup.select('[data-json]')
     
     for el in elements:
@@ -94,6 +97,7 @@ def parse_productos_from_html(html: str, etiqueta: str) -> List[ProductoECI]:
             price_info = data.get("price", {})
             p_act = float(price_info.get("f_price", 0))
             p_org = float(price_info.get("o_price", 0))
+            
             if p_act <= 0: continue
             if p_org <= p_act: p_org = round(p_act * 1.15, 2)
             
@@ -111,58 +115,68 @@ def parse_productos_from_html(html: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 # ==============================================================================
-# 5. LÓGICA PRINCIPAL (PLAYWRIGHT)
+# 5. MOTOR DE NAVEGACIÓN (FOX BYPASS)
 # ==============================================================================
 def main():
-    print("--- 🛡️ INICIANDO SCRAPER CORTE INGLÉS (MODO BLINDADO) ---", flush=True)
+    print("--- 🦊 INICIANDO ESTRATEGIA FIREFOX BYPASS ---", flush=True)
     
     with sync_playwright() as p:
-        # Bypass HTTP/2 para evitar ERR_HTTP2_PROTOCOL_ERROR
-        browser = p.chromium.launch(headless=True, args=[
-            "--disable-http2", 
-            "--disable-blink-features=AutomationControlled"
-        ])
+        # Usamos Firefox: suele tener una huella TLS distinta que a veces engaña a Akamai
+        print("🚀 Lanzando navegador Firefox...", flush=True)
+        browser = p.firefox.launch(headless=True)
         
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+            viewport={"width": 1920, "height": 1080},
+            extra_http_headers={
+                "Accept-Language": "es-ES,es;q=0.8,en-US;q=0.5,en;q=0.3",
+                "Referer": "https://www.google.es/"
+            }
         )
         
         page = context.new_page()
-        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        # Generar URLs del 1 al 10
+        # URLs de la 1 a la 5
         urls = [BASE_CAT]
-        for i in range(2, 11):
+        for i in range(2, 6):
             urls.append(f"{BASE_CAT}{i}/")
         
-        total_general = 0
+        total_capturados = 0
         
         for i, url in enumerate(urls, start=1):
-            print(f"\n🚀 Procesando Página {i}: {url}", flush=True)
+            print(f"\n🌍 Intentando acceder a Página {i}: {url}", flush=True)
             try:
-                # Usamos domcontentloaded para saltar el bloqueo de carga de Akamai
-                page.goto(url, timeout=45000, wait_until="domcontentloaded")
-                time.sleep(5) # Espera manual para renderizado mínimo
+                # Usamos domcontentloaded para no esperar a rastreadores/anuncios
+                response = page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                
+                if response and response.status != 200:
+                    print(f"      ⚠️  Error HTTP {response.status}. Akamai bloqueó la petición.", flush=True)
+                    continue
+
+                # Pausa aleatoria "humana"
+                time.sleep(random.uniform(5, 8))
                 
                 html = page.content()
                 
                 if "Access Denied" in html:
-                    print(f"      ⛔ BLOQUEO: Akamai ha rechazado la IP de GitHub.", flush=True)
+                    print("      ⛔ BLOQUEO: La página devolvió 'Access Denied'.", flush=True)
                     continue
                 
                 prods = parse_productos_from_html(html, str(i))
-                print(f"      ✅ Encontrados: {len(prods)} productos", flush=True)
-                total_general += len(prods)
                 
-                for p in prods[:3]: # Log de muestra
-                    print(f"      📱 {p.nombre} - {p.precio_actual}€", flush=True)
+                if len(prods) > 0:
+                    print(f"      ✅ ¡ÉXITO! Encontrados: {len(prods)} productos.", flush=True)
+                    total_capturados += len(prods)
+                    # Ejemplo rápido
+                    print(f"      📱 Muestra: {prods[0].nombre} | {prods[0].precio_actual}€", flush=True)
+                else:
+                    print("      ⚠️  Página cargada pero no se detectaron productos JSON.", flush=True)
                     
             except Exception as e:
-                print(f"      ❌ Error en página {i}: Timeout o bloqueo de red.", flush=True)
+                print(f"      ❌ Error en página {i}: Timeout de red.", flush=True)
         
         browser.close()
-        print(f"\n📋 ESCANEO FINALIZADO. Total productos: {total_general}", flush=True)
+        print(f"\n📋 ESCANEO FINALIZADO. TOTAL PRODUCTOS: {total_capturados}", flush=True)
 
 if __name__ == "__main__":
     main()
