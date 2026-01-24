@@ -1,6 +1,6 @@
 """
 Scraper para El Corte Inglés — móviles y smartphones
-SOLUCIÓN DIAGNÓSTICA: Ampliación de selectores y volcado de HTML para debug.
+SOLUCIÓN ANTI-BOT MANAGER (bm-verify handler)
 
 Requisitos:
     pip install curl_cffi beautifulsoup4 requests
@@ -9,7 +9,6 @@ Requisitos:
 import os
 import re
 import time
-import json
 import random
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -17,17 +16,17 @@ from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 
 from bs4 import BeautifulSoup
 
-# Intentamos importar curl_cffi para evadir bloqueos TLS
+# Intentamos importar curl_cffi
 try:
     from curl_cffi import requests
     USAR_CURL_CFFI = True
 except ImportError:
     import requests
     USAR_CURL_CFFI = False
-    print("⚠️ ADVERTENCIA: 'curl_cffi' no está instalado. Se usará 'requests' estándar.")
+    print("⚠️ ADVERTENCIA: 'curl_cffi' no está instalado. El bypass será menos efectivo.")
 
 # =========================
-# Configuración / Variables
+# Configuración
 # =========================
 
 DEFAULT_URLS = [
@@ -42,20 +41,17 @@ CORTEINGLES_URLS_RAW = os.environ.get("CORTEINGLES_URLS", "").strip()
 START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
 
-DRY_RUN = True
-TIMEOUT = 45
+TIMEOUT = 60 # Aumentado para dar tiempo a la redirección
 
-# Headers para curl_cffi
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
+    "Referer": "https://www.google.es/",
 }
 
 # ===========
-# Modelo dato
+# Modelo
 # ===========
 @dataclass
 class ProductoECI:
@@ -75,10 +71,9 @@ class ProductoECI:
     url_oferta: str
     page_id: str
 
-# =========================
-# Helpers
-# =========================
-
+# ===========
+# Helpers URL
+# ===========
 def mask_url(u: str) -> str:
     if not u: return ""
     try:
@@ -100,9 +95,9 @@ URLS_PAGINAS = build_urls_paginas()
 BASE_URL = "https://www.elcorteingles.es"
 ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
-# =========================
-# Parsing (Regex)
-# =========================
+# ===========
+# Regex Helpers
+# ===========
 RE_GB = re.compile(r"(\d{1,3})\s*GB", re.IGNORECASE)
 RE_RAM_PLUS = re.compile(r"(\d{1,3})\s*GB\s*\+\s*(\d{1,4})\s*GB", re.IGNORECASE)
 RE_12GB_512GB = re.compile(r"(\d{1,3})\s*GB\s*[+xX]\s*(\d{1,4})\s*GB", re.IGNORECASE)
@@ -173,60 +168,94 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# Red / Descarga
+# LÓGICA DE REDIRECCIÓN (BM-VERIFY)
 # =========================
 
 def get_session():
     if USAR_CURL_CFFI:
-        return requests.Session(impersonate="chrome110", headers=HEADERS)
+        # Usamos chrome120 para parecer más actual
+        return requests.Session(impersonate="chrome120", headers=HEADERS)
     else:
         s = requests.Session()
         s.headers.update(HEADERS)
         return s
 
-def fetch_html(session, url: str) -> str:
-    time.sleep(random.uniform(4, 7))
+def fetch_html_smart(session, url: str, depth=0) -> str:
+    """Descarga manejando la 'Sala de Espera' de Akamai (meta refresh)."""
+    if depth > 3:
+        print("❌ Demasiadas redirecciones de verificación. Abortando.")
+        return ""
+
+    # Pausa inicial humana
+    if depth == 0:
+        time.sleep(random.uniform(3, 6))
+    
+    print(f"🌍 Conectando a {mask_url(url)} (Intento {depth+1})...")
     r = session.get(url, timeout=TIMEOUT)
+    
     if r.status_code == 403:
-        raise Exception("Bloqueo 403 (Access Denied).")
+        raise Exception("Bloqueo 403. La IP está en lista negra temporal.")
+    
     r.raise_for_status()
-    return r.text
+    html = r.text
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1. Detectar Meta Refresh (bm-verify)
+    # <meta http-equiv="refresh" content="5; URL='/...?bm-verify=...'">
+    meta_refresh = soup.find("meta", attrs={"http-equiv": lambda x: x and x.lower() == "refresh"})
+    
+    if meta_refresh:
+        content = meta_refresh.get("content", "")
+        # Extraer tiempo y URL
+        # content="5; URL='/...'"
+        parts = content.split("URL=")
+        if len(parts) > 1:
+            wait_time = 5 # Default
+            try:
+                wait_time = int(parts[0].replace(";", "").strip())
+            except: pass
+            
+            next_url_rel = parts[1].strip("'\" ")
+            next_url_abs = urljoin(BASE_URL, next_url_rel)
+            
+            print(f"🛑 DETECTADA SALA DE ESPERA AKAMAI.")
+            print(f"⏳ El servidor pide esperar {wait_time} segundos...")
+            print(f"➡️ Siguiente URL de verificación: {mask_url(next_url_abs)}")
+            
+            # Esperamos lo que pide el servidor + 1 segundo extra de margen
+            time.sleep(wait_time + 1.5)
+            
+            # Recursividad: Llamamos a la nueva URL
+            return fetch_html_smart(session, next_url_abs, depth=depth+1)
+
+    return html
 
 # =========================
-# Lógica Principal
+# Parsing Productos
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
-    # Intentamos múltiples selectores de contenedor
-    # 1. Selector clásico
-    cards = soup.select('div.card[data-synth="LOCATOR_PRODUCT_PREVIEW_LIST"]')
-    if cards: return cards
-    
-    # 2. Selector genérico de cards
-    cards = soup.select("div.card")
-    if cards: return cards
-    
-    # 3. Selector para estructura grid moderna (ul > li)
-    cards = soup.select("ul.products-list li")
-    if cards: return cards
-
-    # 4. Busqueda por clases de producto genéricas
-    cards = soup.select(".product-preview")
+    # Intentamos selectores amplios
+    cards = soup.select('div.card')
+    if not cards:
+        cards = soup.select('li.products_list-item')
+    if not cards:
+        cards = soup.select('.product-preview')
     return cards
 
 def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]:
-    # Título y URL
     tit, href = "", ""
-    for sel in ["a.product_preview-title", "h2 a", "a.js-product-link", ".product-name a"]:
+    # Selectores Título
+    for sel in ["a.product_preview-title", "h2 a", ".product-name a", "a.js-product-link"]:
         a = card.select_one(sel)
         if a:
             tit = a.get("title") or a.get_text(" ", strip=True)
             href = a.get("href") or ""
             break
             
-    # Precios
+    # Selectores Precio
     p_act, p_org = None, None
-    for sel in [".js-preview-pricing", ".pricing", ".product-price"]:
+    for sel in [".js-preview-pricing", ".pricing", ".price", ".product-price"]:
         pricing = card.select_one(sel)
         if pricing:
             texts = [normalizar_espacios(t) for t in pricing.stripped_strings if t]
@@ -242,7 +271,7 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     if p_act and not p_org: p_org = p_act
     if p_act and p_org and p_org == p_act: p_org = round(p_act * 1.2, 2)
 
-    # Imagen
+    # Selectores Imagen
     img_url = ""
     for sel in ["img.js_preview_image", "img[data-variant-image-src]", "img"]:
         img = card.select_one(sel)
@@ -255,17 +284,21 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     return tit, href, p_act, p_org, img_url
 
 def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
-    html = fetch_html(session, url)
-    soup = BeautifulSoup(html, "html.parser")
+    # Usamos la nueva función "Smart"
+    html = fetch_html_smart(session, url)
     
-    # DEBUG: Si no encontramos productos, ver qué página nos devolvieron
+    if not html: return []
+    
+    soup = BeautifulSoup(html, "html.parser")
     cards = detectar_cards(soup)
     
     if not cards:
-        print(f"⚠️  DEBUG: No se detectaron tarjetas en {etiqueta}.", flush=True)
-        title = soup.title.string.strip() if soup.title else "SIN TITULO"
-        print(f"    Título de la página: {title}")
-        print(f"    Inicio del HTML: {html[:300].replace(chr(10), ' ')}")
+        print(f"⚠️  DEBUG: HTML descargado pero sin productos en {etiqueta}.", flush=True)
+        # Check básico para ver si seguimos bloqueados
+        if "bm-verify" in html or "refresh" in html:
+            print("   -> El bypass de Akamai falló.")
+        else:
+            print("   -> HTML desconocido (posible cambio de estructura web).")
         return []
 
     productos = []
@@ -277,8 +310,7 @@ def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
         t_clean = titulo_limpio(tit)
         specs = extraer_ram_rom(t_clean)
         
-        # Filtro: debe tener RAM/ROM para ser móvil válido
-        if not specs: continue
+        if not specs: continue # Solo móviles con RAM/ROM
         
         ram, rom = specs
         nombre = extraer_nombre(t_clean, ram)
@@ -298,16 +330,16 @@ def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ESCANEANDO EL CORTE INGLÉS (MODO DIAGNÓSTICO) ---", flush=True)
+    print("--- FASE 1: ESCANEANDO EL CORTE INGLÉS (MODO BYPASS REFRESH) ---", flush=True)
     session = get_session()
     
     total = 0
     for i, url in enumerate(URLS_PAGINAS, start=1):
-        print(f"Escaneando ({i}/{len(URLS_PAGINAS)}): {mask_url(url)}", flush=True)
+        print(f"\n📂 Procesando listado ({i}/{len(URLS_PAGINAS)})", flush=True)
         try:
             prods = obtener_productos(session, url, str(i))
         except Exception as e:
-            print(f"❌ Error en {mask_url(url)}: {e}", flush=True)
+            print(f"❌ Error crítico en {mask_url(url)}: {e}", flush=True)
             continue
             
         print(f"✅ Encontrados: {len(prods)}", flush=True)
@@ -318,7 +350,7 @@ def main() -> int:
             print(f"Detectado {p.nombre}")
             print(f"1) Nombre: {p.nombre}")
             print(f"2) RAM: {p.memoria} | ROM: {p.capacidad}")
-            print(f"3) Precio: {p.precio_actual}€ (Antes: {p.precio_original}€)")
+            print(f"3) Precio: {p.precio_actual}€")
             print(f"4) URL: {mask_url(p.url_importada_sin_afiliado)}")
             print("-" * 60, flush=True)
             
