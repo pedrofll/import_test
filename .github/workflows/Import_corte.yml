@@ -22,7 +22,8 @@ jobs:
           pip install playwright beautifulsoup4
           playwright install chromium
           playwright install-deps
-
+          playwright install firefox
+          
       - name: 🏢 Ejecutar El Corte Inglés
         env:
           AFF_ELCORTEINGLES: ${{ secrets.AFF_ELCORTEINGLES }}
