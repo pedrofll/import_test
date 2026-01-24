@@ -1,9 +1,7 @@
 import os
-import re
 import json
-import random
 import time
-import urllib.parse
+import random
 from dataclasses import dataclass
 from typing import List
 from curl_cffi import requests
@@ -13,94 +11,73 @@ class ProductoECI:
     nombre: str
     precio: float
     url: str
+    marca: str
 
-def buscar_productos_agresivo(html: str) -> List[ProductoECI]:
-    productos = []
-    
-    # ESTRATEGIA A: Buscar bloques JSON-LD (Lo que Google lee para SEO)
-    # Patrón: <script type="application/ld+json"> ... </script>
-    scripts_ld = re.findall(r'type="application/ld\+json">({.+?})</script>', html, re.DOTALL)
-    
-    for script_text in scripts_ld:
-        try:
-            data = json.loads(script_text)
-            # A veces es un solo objeto o una lista de objetos
-            items_list = data.get("itemListElement", []) if isinstance(data, dict) else []
-            
-            for item in items_list:
-                # ECI suele meter los productos aquí
-                prod_info = item.get("item", {})
-                if prod_info:
-                    name = prod_info.get("name")
-                    # El precio suele estar en "offers"
-                    offers = prod_info.get("offers", {})
-                    price = offers.get("price") or offers.get("lowPrice")
-                    
-                    if name and price:
-                        productos.append(ProductoECI(
-                            nombre=name,
-                            precio=float(price),
-                            url=prod_info.get("url", "")
-                        ))
-        except:
-            continue
-
-    # ESTRATEGIA B: Si falla, buscamos el bloque "PRELOADED_STATE" pero con Regex flexible
-    if not productos:
-        # Buscamos cualquier patrón "name":"..." seguido de "price":...
-        # Esta es la "fuerza bruta"
-        raw_matches = re.findall(r'"name":"([^"]+)"[^}]+?"f_price":([\d\.]+)', html)
-        for name, price in raw_matches:
-            if name not in [p.nombre for p in productos]: # Evitar duplicados
-                productos.append(ProductoECI(nombre=name, precio=float(price), url=""))
-
-    return productos
+# El ID de la categoría "Smartphones" en ECI es fijo
+CATEGORY_ID = "011.12781530031"
 
 def main():
-    print("--- 🎯 MODO FRANCOTIRADOR: EXTRACCIÓN POR SEO-JSON ---", flush=True)
+    print("--- 🎯 EXTRACCIÓN DIRECTA POR API (BYPASS AKAMAI) ---", flush=True)
     
-    session = requests.Session(impersonate="chrome110")
-    base_cat = "https://www.elcorteingles.es/electronica/moviles-y-smartphones/"
+    # Impersonate Chrome 120: Es el camuflaje más avanzado disponible
+    session = requests.Session(impersonate="chrome120")
+    
     total = 0
-
-    urls_reales = [base_cat, f"{base_cat}2/", f"{base_cat}3/"]
-
-    for i, url_real in enumerate(urls_reales, start=1):
-        # Probamos la caché de Google
-        cache_url = f"http://webcache.googleusercontent.com/search?q=cache:{urllib.parse.quote(url_real)}"
+    # Cada página en ECI tiene 24 productos. 
+    # Página 1 (offset 0), Página 2 (offset 24), etc.
+    for page_num in range(1, 4): # Probamos las 3 primeras páginas
+        offset = (page_num - 1) * 24
         
-        print(f"\n📂 Analizando Página {i}...", flush=True)
+        # Esta es la URL de la "sangre" de la web: su API interna de catálogo
+        api_url = f"https://www.elcorteingles.es/api/catalog/v1/product/list?category={CATEGORY_ID}&limit=24&offset={offset}"
         
+        print(f"\n📂 Consultando API - Página {page_num} (Offset {offset})...", flush=True)
+        
+        headers = {
+            "Accept": "application/json",
+            "Accept-Language": "es-ES,es;q=0.9",
+            "Referer": "https://www.elcorteingles.es/electronica/moviles-y-smartphones/",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+
         try:
-            time.sleep(random.uniform(4, 7))
-            # Añadimos cabeceras de "humano"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept-Language": "es-ES,es;q=0.9"
-            }
-            res = session.get(cache_url, headers=headers, timeout=25)
+            # Pausa de seguridad para no levantar sospechas
+            time.sleep(random.uniform(3, 6))
             
-            if res.status_code == 200:
-                prods = buscar_productos_agresivo(res.text)
+            response = session.get(api_url, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                products = data.get("products", [])
                 
-                if prods:
-                    print(f"      ✅ ¡CAPTURA COMPLETADA! {len(prods)} productos encontrados.")
-                    for p in prods[:3]:
-                        print(f"      📱 {p.nombre[:45]}... -> {p.precio}€")
-                    total += len(prods)
-                else:
-                    print("      ⚠️ Los datos siguen ocultos. Akamai/Google están filtrando los scripts.")
-                    # Verificamos si al menos hay HTML real
-                    if len(res.text) > 5000:
-                        print(f"      ℹ️ El HTML pesa {len(res.text)} bytes. Hay contenido, pero no el JSON esperado.")
+                if not products:
+                    print("      ⚠️ La API respondió pero no envió productos.")
+                    continue
+                
+                print(f"      ✅ ¡ÉXITO! Recibidos {len(products)} productos.")
+                
+                for item in products:
+                    name = item.get("name", "Desconocido")
+                    # El precio final está en price -> f_price
+                    price_data = item.get("price", {})
+                    price = price_data.get("f_price") or price_data.get("final") or 0
+                    
+                    url = "https://www.elcorteingles.es" + item.get("url", "")
+                    marca = item.get("brand", "Genérica")
+                    
+                    print(f"      📱 [{marca}] {name[:40]}... | {price}€")
+                    total += 1
             else:
-                print(f"      ❌ Error HTTP {res.status_code}")
-                
+                print(f"      ❌ Bloqueo de API: Error {response.status_code}")
+                # Si nos da 403, Akamai ha detectado la IP de GitHub Actions
+                if response.status_code == 403:
+                    print("      🚨 IP de GitHub bloqueada. Necesitamos un Proxy o ScraperAPI.")
+                    break
+                    
         except Exception as e:
-            print(f"      ❌ Error: {e}")
+            print(f"      ❌ Error en la conexión: {e}")
 
-    print(f"\n📋 RESULTADO FINAL: {total} productos.")
-    return total
+    print(f"\n📋 RESULTADO FINAL: {total} productos capturados.")
 
 if __name__ == "__main__":
     main()
