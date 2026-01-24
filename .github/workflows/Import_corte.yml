@@ -20,10 +20,13 @@ jobs:
       - name: 📦 Instalar dependencias
         run: |
           pip install playwright beautifulsoup4
+          python -m pip install --upgrade pip
+          # Instalamos requests para los proxies y curl_cffi para el camuflaje
+          pip install requests curl_cffi beautifulsoup4
           playwright install chromium
           playwright install-deps
           playwright install firefox
-          
+                    
       - name: 🏢 Ejecutar El Corte Inglés
         env:
           AFF_ELCORTEINGLES: ${{ secrets.AFF_ELCORTEINGLES }}
