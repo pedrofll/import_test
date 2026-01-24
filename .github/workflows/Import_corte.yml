@@ -1,4 +1,4 @@
-name: Ejecutar Scrapers
+name: Import Corte
 
 on:
   workflow_dispatch:        # Permite ejecutar manualmente con el botón "Run workflow"
