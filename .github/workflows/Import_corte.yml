@@ -1,38 +1,37 @@
-name: Import Corte
+name: Scraper Corte Inglés (Navegador Real)
 
 on:
-  workflow_dispatch:        # Botón manual para ejecutar cuando quieras
- # schedule:
- #   - cron: '0 21 * * *'  # Ejecuta auto a las 9, 15 y 21
+  workflow_dispatch:
+  # schedule:
+  # - cron: '0 9,15,21 * * *'
 
 jobs:
-  run-eci:
+  run-eci-browser:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
-      # 1. Bajar código
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      # 2. Python
       - name: 🐍 Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      # 3. Dependencias (Vital: curl_cffi para ECI)
       - name: 📦 Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 curl_cffi
+          # Instalamos Playwright y las librerías de scraping
+          pip install requests beautifulsoup4 playwright
 
-      # 4. Ejecutar SOLO Corte Inglés
+      - name: 🎭 Instalar Navegadores
+        run: |
+          playwright install chromium
+          playwright install-deps
+
       - name: 🏢 Ejecutar El Corte Inglés
         env:
-          # Solo las variables que usa corte.py
           AFF_ELCORTEINGLES: ${{ secrets.AFF_ELCORTEINGLES }}
-          START_URL_CORTEINGLES: ${{ secrets.START_URL_CORTEINGLES }}
-          CORTEINGLES_URLS: ${{ secrets.CORTEINGLES_URLS }}
         run: python corte.py
