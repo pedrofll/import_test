@@ -3,6 +3,7 @@ import re
 import time
 import json
 import random
+import sys # Añadido para forzar salida
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse, urljoin
@@ -90,45 +91,62 @@ def parse_productos_from_html(html: str, etiqueta: str) -> List[ProductoECI]:
 # MAIN CON PLAYWRIGHT
 # =========================
 def main():
-    print("--- FASE 1: ECI (NAVEGADOR REAL CON BYPASS) ---")
+    # El flush=True es VITAL para ver logs en vivo en GitHub Actions
+    print("--- INICIANDO SCRIPT CORTE.PY ---", flush=True)
     
     with sync_playwright() as p:
-        # Bypass de HTTP/2 y camuflaje de automatización
-        browser = p.chromium.launch(headless=True, args=["--disable-http2", "--disable-blink-features=AutomationControlled"])
+        print("🚀 Lanzando navegador Chromium...", flush=True)
+        
+        # Bypass de HTTP/2 y camuflaje
+        browser = p.chromium.launch(
+            headless=True, 
+            args=["--disable-http2", "--disable-blink-features=AutomationControlled"]
+        )
+        
+        print("👤 Creando contexto de usuario...", flush=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 720}
         )
+        
         page = context.new_page()
         
-        # Generación de URLs corregida
         urls = ["https://www.elcorteingles.es/electronica/moviles-y-smartphones/"]
         for i in range(2, 6):
             urls.append(f"https://www.elcorteingles.es/electronica/moviles-y-smartphones/{i}/")
         
         total = 0
         for i, url in enumerate(urls, start=1):
-            print(f"\n📂 Procesando Página {i}: {url}")
+            print(f"\n📂 Intentando conectar a Página {i}...", flush=True)
             try:
-                page.goto(url, timeout=90000, wait_until="load")
-                time.sleep(random.uniform(5, 8)) # Pausa para renderizado JS
+                # Aumentamos timeout a 90s por si Akamai es lento
+                page.goto(url, timeout=90000, wait_until="networkidle")
+                
+                print(f"      ⏳ Esperando renderizado de Página {i}...", flush=True)
+                time.sleep(random.uniform(5, 10)) 
                 
                 html = page.content()
+                
                 if "Access Denied" in html:
-                    print("      ⛔ Error: Akamai ha bloqueado la IP del servidor.")
+                    print("      ⛔ BLOQUEADO: Akamai ha rechazado la IP de GitHub.", flush=True)
+                    continue
+                
+                if "verify you are human" in html.lower():
+                    print("      🧩 CAPTCHA: Se requiere verificación humana.", flush=True)
                     continue
                     
                 prods = parse_productos_from_html(html, str(i))
-                print(f"      ✅ Encontrados: {len(prods)}")
+                print(f"      ✅ Encontrados: {len(prods)} productos", flush=True)
                 total += len(prods)
                 
-                for p in prods[:2]: # Log de ejemplo
-                    print(f"      📱 {p.nombre} | {p.precio_actual}€")
+                for p in prods[:2]:
+                    print(f"      📱 {p.nombre} | {p.precio_actual}€", flush=True)
+                    
             except Exception as e:
-                print(f"      ❌ Error en página {i}: {str(e)[:100]}")
+                print(f"      ❌ Error en página {i}: {str(e)[:100]}", flush=True)
         
         browser.close()
-        print(f"\n📋 TOTAL ESCANEADOS: {total}")
+        print(f"\n📋 PROCESO FINALIZADO. TOTAL: {total}", flush=True)
 
 if __name__ == "__main__":
     main()
