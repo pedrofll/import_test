@@ -5,13 +5,12 @@ import json
 import random
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-from urllib.parse import urlparse, urlunparse, urljoin, urlencode
-
+from urllib.parse import urlparse, urlunparse, urljoin
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 # =========================
-# CONFIGURACIÓN
+# CONFIGURACIÓN Y MODELO
 # =========================
 BASE_URL = "https://www.elcorteingles.es"
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
@@ -60,7 +59,6 @@ def parse_productos_from_html(html: str, etiqueta: str) -> List[ProductoECI]:
         try:
             data = json.loads(el.get('data-json'))
             if "name" not in data or "price" not in data: continue
-            
             pid = data.get("id", str(random.randint(1000, 9999)))
             if pid in seen_ids: continue
             seen_ids.add(pid)
@@ -95,14 +93,15 @@ def main():
     print("--- FASE 1: ECI (NAVEGADOR REAL CON BYPASS) ---")
     
     with sync_playwright() as p:
-        # Lanzamos con bypass de HTTP/2 para evitar ERR_HTTP2_PROTOCOL_ERROR
-        browser = p.chromium.launch(headless=True, args=["--disable-http2"])
+        # Bypass de HTTP/2 y camuflaje de automatización
+        browser = p.chromium.launch(headless=True, args=["--disable-http2", "--disable-blink-features=AutomationControlled"])
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720}
         )
         page = context.new_page()
         
-        # Corregido: Generación de URLs sin sumar int + str
+        # Generación de URLs corregida
         urls = ["https://www.elcorteingles.es/electronica/moviles-y-smartphones/"]
         for i in range(2, 6):
             urls.append(f"https://www.elcorteingles.es/electronica/moviles-y-smartphones/{i}/")
@@ -111,8 +110,8 @@ def main():
         for i, url in enumerate(urls, start=1):
             print(f"\n📂 Procesando Página {i}: {url}")
             try:
-                page.goto(url, timeout=60000, wait_until="load")
-                time.sleep(random.uniform(3, 5)) # Espera para que el JS renderice
+                page.goto(url, timeout=90000, wait_until="load")
+                time.sleep(random.uniform(5, 8)) # Pausa para renderizado JS
                 
                 html = page.content()
                 if "Access Denied" in html:
@@ -123,10 +122,10 @@ def main():
                 print(f"      ✅ Encontrados: {len(prods)}")
                 total += len(prods)
                 
-                for p in prods[:3]: # Log de ejemplo
+                for p in prods[:2]: # Log de ejemplo
                     print(f"      📱 {p.nombre} | {p.precio_actual}€")
             except Exception as e:
-                print(f"      ❌ Error en página {i}: {str(e)[:50]}")
+                print(f"      ❌ Error en página {i}: {str(e)[:100]}")
         
         browser.close()
         print(f"\n📋 TOTAL ESCANEADOS: {total}")
