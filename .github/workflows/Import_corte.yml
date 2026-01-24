@@ -2,8 +2,8 @@ name: Scraper Corte Inglés (Navegador Real)
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 9,15,21 * * *'
+#  schedule:
+#    - cron: '0 9,15,21 * * *'
 
 jobs:
   run-eci-browser:
