@@ -1,9 +1,13 @@
-import os, re, time, json, random
+import os, re, time, json, random, requests
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-from urllib.parse import urlparse, urljoin
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+
+# Intentamos usar curl_cffi para saltar el TLS Fingerprinting de Akamai
+try:
+    from curl_cffi import requests as crequests
+    SESSION = crequests.Session(impersonate="chrome110")
+except ImportError:
+    SESSION = requests.Session()
 
 @dataclass
 class ProductoECI:
@@ -13,115 +17,82 @@ class ProductoECI:
     url_importada_sin_afiliado: str; url_sin_acortar_con_mi_afiliado: str
     url_oferta: str; page_id: str
 
-BASE_URL = "https://www.elcorteingles.es"
-BASE_CAT = "https://www.elcorteingles.es/electronica/moviles-y-smartphones/"
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
+
+def obtener_proxies_frescos():
+    print("🌐 Buscando proxies limpios para saltar el bloqueo...")
+    try:
+        # Bajamos una lista de proxies HTTP/S
+        r = requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all", timeout=10)
+        if r.status_code == 200:
+            proxies = r.text.strip().split("\r\n")
+            random.shuffle(proxies)
+            return proxies
+    except: return []
+    return []
 
 def extraer_specs(titulo: str) -> Tuple[str, str]:
     ram = re.search(r"(\d+)\s*GB\s*\+?\s*RAM", titulo, re.I) or re.search(r"RAM\s*(\d+)\s*GB", titulo, re.I)
     rom = re.search(r"(\d+)\s*GB(?!\s*RAM)", titulo, re.I)
     return (f"{ram.group(1)}GB" if ram else "N/A"), (f"{rom.group(1)}GB" if rom else "N/A")
 
-def parse_productos_agresivo(html: str, etiqueta: str) -> List[ProductoECI]:
-    productos = []
-    # Intentamos encontrar el gran bloque JSON de la web
-    json_match = re.search(r"window\.__PRELOADED_STATE__\s*=\s*({.*?});", html, re.DOTALL)
-    
-    if not json_match:
-        # Intento 2: Buscar en cualquier script que contenga la palabra 'products'
-        json_match = re.search(r"\"products\":\s*(\[.*?\]),", html, re.DOTALL)
-    
-    if json_match:
+def fetch_api(url, proxies):
+    # Intentamos con varios proxies hasta que uno no dé Timeout
+    for p in proxies[:15]: # Probamos los 15 primeros
         try:
-            raw_data = json.loads(json_match.group(1))
-            # Navegamos por el JSON (la estructura de ECI suele ser profunda)
-            items = []
-            if "products" in raw_data: items = raw_data["products"]
-            elif isinstance(raw_data, list): items = raw_data
-            
-            for item in items:
-                name = item.get("name", "")
-                ram, rom = extraer_specs(name)
-                price = item.get("price", {})
-                p_act = float(price.get("f_price") or price.get("final") or 0)
-                p_org = float(price.get("o_price") or price.get("original") or p_act)
-                
-                url_raw = urljoin(BASE_URL, item.get("url", ""))
-                url_con = f"{url_raw}?aff_id={AFF_ELCORTEINGLES}" if AFF_ELCORTEINGLES else url_raw
-                
-                productos.append(ProductoECI(
-                    nombre=name, memoria=ram, capacidad=rom, version="Global",
-                    precio_actual=p_act, precio_original=p_org, enviado_desde="España",
-                    origen_pagina=etiqueta, img=item.get("image", ""), url_imp=url_con,
-                    url_exp=url_con, url_importada_sin_afiliado=url_raw,
-                    url_sin_acortar_con_mi_afiliado=url_con, url_oferta=url_con, page_id=BASE_CAT
-                ))
-        except: pass
-    
-    # Si el JSON falla, usamos el plan B: Selectores CSS clásicos
-    if not productos:
-        soup = BeautifulSoup(html, "html.parser")
-        for card in soup.select(".product_tile, .product-preview, [data-json]"):
-            name_el = card.select_one(".product_tile-title, .title")
-            if not name_el: continue
-            name = name_el.get_text(strip=True)
-            ram, rom = extraer_specs(name)
-            productos.append(ProductoECI(
-                nombre=name, memoria=ram, capacidad=rom, version="Global",
-                precio_actual=0.0, precio_original=0.0, enviado_desde="España",
-                origen_pagina=etiqueta, img="", url_imp="", url_exp="",
-                url_importada_sin_afiliado="", url_sin_acortar_con_mi_afiliado="",
-                url_oferta="", page_id=BASE_CAT
-            ))
-            
-    return productos
+            print(f"   🔄 Probando con Proxy: {p}...", end="\r")
+            proxy_dict = {"http": f"http://{p}", "https": f"http://{p}"}
+            # Cabeceras que usa la web real
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Referer": "https://www.elcorteingles.es/electronica/moviles-y-smartphones/"
+            }
+            res = SESSION.get(url, headers=headers, proxies=proxy_dict, timeout=10)
+            if res.status_code == 200:
+                return res.text
+        except: continue
+    return None
 
 def main():
-    print("--- 🦊 MODO INFILTRACIÓN: FIREFOX + JSON DEEP SEARCH ---", flush=True)
-    with sync_playwright() as p:
-        browser = p.firefox.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
-            viewport={"width": 1280, "height": 800}
-        )
-        page = context.new_page()
-        
-        urls = [BASE_CAT] + [f"{BASE_CAT}{i}/" for i in range(2, 6)]
-        total = 0
+    print("--- 🚀 MODO API DIRECTA + PROXY ROTATOR ---", flush=True)
+    proxies = obtener_proxies_frescos()
+    if not proxies:
+        print("❌ No se pudieron obtener proxies. Abortando.")
+        return
 
-        for i, url in enumerate(urls, start=1):
-            print(f"\n🌍 Página {i}: {url}", flush=True)
-            try:
-                # Bypass: Fingimos venir de Google para cada página
-                page.set_extra_http_headers({"Referer": "https://www.google.es/search?q=el+corte+ingles+moviles"})
-                response = page.goto(url, timeout=60000, wait_until="domcontentloaded")
-                
-                # Simular humano: Scroll y espera
-                time.sleep(random.uniform(3, 6))
-                page.mouse.wheel(0, 1500)
-                time.sleep(2)
-                
-                html = page.content()
-                if "Access Denied" in html:
-                    print("      ⛔ Akamai nos ha detectado. Abortando misión.", flush=True)
-                    break
-                
-                prods = parse_productos_agresivo(html, str(i))
-                if prods:
-                    print(f"      ✅ ¡ÉXITO! Encontrados {len(prods)} productos.", flush=True)
-                    total += len(prods)
-                    print(f"      📱 Ejemplo: {prods[0].nombre[:40]}... | {prods[0].precio_actual}€", flush=True)
-                else:
-                    print("      ⚠️ No se detectaron productos. Akamai está sirviendo una página vacía.", flush=True)
-                
-                # Pausa larga entre páginas para enfriar la IP
-                time.sleep(random.uniform(10, 20))
-                
-            except Exception:
-                print(f"      ❌ Timeout en Página {i}. La IP de GitHub está bajo fuego.", flush=True)
+    total = 0
+    # La API de ECI usa un sistema de 'limit' y 'offset'
+    for i in range(0, 5): # Primeras 5 páginas (24 productos por página)
+        offset = i * 24
+        api_url = f"https://www.elcorteingles.es/api/catalog/v1/product/list?category=011.12781530031&limit=24&offset={offset}"
         
-        browser.close()
-        print(f"\n📋 ESCANEO FINALIZADO. Total: {total}", flush=True)
+        print(f"\n📂 Petición API (Productos {offset} al {offset+24})...", flush=True)
+        raw_json = fetch_api(api_url, proxies)
+        
+        if raw_json:
+            try:
+                data = json.loads(raw_json)
+                products = data.get("products", [])
+                print(f"      ✅ ¡ÉXITO! Recibidos {len(products)} productos.", flush=True)
+                
+                for item in products:
+                    name = item.get("name", "")
+                    ram, rom = extraer_specs(name)
+                    price = item.get("price", {})
+                    p_act = float(price.get("f_price") or 0)
+                    
+                    print(f"      📱 {name[:35]}... | {p_act}€", flush=True)
+                    total += 1
+                
+                # Pausa para no quemar el proxy
+                time.sleep(2)
+            except:
+                print("      ⚠️ Error al procesar el JSON de la API.", flush=True)
+        else:
+            print("      ❌ Akamai bloqueó todos los proxies probados para esta página.", flush=True)
+
+    print(f"\n📋 ESCANEO FINALIZADO. Total: {total}", flush=True)
 
 if __name__ == "__main__":
     main()
