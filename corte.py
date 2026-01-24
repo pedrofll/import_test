@@ -1,7 +1,7 @@
 """
 Scraper para El Corte Inglés — Móviles
-ESTRATEGIA: Rotación Masiva de Proxies (Fuente: Monosans/TheSpeedX).
-Supera el bloqueo 403 de GitHub Actions usando fuerza bruta de IPs.
+ESTRATEGIA FINAL: Proxies SSL/HTTPS estrictos + CORS Gateways.
+Corrige el error de intentar conectar a ECI (HTTPS) con proxies HTTP planos.
 """
 
 import os
@@ -14,14 +14,14 @@ from typing import List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 from bs4 import BeautifulSoup
 
-# Intentamos importar curl_cffi para mejor huella TLS
+# curl_cffi es obligatorio para la huella TLS
 try:
     from curl_cffi import requests
     USAR_CURL_CFFI = True
 except ImportError:
     import requests
     USAR_CURL_CFFI = False
-    print("⚠️ ADVERTENCIA: 'curl_cffi' no instalado. Usando requests estándar.")
+    print("⚠️ ADVERTENCIA: 'curl_cffi' no instalado. ECI nos detectará rápido.")
 
 # =========================
 # CONFIGURACIÓN
@@ -39,79 +39,68 @@ CORTEINGLES_URLS_RAW = os.environ.get("CORTEINGLES_URLS", "").strip()
 START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
 
-# Timeout alto porque los proxies gratuitos son lentos
-TIMEOUT = 25 
-
+TIMEOUT = 25
 BASE_URL = "https://www.elcorteingles.es"
 ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
-
-# Headers rotatorios básicos
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-]
 
 HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 # =========================
-# GESTOR DE PROXIES (MEJORADO)
+# GESTOR DE CONEXIÓN HÍBRIDO (PROXIES + GATEWAYS)
 # =========================
-class ProxyManager:
+class NetworkManager:
     def __init__(self):
         self.proxies = []
+        self.gateways = [
+            "https://api.allorigins.win/raw?url={}",
+            "https://api.codetabs.com/v1/proxy?quest={}",
+            # "https://corsproxy.io/?{}" # A veces bloqueado, pero útil
+        ]
         self.blacklist = set()
-        self.cargar_proxies()
+        self.cargar_proxies_https()
 
-    def cargar_proxies(self):
-        print("🌍 Descargando listas de proxies de alta calidad...")
-        # Fuentes de proxies más fiables (actualizadas frecuentemente)
+    def cargar_proxies_https(self):
+        print("🌍 Descargando lista de proxies HTTPS/SSL (Estrictos)...")
+        # NOTA: Bajamos listas explícitas de HTTPS, no HTTP genérico
         urls = [
-            "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-            "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt"
+            "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
+            "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/https.txt",
+            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/https.txt",
+            "https://api.proxyscrape.com/v2/?request=getproxies&protocol=https&timeout=4000&country=all&ssl=yes&anonymity=all"
         ]
         
         found = set()
         for u in urls:
             try:
-                print(f"   ⬇️  Bajando de: {u} ...")
+                print(f"   ⬇️  Bajando: {u} ...")
                 r = std_requests.get(u, timeout=10)
                 if r.status_code == 200:
                     lines = r.text.strip().split('\n')
                     for line in lines:
                         p = line.strip()
-                        # Validación básica de formato IP:PUERTO
-                        if p and ":" in p and "." in p:
+                        if p and ":" in p:
                             found.add(p)
             except: pass
         
         self.proxies = list(found)
         random.shuffle(self.proxies)
-        print(f"✅ Total proxies cargados: {len(self.proxies)}")
+        print(f"✅ Cargados {len(self.proxies)} proxies HTTPS válidos.")
 
     def get_proxy(self):
-        # Filtra los que no están en blacklist
         validos = [p for p in self.proxies if p not in self.blacklist]
-        
-        if len(validos) < 10:
-            print("⚠️ Quedan pocos proxies. Reciclando lista...")
-            self.blacklist.clear()
-            validos = self.proxies
-            random.shuffle(validos)
-        
-        return random.choice(validos) if validos else None
+        if not validos: return None
+        return random.choice(validos[:50]) # Rotar entre los 50 mejores candidatos
 
     def report_fail(self, proxy):
         self.blacklist.add(proxy)
 
-proxy_manager = ProxyManager()
+network = NetworkManager()
 
 # =========================
 # MODELO
@@ -217,63 +206,62 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# LÓGICA DE CONEXIÓN CON REINTENTOS AGRESIVOS
+# LÓGICA DE DESCARGA HÍBRIDA
 # =========================
 
-def fetch_html_robust(url: str, max_retries=15) -> str:
-    """Intenta descargar la URL rotando proxies hasta que uno funcione."""
+def fetch_html_hybrid(url: str, max_retries=12) -> str:
+    """Intenta descargar usando Proxies SSL, y si falla, usa Gateways CORS."""
     
-    # Randomizamos user agent para cada intento
-    ua = random.choice(USER_AGENTS)
-    
-    if USAR_CURL_CFFI:
-        # Alternamos entre versiones de Chrome para parecer diferentes usuarios
-        impersonations = ["chrome110", "chrome120", "safari15_5"]
-        imp = random.choice(impersonations)
-        session = requests.Session(impersonate=imp)
-        session.headers.update(HEADERS)
-    else:
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        session.headers["User-Agent"] = ua
+    session = requests.Session(impersonate="chrome120", headers=HEADERS) if USAR_CURL_CFFI else requests.Session()
+    if not USAR_CURL_CFFI: session.headers.update(HEADERS)
 
+    # 1. INTENTO CON PROXIES HTTPS
     for i in range(max_retries):
-        proxy = proxy_manager.get_proxy()
-        if not proxy: return ""
+        proxy = network.get_proxy()
+        if not proxy: break # Se acabaron
 
+        # Vital: Esquema 'http' para conectar al proxy, pero el proxy debe soportar CONNECT
+        # Para librerías modernas, suele ser 'http://' incluso si es proxy https, 
+        # pero curl_cffi maneja bien el túnel.
         proxy_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
         
-        print(f"   🔄 Intento {i+1}/{max_retries} | Proxy: {proxy} ...")
+        print(f"   🔄 Proxy SSL Intento {i+1}/{max_retries} | {proxy} ...")
         
         try:
-            # Timeout estricto para no perder tiempo con proxies muertos
-            r = session.get(url, proxies=proxy_dict, timeout=15)
-            
-            # Chequeos de bloqueo ECI
-            if r.status_code in [403, 401] or "Access Denied" in r.text or "bm-verify" in r.text:
-                print(f"      ⛔ Bloqueado/Captcha ({r.status_code}).")
-                proxy_manager.report_fail(proxy)
-                continue
+            r = session.get(url, proxies=proxy_dict, timeout=12)
             
             if r.status_code == 200:
-                # Comprobación de contenido válido
-                if len(r.content) < 1000:
-                    print("      ⚠️  Respuesta demasiado corta (posible error).")
-                    proxy_manager.report_fail(proxy)
-                    continue
-
-                if "moviles" in r.text.lower() or "smartphones" in r.text.lower() or "card" in r.text:
+                if "moviles" in r.text.lower() or "card" in r.text:
                     return r.text
                 else:
-                    print("      ⚠️  HTML basura (proxy transparente).")
-                    proxy_manager.report_fail(proxy)
-            
+                    print("      ⚠️  Proxy devolvió basura.")
+                    network.report_fail(proxy)
+            else:
+                print(f"      ⛔ Bloqueo/Error {r.status_code}")
+                network.report_fail(proxy)
+
         except Exception:
-            # Error de conexión (timeout, reset, etc) - Muy común en proxies free
-            proxy_manager.report_fail(proxy)
+            # print("      ❌ Error conexión") 
+            network.report_fail(proxy)
             pass
-            
-    print("❌ IMPOSIBLE CONECTAR: Se agotaron los reintentos.")
+
+    print("⚠️ Fallaron los proxies SSL. Activando Gateways CORS...")
+
+    # 2. INTENTO CON GATEWAYS (FALLBACK)
+    for gateway_fmt in network.gateways:
+        target_url = gateway_fmt.format(url)
+        print(f"   🌐 Probando Gateway: {target_url[:50]}...")
+        try:
+            # No usamos proxy aquí, vamos directo al gateway con nuestra IP (GitHub)
+            # El gateway hace de proxy
+            r = std_requests.get(target_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            if r.status_code == 200:
+                 if "moviles" in r.text.lower() or "card" in r.text:
+                    print("      ✅ Gateway funcionó!")
+                    return r.text
+        except Exception as e:
+            print(f"      ❌ Falló Gateway: {e}")
+
     return ""
 
 # =========================
@@ -322,14 +310,14 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     return tit, href, p_act, p_org, img_url
 
 def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
-    html = fetch_html_robust(url)
+    html = fetch_html_hybrid(url)
     if not html: return []
     
     soup = BeautifulSoup(html, "html.parser")
     cards = detectar_cards(soup)
     
     if not cards:
-        print(f"⚠️  HTML descargado pero sin productos en {etiqueta}. ¿Estructura cambió?")
+        print(f"⚠️  HTML obtenido pero sin productos en {etiqueta}. El DOM puede haber cambiado.")
         return []
 
     productos = []
@@ -358,7 +346,7 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ECI CON ROTACIÓN DE PROXIES (LISTAS MASSIVAS) ---", flush=True)
+    print("--- FASE 1: ECI (MODO SSL + GATEWAYS) ---", flush=True)
     
     total = 0
     for i, url in enumerate(URLS_PAGINAS, start=1):
