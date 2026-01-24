@@ -4,7 +4,7 @@ import json
 import random
 import time
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 
@@ -19,18 +19,19 @@ class ProductoECI:
 # =========================
 def extraer_datos_eci(html: str) -> List[ProductoECI]:
     productos = []
-    # Buscamos el JSON de productos que ECI inyecta en la página
-    # Suele estar en una variable llamada 'window.__PRELOADED_STATE__' o en data-json
-    
-    # Intento 1: Atributos data-json (Muy común en sus listados)
     soup = BeautifulSoup(html, "html.parser")
+    
+    # Buscamos elementos con data-json, que es donde ECI suele esconder los datos
     items = soup.select('[data-json]')
     
     for item in items:
         try:
             js = json.loads(item.get('data-json'))
             if 'name' in js and 'price' in js:
-                p_actual = js['price'].get('f_price') or js['price'].get('final') or 0
+                # El precio puede venir en f_price o final
+                price_data = js['price']
+                p_actual = price_data.get('f_price') or price_data.get('final') or 0
+                
                 productos.append(ProductoECI(
                     nombre=js['name'],
                     precio=float(p_actual),
@@ -39,31 +40,25 @@ def extraer_datos_eci(html: str) -> List[ProductoECI]:
         except:
             continue
 
-    # Intento 2: Búsqueda por Regex si el DOM está vacío
-    if not productos:
-        matches = re.findall(r'\{"id":"[^"]+","name":"([^"]+)","price":\{"f_price":([\d\.]+)', html)
-        for name, price in matches:
-            productos.append(ProductoECI(nombre=name, precio=float(price), url=""))
-
     return productos
 
 # =========================
 # NAVEGACIÓN Y BYPASS
 # =========================
 def main():
-    print("--- 🛠️ CORRIGIENDO PROTOCOLO (FORZANDO HTTP/1.1) ---", flush=True)
+    print("--- 🛡️ FORZANDO HTTP/1.1 (SINTAXIS CORREGIDA) ---", flush=True)
     
-    # IMPORTANTE: Forzamos la versión de HTTP para evitar el Error 92
+    # En curl_cffi, http_version=1 activa HTTP/1.1
     session = requests.Session(
         impersonate="chrome110",
-        http_version=requests.HttpVersion.v1_1
+        http_version=1 
     )
     
     base_cat = "https://www.elcorteingles.es/electronica/moviles-y-smartphones/"
     total = 0
 
-    # URLs numeradas (1 a 5 para probar)
-    urls = [base_cat] + [f"{base_cat}{i}/" for i in range(2, 6)]
+    # Probamos las 3 primeras URLs (sin scroll, carga directa)
+    urls = [base_cat, f"{base_cat}2/", f"{base_cat}3/"]
 
     for i, url in enumerate(urls, start=1):
         print(f"\n📂 Cargando Página {i}: {url}", flush=True)
@@ -71,39 +66,40 @@ def main():
         headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "accept-language": "es-ES,es;q=0.9",
-            "cache-control": "no-cache",
-            "pragma": "no-cache",
-            "referer": "https://www.google.com/"
+            "referer": "https://www.google.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
         try:
-            # Pausa humana aleatoria
-            time.sleep(random.uniform(4, 8))
+            # Pausa de seguridad
+            time.sleep(random.uniform(3, 6))
             
             res = session.get(url, headers=headers, timeout=30)
             
             if res.status_code == 200:
-                html_content = res.text
-                if "Access Denied" in html_content:
-                    print("      ⛔ Akamai detectó el bot (Access Denied).")
+                if "Access Denied" in res.text:
+                    print("      ⛔ Akamai ha bloqueado la IP (Access Denied).")
                     continue
                 
-                prods = extraer_datos_eci(html_content)
+                prods = extraer_datos_eci(res.text)
                 
                 if prods:
-                    print(f"      ✅ Éxito: {len(prods)} productos encontrados.")
-                    for p in prods[:2]:
+                    print(f"      ✅ Encontrados: {len(prods)} productos.")
+                    for p in prods[:2]: # Muestra rápida
                         print(f"      📱 {p.nombre[:40]}... | {p.precio}€")
                     total += len(prods)
                 else:
-                    print("      ⚠️ Página cargada pero sin datos. Posible cambio de estructura.")
+                    print("      ⚠️ No se detectaron productos en el HTML.")
+                    # Guardamos una muestra para debug si falla
+                    if len(res.text) > 200:
+                        print(f"      📄 Título página: {res.text.split('<title>')[1].split('</title>')[0]}")
             else:
                 print(f"      ❌ Error HTTP {res.status_code}")
                 
         except Exception as e:
             print(f"      ❌ Error de conexión: {e}")
 
-    print(f"\n📋 ESCANEO FINALIZADO. Total: {total} productos.")
+    print(f"\n📋 PROCESO FINALIZADO. Total acumulado: {total}")
 
 if __name__ == "__main__":
     main()
