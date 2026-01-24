@@ -1,27 +1,25 @@
 """
 Scraper para El Corte Inglés — Móviles
-ESTRATEGIA FINAL: Proxies SSL/HTTPS estrictos + CORS Gateways.
-Corrige el error de intentar conectar a ECI (HTTPS) con proxies HTTP planos.
+ESTRATEGIA: Bing Translate Proxy + Gateways + Debugging.
+Intenta usar la infraestructura de Microsoft para saltar el bloqueo.
 """
 
 import os
 import re
 import time
 import random
-import requests as std_requests
+import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 from bs4 import BeautifulSoup
 
-# curl_cffi es obligatorio para la huella TLS
 try:
     from curl_cffi import requests
     USAR_CURL_CFFI = True
 except ImportError:
     import requests
     USAR_CURL_CFFI = False
-    print("⚠️ ADVERTENCIA: 'curl_cffi' no instalado. ECI nos detectará rápido.")
 
 # =========================
 # CONFIGURACIÓN
@@ -39,68 +37,15 @@ CORTEINGLES_URLS_RAW = os.environ.get("CORTEINGLES_URLS", "").strip()
 START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
 
-TIMEOUT = 25
+TIMEOUT = 30
 BASE_URL = "https://www.elcorteingles.es"
 ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
 HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Upgrade-Insecure-Requests": "1",
 }
-
-# =========================
-# GESTOR DE CONEXIÓN HÍBRIDO (PROXIES + GATEWAYS)
-# =========================
-class NetworkManager:
-    def __init__(self):
-        self.proxies = []
-        self.gateways = [
-            "https://api.allorigins.win/raw?url={}",
-            "https://api.codetabs.com/v1/proxy?quest={}",
-            # "https://corsproxy.io/?{}" # A veces bloqueado, pero útil
-        ]
-        self.blacklist = set()
-        self.cargar_proxies_https()
-
-    def cargar_proxies_https(self):
-        print("🌍 Descargando lista de proxies HTTPS/SSL (Estrictos)...")
-        # NOTA: Bajamos listas explícitas de HTTPS, no HTTP genérico
-        urls = [
-            "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
-            "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/https.txt",
-            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/https.txt",
-            "https://api.proxyscrape.com/v2/?request=getproxies&protocol=https&timeout=4000&country=all&ssl=yes&anonymity=all"
-        ]
-        
-        found = set()
-        for u in urls:
-            try:
-                print(f"   ⬇️  Bajando: {u} ...")
-                r = std_requests.get(u, timeout=10)
-                if r.status_code == 200:
-                    lines = r.text.strip().split('\n')
-                    for line in lines:
-                        p = line.strip()
-                        if p and ":" in p:
-                            found.add(p)
-            except: pass
-        
-        self.proxies = list(found)
-        random.shuffle(self.proxies)
-        print(f"✅ Cargados {len(self.proxies)} proxies HTTPS válidos.")
-
-    def get_proxy(self):
-        validos = [p for p in self.proxies if p not in self.blacklist]
-        if not validos: return None
-        return random.choice(validos[:50]) # Rotar entre los 50 mejores candidatos
-
-    def report_fail(self, proxy):
-        self.blacklist.add(proxy)
-
-network = NetworkManager()
 
 # =========================
 # MODELO
@@ -144,6 +89,7 @@ def build_urls_paginas() -> List[str]:
 
 URLS_PAGINAS = build_urls_paginas()
 
+# Regex
 RE_GB = re.compile(r"(\d{1,3})\s*GB", re.IGNORECASE)
 RE_RAM_PLUS = re.compile(r"(\d{1,3})\s*GB\s*\+\s*(\d{1,4})\s*GB", re.IGNORECASE)
 RE_12GB_512GB = re.compile(r"(\d{1,3})\s*GB\s*[+xX]\s*(\d{1,4})\s*GB", re.IGNORECASE)
@@ -185,6 +131,11 @@ def parse_precio(texto: str) -> Optional[float]:
 
 def normalizar_url_imagen_600(img_url: str) -> str:
     if not img_url: return ""
+    # Si viene de proxy, a veces trae la url del proxy delante
+    if "translatetheweb" in img_url or "codetabs" in img_url:
+        # Intentar buscar la url real dentro
+        pass 
+    
     if img_url.startswith("//"): img_url = "https:" + img_url
     try:
         p = urlparse(img_url)
@@ -197,7 +148,22 @@ def normalizar_url_imagen_600(img_url: str) -> str:
 
 def limpiar_url_producto(url_rel_o_abs: str) -> str:
     if not url_rel_o_abs: return ""
-    return urlunparse(urlparse(urljoin(BASE_URL, url_rel_o_abs))._replace(query="", fragment=""))
+    u = url_rel_o_abs
+    # Limpiar prefijos de gateways
+    if "api.codetabs.com" in u:
+        # Extraer lo que hay despues de quest=
+        parts = u.split("quest=")
+        if len(parts) > 1: u = parts[1]
+    
+    # Limpiar prefijos de bing
+    if "translatetheweb" in u:
+        # Normalmente Bing mantiene los links relativos, pero si no:
+        pass
+
+    if u.startswith("/"):
+        u = urljoin(BASE_URL, u)
+        
+    return urlunparse(urlparse(u)._replace(query="", fragment=""))
 
 def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     if not url_sin or not aff: return url_sin
@@ -206,61 +172,46 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# LÓGICA DE DESCARGA HÍBRIDA
+# LÓGICA DE CONEXIÓN (BING + GATEWAYS)
 # =========================
 
-def fetch_html_hybrid(url: str, max_retries=12) -> str:
-    """Intenta descargar usando Proxies SSL, y si falla, usa Gateways CORS."""
+def fetch_html_hybrid(url: str) -> str:
+    session = requests.Session(impersonate="chrome120") if USAR_CURL_CFFI else requests.Session()
+    session.headers.update(HEADERS)
+
+    # 1. INTENTO: BING TRANSLATE (Microsoft Proxy)
+    # URL Format: https://www.translatetheweb.com/?from=es&to=es&a=[URL_ENCODED]
+    bing_url = f"https://www.translatetheweb.com/?from=es&to=es&a={urllib.parse.quote(url)}"
+    print(f"   🛡️  Probando vía Bing Translate...")
     
-    session = requests.Session(impersonate="chrome120", headers=HEADERS) if USAR_CURL_CFFI else requests.Session()
-    if not USAR_CURL_CFFI: session.headers.update(HEADERS)
+    try:
+        r = session.get(bing_url, timeout=25)
+        if r.status_code == 200:
+            if "moviles" in r.text.lower() or "smartphones" in r.text.lower() or "card" in r.text:
+                print("      ✅ Bing funcionó!")
+                return r.text
+            else:
+                print("      ⚠️  Bing devolvió HTML sin productos.")
+    except Exception as e:
+        print(f"      ❌ Falló Bing: {e}")
 
-    # 1. INTENTO CON PROXIES HTTPS
-    for i in range(max_retries):
-        proxy = network.get_proxy()
-        if not proxy: break # Se acabaron
-
-        # Vital: Esquema 'http' para conectar al proxy, pero el proxy debe soportar CONNECT
-        # Para librerías modernas, suele ser 'http://' incluso si es proxy https, 
-        # pero curl_cffi maneja bien el túnel.
-        proxy_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
-        
-        print(f"   🔄 Proxy SSL Intento {i+1}/{max_retries} | {proxy} ...")
-        
+    # 2. INTENTO: GATEWAYS CORS (Respaldo)
+    gateways = [
+        "https://api.codetabs.com/v1/proxy?quest={}",
+        "https://corsproxy.io/?{}",
+        "https://api.allorigins.win/raw?url={}"
+    ]
+    
+    print("   🌐 Probando Gateways CORS...")
+    for gw in gateways:
+        target = gw.format(url)
         try:
-            r = session.get(url, proxies=proxy_dict, timeout=12)
-            
+            r = requests.get(target, timeout=20) # Usamos requests normal o curl_cffi sin impersonate aqui
             if r.status_code == 200:
                 if "moviles" in r.text.lower() or "card" in r.text:
+                    print(f"      ✅ Gateway exitoso: {gw.split('/')[2]}")
                     return r.text
-                else:
-                    print("      ⚠️  Proxy devolvió basura.")
-                    network.report_fail(proxy)
-            else:
-                print(f"      ⛔ Bloqueo/Error {r.status_code}")
-                network.report_fail(proxy)
-
-        except Exception:
-            # print("      ❌ Error conexión") 
-            network.report_fail(proxy)
-            pass
-
-    print("⚠️ Fallaron los proxies SSL. Activando Gateways CORS...")
-
-    # 2. INTENTO CON GATEWAYS (FALLBACK)
-    for gateway_fmt in network.gateways:
-        target_url = gateway_fmt.format(url)
-        print(f"   🌐 Probando Gateway: {target_url[:50]}...")
-        try:
-            # No usamos proxy aquí, vamos directo al gateway con nuestra IP (GitHub)
-            # El gateway hace de proxy
-            r = std_requests.get(target_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-            if r.status_code == 200:
-                 if "moviles" in r.text.lower() or "card" in r.text:
-                    print("      ✅ Gateway funcionó!")
-                    return r.text
-        except Exception as e:
-            print(f"      ❌ Falló Gateway: {e}")
+        except: pass
 
     return ""
 
@@ -269,20 +220,27 @@ def fetch_html_hybrid(url: str, max_retries=12) -> str:
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
-    cards = soup.select('div.card') or soup.select('li.products_list-item') or soup.select('.product-preview') or soup.select('.grid-item')
+    # Selectores ampliados para cuando la estructura cambia o es version movil
+    cards = soup.select('div.card') 
+    if not cards: cards = soup.select('li.products_list-item')
+    if not cards: cards = soup.select('.product-preview')
+    if not cards: cards = soup.select('.grid-item')
+    if not cards: cards = soup.select('.product_tile')
     return cards
 
 def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]:
     tit, href = "", ""
-    for sel in ["a.product_preview-title", "h2 a", ".product-name a", "a.js-product-link"]:
+    # Títulos
+    for sel in ["a.product_preview-title", "h2 a", ".product-name a", "a.js-product-link", ".product_tile-title"]:
         a = card.select_one(sel)
         if a:
             tit = a.get("title") or a.get_text(" ", strip=True)
             href = a.get("href") or ""
             break
             
+    # Precios
     p_act, p_org = None, None
-    for sel in [".js-preview-pricing", ".pricing", ".price", ".product-price", ".prices-price"]:
+    for sel in [".js-preview-pricing", ".pricing", ".price", ".product-price", ".prices-price", ".product_tile-price"]:
         pricing = card.select_one(sel)
         if pricing:
             texts = [normalizar_espacios(t) for t in pricing.stripped_strings if t]
@@ -299,7 +257,7 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     if p_act and p_org and p_org == p_act: p_org = round(p_act * 1.2, 2)
 
     img_url = ""
-    for sel in ["img.js_preview_image", "img[data-variant-image-src]", "img"]:
+    for sel in ["img.js_preview_image", "img[data-variant-image-src]", "img", ".product_tile-image"]:
         img = card.select_one(sel)
         if img:
             src = img.get("src") or img.get("data-variant-image-src")
@@ -311,13 +269,31 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
 
 def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     html = fetch_html_hybrid(url)
-    if not html: return []
+    
+    if not html: 
+        print(f"❌ No se pudo descargar {etiqueta} con ningún método.")
+        return []
     
     soup = BeautifulSoup(html, "html.parser")
     cards = detectar_cards(soup)
     
     if not cards:
-        print(f"⚠️  HTML obtenido pero sin productos en {etiqueta}. El DOM puede haber cambiado.")
+        print(f"⚠️  HTML obtenido pero sin productos en {etiqueta}.", flush=True)
+        
+        # --- DEBUG VITAL ---
+        # Imprimimos el título de la página para saber qué nos están devolviendo
+        # (ej: "Access Denied", "Challenge", "Verify you are human")
+        page_title = soup.title.string.strip() if soup.title else "SIN TÍTULO"
+        print(f"   🔎 Título de la página recibida: '{page_title}'")
+        print(f"   🔎 Longitud del HTML: {len(html)} caracteres")
+        
+        # Check de patrones de bloqueo conocidos
+        if "Access Denied" in html: print("   ⛔ Diagnóstico: BLOQUEO AKAMAI (Access Denied)")
+        elif "captcha" in html.lower(): print("   ⛔ Diagnóstico: CAPTCHA DETECTADO")
+        elif "robot" in html.lower(): print("   ⛔ Diagnóstico: DETECCION DE BOT")
+        else: print("   ❓ Diagnóstico: Posible cambio de estructura HTML o página vacía.")
+        # -------------------
+        
         return []
 
     productos = []
@@ -346,7 +322,7 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ECI (MODO SSL + GATEWAYS) ---", flush=True)
+    print("--- FASE 1: ECI (BING + GATEWAYS + DEBUG) ---", flush=True)
     
     total = 0
     for i, url in enumerate(URLS_PAGINAS, start=1):
