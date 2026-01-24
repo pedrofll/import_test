@@ -1,7 +1,7 @@
 """
 Scraper para El Corte Inglés — Móviles
-ESTRATEGIA: Bing Translate (Frame Jumping).
-Soluciona el problema de descargar solo la 'carcasa' del traductor.
+ESTRATEGIA FINAL: Navegación por MARCAS vía Google Cache (Text Mode).
+Evita la paginación (que no está cacheada) y el bloqueo de IP.
 """
 
 import os
@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 from bs4 import BeautifulSoup
 import warnings
 
-# Ignorar warnings de SSL
+# Ignorar warnings SSL
 warnings.filterwarnings("ignore")
 
 try:
@@ -26,29 +26,32 @@ except ImportError:
     USAR_CURL_CFFI = False
 
 # =========================
-# CONFIGURACIÓN
+# CONFIGURACIÓN: ESTRATEGIA DE MARCAS
 # =========================
 
-DEFAULT_URLS = [
-    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/",
-    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/2/",
-    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/3/",
-    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/4/",
-    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/5/",
+# En lugar de paginar (1, 2, 3...), atacamos las Landing Pages de las marcas.
+# Estas páginas SÍ suelen estar en la caché de Google.
+URLS_MARCAS = [
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/apple/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/samsung/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/xiaomi/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/oppo/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/realme/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/motorola/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/honor/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/vivo/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/google/",
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/tcl/"
 ]
 
-CORTEINGLES_URLS_RAW = os.environ.get("CORTEINGLES_URLS", "").strip()
-START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
-
-TIMEOUT = 40
+TIMEOUT = 30
 BASE_URL = "https://www.elcorteingles.es"
 ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9",
 }
 
 # =========================
@@ -80,18 +83,6 @@ def mask_url(u: str) -> str:
         p = urlparse(u)
         return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
     except: return u
-
-def build_urls_paginas() -> List[str]:
-    if CORTEINGLES_URLS_RAW:
-        return [u.strip() for u in CORTEINGLES_URLS_RAW.split(",") if u.strip()]
-    if START_URL_CORTEINGLES:
-        base = START_URL_CORTEINGLES.rstrip("/")
-        if base.endswith("moviles-y-smartphones"):
-            return [base + "/"] + [f"{base}/{i}/" for i in range(2, 11)]
-        return [START_URL_CORTEINGLES]
-    return DEFAULT_URLS
-
-URLS_PAGINAS = build_urls_paginas()
 
 RE_GB = re.compile(r"(\d{1,3})\s*GB", re.IGNORECASE)
 RE_RAM_PLUS = re.compile(r"(\d{1,3})\s*GB\s*\+\s*(\d{1,4})\s*GB", re.IGNORECASE)
@@ -128,20 +119,18 @@ def extraer_nombre(titulo: str, ram: str) -> str:
 
 def parse_precio(texto: str) -> Optional[float]:
     if not texto: return None
-    s = texto.replace("\xa0", " ").replace("€", "").strip().replace(".", "").replace(",", ".")
-    try: return float(re.sub(r"[^\d.]", "", s))
+    # En Google Cache Text Mode, el precio puede venir sucio
+    s = texto.replace("\xa0", " ").replace("€", "").strip()
+    s = s.replace(".", "").replace(",", ".") # Formato ES
+    try:
+        # Extraer solo números y puntos
+        clean = re.sub(r"[^\d.]", "", s)
+        return float(clean)
     except: return None
 
 def normalizar_url_imagen_600(img_url: str) -> str:
     if not img_url: return ""
-    
-    # Si viene con prefijo Bing, lo limpiamos
-    if "translatetheweb" in img_url:
-        # Intentamos buscar si es una URL absoluta encodeada dentro
-        pass 
-
     if img_url.startswith("//"): img_url = "https:" + img_url
-    
     try:
         p = urlparse(img_url)
         q = dict(parse_qsl(p.query))
@@ -154,17 +143,8 @@ def normalizar_url_imagen_600(img_url: str) -> str:
 def limpiar_url_producto(url_rel_o_abs: str) -> str:
     if not url_rel_o_abs: return ""
     u = url_rel_o_abs
-    
-    # Limpiar basura de Bing
-    if "translatetheweb.com" in u:
-        # Bing a veces reescribe los links como: https://www.translatetheweb.com/...&a=https://elcorte...
-        # O los deja relativos.
-        pass 
-
-    if u.startswith("/"):
-        u = urljoin(BASE_URL, u)
-    
-    # Quitamos query params para dejarla limpia
+    if "googleusercontent" in u: return "" # Link interno de cache
+    if u.startswith("/"): u = urljoin(BASE_URL, u)
     return urlunparse(urlparse(u)._replace(query="", fragment=""))
 
 def build_url_con_afiliado(url_sin: str, aff: str) -> str:
@@ -174,137 +154,150 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# LÓGICA DE CONEXIÓN (BING FRAME JUMPER)
+# FETCHER: GOOGLE CACHE TEXT MODE
 # =========================
 
-def fetch_html_hybrid(url: str) -> str:
-    session = requests.Session(impersonate="chrome120") if USAR_CURL_CFFI else requests.Session()
+def fetch_google_cache(url: str) -> str:
+    """Obtiene la versión 'Solo Texto' de la caché para evitar JS/Cookies."""
+    
+    session = requests.Session(impersonate="chrome110") if USAR_CURL_CFFI else requests.Session()
     session.headers.update(HEADERS)
-
-    # 1. BING TRANSLATE
-    bing_url = f"https://www.translatetheweb.com/?from=es&to=es&a={urllib.parse.quote(url)}"
-    print(f"   🛡️  Bing Translate (Entrando)...")
+    
+    # strip=1 elimina estilos y scripts (bypass detección bot)
+    # vwsrc=0 asegura vista renderizada texto
+    clean_url = url.split("?")[0]
+    cache_link = f"http://webcache.googleusercontent.com/search?q=cache:{urllib.parse.quote(clean_url)}&strip=1&vwsrc=0"
+    
+    print(f"   👻 Cache: {mask_url(url)}")
     
     try:
-        r = session.get(bing_url, timeout=30, verify=False)
-        html = r.text
+        time.sleep(random.uniform(3, 6)) # Pausa para no saturar a Google
+        r = session.get(cache_link, timeout=25, verify=False)
         
-        # --- DETECCIÓN DE FRAME ---
-        if "<frameset" in html or "<frame " in html:
-            print("      ↪️  Detectado marco de Bing. Saltando al contenido...")
-            soup_frame = BeautifulSoup(html, "html.parser")
-            # Bing suele poner el contenido en un frame llamado "c"
-            frame = soup_frame.find("frame", {"name": "c"})
-            if frame and frame.get("src"):
-                inner_url = frame.get("src")
-                # A veces la URL es relativa a bing
-                if inner_url.startswith("/"):
-                    inner_url = "https://www.translatetheweb.com" + inner_url
-                
-                print(f"      🚀 Fetching frame interno...")
-                r2 = session.get(inner_url, timeout=30, verify=False)
-                return r2.text
-        
-        # Si no hay frames, devolvemos lo que hay (quizas ya es el contenido)
-        return html
-
-    except Exception as e:
-        print(f"      ❌ Error Bing: {e}")
-
-    # 2. FALLBACK: GATEWAY
-    print("   🌐 Fallback: CodeTabs Gateway...")
-    try:
-        gw_url = f"https://api.codetabs.com/v1/proxy?quest={url}"
-        r = requests.get(gw_url, timeout=20, verify=False)
-        if r.status_code == 200 and "Access Denied" not in r.text:
+        if r.status_code == 200:
+            if "No hay caché" in r.text or "404. That’s an error" in r.text:
+                print("      ⚠️  Página no cacheada por Google.")
+                return ""
             return r.text
-    except: pass
-
+        elif r.status_code == 429:
+            print("      ⛔ Google 429 (Too Many Requests).")
+        else:
+            print(f"      ❌ Status {r.status_code}")
+            
+    except Exception as e:
+        print(f"      ❌ Error: {e}")
+        
     return ""
 
 # =========================
-# SCRAPING
+# PARSER ROBUSTO
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
-    cards = soup.select('div.card') 
-    if not cards: cards = soup.select('li.products_list-item')
-    if not cards: cards = soup.select('.product-preview')
-    if not cards: cards = soup.select('.grid-item')
-    if not cards: cards = soup.select('.product_tile')
+    # En modo texto de Google Cache, las clases CSS a veces desaparecen o cambian.
+    # Buscamos patrones estructurales.
+    
+    # 1. Buscamos contenedores que tengan precio y titulo
+    cards = []
+    
+    # Estrategia: Buscar todos los divs que podrían ser productos
+    # ECI suele usar estructuras repetitivas
+    candidates = soup.find_all("div", recursive=True)
+    
+    for div in candidates:
+        # Un producto suele tener un link y un texto con símbolo euro
+        has_euro = "€" in div.get_text()
+        has_link = div.find("a") is not None
+        
+        if has_euro and has_link:
+            # Filtramos si es demasiado grande (header/footer) o muy pequeño
+            txt_len = len(div.get_text())
+            if 50 < txt_len < 1000:
+                # Comprobación adicional: ¿Tiene palabras clave?
+                if "GB" in div.get_text() or "RAM" in div.get_text() or "Pulgadas" in div.get_text():
+                    cards.append(div)
+                    
+    # Si la búsqueda genérica falla, probamos selectores clásicos (por si la cache los conserva)
+    if not cards:
+        cards = soup.select('.product_tile') or soup.select('.grid-item') or soup.select('div.card')
+
     return cards
 
 def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]:
+    # En modo texto, la estructura es plana.
+    
+    # 1. Título y Enlace: Buscar el primer enlace con texto largo
+    links = card.find_all("a")
     tit, href = "", ""
-    
-    # En Bing, los atributos a veces cambian (ej: href -> rhref o similar), pero bs4 suele normalizar
-    
-    for sel in ["a.product_preview-title", "h2 a", ".product-name a", "a.js-product-link", ".product_tile-title"]:
-        a = card.select_one(sel)
-        if a:
-            tit = a.get("title") or a.get_text(" ", strip=True)
-            href = a.get("href") or ""
+    for a in links:
+        t = a.get_text(" ", strip=True)
+        h = a.get("href") or ""
+        # Validar que parece un producto
+        if len(t) > 10 and ("movil" in h or "smartphone" in h):
+            tit = t
+            href = h
             break
             
+    # 2. Precio: Buscar texto con €
     p_act, p_org = None, None
-    for sel in [".js-preview-pricing", ".pricing", ".price", ".product-price", ".prices-price", ".product_tile-price"]:
-        pricing = card.select_one(sel)
-        if pricing:
-            texts = [normalizar_espacios(t) for t in pricing.stripped_strings if t]
-            precios = []
-            for t in texts:
-                p = parse_precio(t)
-                if p: precios.append(p)
-            if precios:
-                p_act = min(precios)
-                p_org = max(precios)
-                break
+    text_content = card.get_text(" ", strip=True)
     
-    if p_act and not p_org: p_org = p_act
-    if p_act and p_org and p_org == p_act: p_org = round(p_act * 1.2, 2)
-
-    img_url = ""
-    for sel in ["img.js_preview_image", "img[data-variant-image-src]", "img", ".product_tile-image"]:
-        img = card.select_one(sel)
-        if img:
-            # Bing a veces cambia src por data-src para lazy loading
-            src = img.get("src") or img.get("data-src") or img.get("data-variant-image-src")
-            if src: 
-                img_url = normalizar_url_imagen_600(src)
-                break
+    # Regex para buscar precios: 1.234,99 €
+    precios_matches = re.findall(r"(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)\s*€", text_content)
+    
+    valid_prices = []
+    for pm in precios_matches:
+        v = parse_precio(pm)
+        if v and v > 50: # Filtramos accesorios baratos
+            valid_prices.append(v)
+            
+    if valid_prices:
+        p_act = min(valid_prices)
+        p_org = max(valid_prices)
+        if p_act == p_org: p_org = round(p_act * 1.2, 2)
+    
+    # 3. Imagen (En modo texto strip=1 NO HAY IMAGENES, devolvemos placeholder o vacio)
+    img_url = "" 
+    # Si queremos imagen, tendríamos que no usar strip=1, pero eso arriesga bloqueo.
+    # Priorizamos datos sobre imagen.
 
     return tit, href, p_act, p_org, img_url
 
 def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
-    html = fetch_html_hybrid(url)
-    
-    if not html: 
-        print(f"❌ Fallo al descargar {etiqueta}.")
-        return []
+    html = fetch_google_cache(url)
+    if not html: return []
     
     soup = BeautifulSoup(html, "html.parser")
     cards = detectar_cards(soup)
     
     if not cards:
-        print(f"⚠️  HTML obtenido pero sin productos en {etiqueta}.", flush=True)
-        title = soup.title.string.strip() if soup.title else "SIN TÍTULO"
-        print(f"   🔎 Título: '{title}' (Probablemente sigamos en el wrapper de Bing)")
+        print(f"⚠️  Sin productos detectados en {etiqueta} (Google Cache).")
         return []
 
     productos = []
+    seen_titles = set()
+    
     for card in cards:
         tit, href, p_act, p_org, img = extraer_info_card(card)
+        
         if not tit or not href: continue
+        if tit in seen_titles: continue
+        seen_titles.add(tit)
         
         t_clean = titulo_limpio(tit)
         specs = extraer_ram_rom(t_clean)
+        
         if not specs: continue 
         
         ram, rom = specs
         nombre = extraer_nombre(t_clean, ram)
+        
         if p_act is None: continue
         
         url_sin = limpiar_url_producto(href)
+        # Validar URL
+        if not url_sin.startswith("http"): continue
+        
         url_con = build_url_con_afiliado(url_sin, AFF_ELCORTEINGLES)
         
         productos.append(ProductoECI(
@@ -317,13 +310,15 @@ def obtener_productos(url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ECI (BING FRAME JUMPER) ---", flush=True)
+    print("--- FASE 1: ECI (ESTRATEGIA MARCAS + GOOGLE CACHE) ---", flush=True)
     
     total = 0
-    for i, url in enumerate(URLS_PAGINAS, start=1):
-        print(f"\n📂 Procesando ({i}/{len(URLS_PAGINAS)}): {mask_url(url)}", flush=True)
+    # Usamos un subset para no tardar mucho si hay muchas marcas
+    for i, url in enumerate(URLS_MARCAS, start=1):
+        brand_name = url.split("/")[-2].upper()
+        print(f"\n📂 Procesando Marca ({i}/{len(URLS_MARCAS)}): {brand_name}", flush=True)
         try:
-            prods = obtener_productos(url, str(i))
+            prods = obtener_productos(url, brand_name)
         except Exception as e:
             print(f"❌ Error crítico: {e}", flush=True)
             continue
