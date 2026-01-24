@@ -1,3 +1,4 @@
+"""
 Scraper (DRY RUN) para El Corte Inglés — móviles y smartphones
 
 Objetivo (fase 1):
