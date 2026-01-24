@@ -1,18 +1,3 @@
-"""
-Scraper (DRY RUN) para El Corte Inglés — móviles y smartphones
-
-Objetivo (fase 1):
-- Escanear páginas 1..10 del listado
-- Extraer: nombre, RAM, capacidad, precio_actual, precio_original, img_url, url_producto (sin query)
-- Construir URL con afiliado usando secreto AFF_ELCORTEINGLES
-- NO crea/actualiza/elimina productos en WooCommerce (solo logs)
-
-Cambios Anti-Bloqueo:
-- Headers de Chrome Windows 10 completo.
-- Uso de Session para cookies.
-- Timeouts ajustados.
-"""
-
 import os
 import re
 import time
@@ -206,8 +191,4 @@ def parse_precio(texto: str) -> Optional[float]:
 def normalizar_url_imagen_600(img_url: str) -> str:
     if not img_url:
         return ""
-    img_url = img_url.replace("&amp;", "&")
-    try:
-        p = urlparse(img_url)
-        q = dict(parse_qsl(p.query, keep_blank_values=True))
-        q["
+    img_url = img_url
