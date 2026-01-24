@@ -1,9 +1,6 @@
 """
-Scraper para El Corte Inglés — móviles y smartphones
-SOLUCIÓN ANTI-BOT MANAGER (bm-verify handler)
-
-Requisitos:
-    pip install curl_cffi beautifulsoup4 requests
+Scraper para El Corte Inglés — Móviles
+SOLUCIÓN: Camuflaje iPhone (Safari) para evadir bloqueo de IP en GitHub Actions.
 """
 
 import os
@@ -23,7 +20,7 @@ try:
 except ImportError:
     import requests
     USAR_CURL_CFFI = False
-    print("⚠️ ADVERTENCIA: 'curl_cffi' no está instalado. El bypass será menos efectivo.")
+    print("⚠️ ADVERTENCIA: 'curl_cffi' no está instalado. Fallará casi seguro.")
 
 # =========================
 # Configuración
@@ -41,13 +38,14 @@ CORTEINGLES_URLS_RAW = os.environ.get("CORTEINGLES_URLS", "").strip()
 START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
 
-TIMEOUT = 60 # Aumentado para dar tiempo a la redirección
+TIMEOUT = 60 
 
+# Headers MÍNIMOS (El resto lo pone curl_cffi automáticamente al simular Safari)
+# NOTA: No poner User-Agent manual para evitar huellas contradictorias.
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
-    "Referer": "https://www.google.es/",
+    "Referer": "https://www.google.com/",
 }
 
 # ===========
@@ -78,6 +76,7 @@ def mask_url(u: str) -> str:
     if not u: return ""
     try:
         p = urlparse(u)
+        # Devolvemos la URL limpia para logs
         return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
     except: return u
 
@@ -168,64 +167,67 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# LÓGICA DE REDIRECCIÓN (BM-VERIFY)
+# LÓGICA DE REDIRECCIÓN Y CAMUFLAJE
 # =========================
 
 def get_session():
     if USAR_CURL_CFFI:
-        # Usamos chrome120 para parecer más actual
-        return requests.Session(impersonate="chrome120", headers=HEADERS)
+        # CAMBIO CLAVE: Usamos 'safari15_5' en lugar de Chrome. 
+        # Apple suele tener IPs más variables y a veces Akamai es más suave.
+        print("🍏 Modo Camuflaje: Simulando Safari (iPhone/Mac)")
+        return requests.Session(impersonate="safari15_5", headers=HEADERS)
     else:
         s = requests.Session()
         s.headers.update(HEADERS)
+        s.headers.update({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"})
         return s
 
 def fetch_html_smart(session, url: str, depth=0) -> str:
-    """Descarga manejando la 'Sala de Espera' de Akamai (meta refresh)."""
     if depth > 3:
-        print("❌ Demasiadas redirecciones de verificación. Abortando.")
+        print("❌ Bucle de redirección detectado. Abortando.")
         return ""
 
-    # Pausa inicial humana
     if depth == 0:
-        time.sleep(random.uniform(3, 6))
+        # Pausa inicial aleatoria para parecer humano
+        time.sleep(random.uniform(2, 5))
     
     print(f"🌍 Conectando a {mask_url(url)} (Intento {depth+1})...")
-    r = session.get(url, timeout=TIMEOUT)
     
+    try:
+        r = session.get(url, timeout=TIMEOUT)
+    except Exception as e:
+        print(f"❌ Error de conexión: {e}")
+        return ""
+
     if r.status_code == 403:
-        raise Exception("Bloqueo 403. La IP está en lista negra temporal.")
+        # Si falla, imprimimos un aviso pero no crasheamos todo el script
+        print(f"🔒 Bloqueo 403 en {mask_url(url)}. La IP de GitHub sigue sucia.")
+        return ""
     
-    r.raise_for_status()
     html = r.text
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1. Detectar Meta Refresh (bm-verify)
-    # <meta http-equiv="refresh" content="5; URL='/...?bm-verify=...'">
+    # Detectar Meta Refresh (Waiting Room)
     meta_refresh = soup.find("meta", attrs={"http-equiv": lambda x: x and x.lower() == "refresh"})
     
     if meta_refresh:
         content = meta_refresh.get("content", "")
-        # Extraer tiempo y URL
-        # content="5; URL='/...'"
         parts = content.split("URL=")
         if len(parts) > 1:
-            wait_time = 5 # Default
             try:
                 wait_time = int(parts[0].replace(";", "").strip())
-            except: pass
+            except: 
+                wait_time = 5
             
+            # Limpiamos la URL destino (quitamos comillas)
             next_url_rel = parts[1].strip("'\" ")
             next_url_abs = urljoin(BASE_URL, next_url_rel)
             
-            print(f"🛑 DETECTADA SALA DE ESPERA AKAMAI.")
-            print(f"⏳ El servidor pide esperar {wait_time} segundos...")
-            print(f"➡️ Siguiente URL de verificación: {mask_url(next_url_abs)}")
+            print(f"🛑 SALA DE ESPERA DETECTADA.")
+            print(f"⏳ Esperando {wait_time}s + margen de seguridad...")
+            time.sleep(wait_time + 2) # Damos 2 segundos extra
             
-            # Esperamos lo que pide el servidor + 1 segundo extra de margen
-            time.sleep(wait_time + 1.5)
-            
-            # Recursividad: Llamamos a la nueva URL
+            # Recurrimos a la nueva URL
             return fetch_html_smart(session, next_url_abs, depth=depth+1)
 
     return html
@@ -235,17 +237,11 @@ def fetch_html_smart(session, url: str, depth=0) -> str:
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
-    # Intentamos selectores amplios
-    cards = soup.select('div.card')
-    if not cards:
-        cards = soup.select('li.products_list-item')
-    if not cards:
-        cards = soup.select('.product-preview')
+    cards = soup.select('div.card') or soup.select('li.products_list-item') or soup.select('.product-preview') or soup.select('.grid-item')
     return cards
 
 def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]:
     tit, href = "", ""
-    # Selectores Título
     for sel in ["a.product_preview-title", "h2 a", ".product-name a", "a.js-product-link"]:
         a = card.select_one(sel)
         if a:
@@ -253,9 +249,8 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
             href = a.get("href") or ""
             break
             
-    # Selectores Precio
     p_act, p_org = None, None
-    for sel in [".js-preview-pricing", ".pricing", ".price", ".product-price"]:
+    for sel in [".js-preview-pricing", ".pricing", ".price", ".product-price", ".prices-price"]:
         pricing = card.select_one(sel)
         if pricing:
             texts = [normalizar_espacios(t) for t in pricing.stripped_strings if t]
@@ -271,7 +266,6 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     if p_act and not p_org: p_org = p_act
     if p_act and p_org and p_org == p_act: p_org = round(p_act * 1.2, 2)
 
-    # Selectores Imagen
     img_url = ""
     for sel in ["img.js_preview_image", "img[data-variant-image-src]", "img"]:
         img = card.select_one(sel)
@@ -284,9 +278,7 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     return tit, href, p_act, p_org, img_url
 
 def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
-    # Usamos la nueva función "Smart"
     html = fetch_html_smart(session, url)
-    
     if not html: return []
     
     soup = BeautifulSoup(html, "html.parser")
@@ -294,11 +286,6 @@ def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
     
     if not cards:
         print(f"⚠️  DEBUG: HTML descargado pero sin productos en {etiqueta}.", flush=True)
-        # Check básico para ver si seguimos bloqueados
-        if "bm-verify" in html or "refresh" in html:
-            print("   -> El bypass de Akamai falló.")
-        else:
-            print("   -> HTML desconocido (posible cambio de estructura web).")
         return []
 
     productos = []
@@ -310,7 +297,7 @@ def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
         t_clean = titulo_limpio(tit)
         specs = extraer_ram_rom(t_clean)
         
-        if not specs: continue # Solo móviles con RAM/ROM
+        if not specs: continue 
         
         ram, rom = specs
         nombre = extraer_nombre(t_clean, ram)
@@ -330,7 +317,7 @@ def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ESCANEANDO EL CORTE INGLÉS (MODO BYPASS REFRESH) ---", flush=True)
+    print("--- FASE 1: ESCANEANDO EL CORTE INGLÉS (MODO SAFARI) ---", flush=True)
     session = get_session()
     
     total = 0
@@ -339,7 +326,7 @@ def main() -> int:
         try:
             prods = obtener_productos(session, url, str(i))
         except Exception as e:
-            print(f"❌ Error crítico en {mask_url(url)}: {e}", flush=True)
+            print(f"❌ Error general en {mask_url(url)}: {e}", flush=True)
             continue
             
         print(f"✅ Encontrados: {len(prods)}", flush=True)
