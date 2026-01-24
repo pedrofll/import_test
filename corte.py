@@ -1,12 +1,14 @@
 """
 Scraper para El Corte Inglés — Móviles
-SOLUCIÓN: Camuflaje iPhone (Safari) para evadir bloqueo de IP en GitHub Actions.
+ESTRATEGIA FINAL: Google Cache Bypass.
+El objetivo es evitar el bloqueo de IP de GitHub pidiendo el HTML a Google en lugar de a ECI.
 """
 
 import os
 import re
 import time
 import random
+import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
@@ -20,13 +22,13 @@ try:
 except ImportError:
     import requests
     USAR_CURL_CFFI = False
-    print("⚠️ ADVERTENCIA: 'curl_cffi' no está instalado. Fallará casi seguro.")
 
 # =========================
 # Configuración
 # =========================
 
-DEFAULT_URLS = [
+# URLs originales de ECI
+RUTAS_OBJETIVO = [
     "https://www.elcorteingles.es/electronica/moviles-y-smartphones/",
     "https://www.elcorteingles.es/electronica/moviles-y-smartphones/2/",
     "https://www.elcorteingles.es/electronica/moviles-y-smartphones/3/",
@@ -34,18 +36,16 @@ DEFAULT_URLS = [
     "https://www.elcorteingles.es/electronica/moviles-y-smartphones/5/",
 ]
 
-CORTEINGLES_URLS_RAW = os.environ.get("CORTEINGLES_URLS", "").strip()
-START_URL_CORTEINGLES = os.environ.get("START_URL_CORTEINGLES", "").strip()
 AFF_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "").strip()
+TIMEOUT = 30 
+BASE_URL = "https://www.elcorteingles.es"
+ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
 
-TIMEOUT = 60 
-
-# Headers MÍNIMOS (El resto lo pone curl_cffi automáticamente al simular Safari)
-# NOTA: No poner User-Agent manual para evitar huellas contradictorias.
 HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
-    "Referer": "https://www.google.com/",
+    "Cache-Control": "max-age=0",
 }
 
 # ===========
@@ -70,29 +70,24 @@ class ProductoECI:
     page_id: str
 
 # ===========
-# Helpers URL
+# Helpers
 # ===========
 def mask_url(u: str) -> str:
     if not u: return ""
     try:
         p = urlparse(u)
-        # Devolvemos la URL limpia para logs
         return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
     except: return u
 
-def build_urls_paginas() -> List[str]:
-    if CORTEINGLES_URLS_RAW:
-        return [u.strip() for u in CORTEINGLES_URLS_RAW.split(",") if u.strip()]
-    if START_URL_CORTEINGLES:
-        base = START_URL_CORTEINGLES.rstrip("/")
-        if base.endswith("moviles-y-smartphones"):
-            return [base + "/"] + [f"{base}/{i}/" for i in range(2, 11)]
-        return [START_URL_CORTEINGLES]
-    return DEFAULT_URLS
-
-URLS_PAGINAS = build_urls_paginas()
-BASE_URL = "https://www.elcorteingles.es"
-ID_IMPORTACION = f"{BASE_URL}/electronica/moviles-y-smartphones/"
+def to_google_cache_url(eci_url: str) -> str:
+    """Convierte la URL de ECI en una petición a Google Cache."""
+    # Eliminamos parámetros extra para limpiar
+    clean_url = eci_url.split("?")[0]
+    # Codificamos
+    encoded = urllib.parse.quote(clean_url)
+    # Construimos URL de cache
+    # strip=0 para mantener formato, vwsrc=0 para ver renderizado
+    return f"http://webcache.googleusercontent.com/search?q=cache:{clean_url}&strip=0&vwsrc=0"
 
 # ===========
 # Regex Helpers
@@ -143,7 +138,14 @@ def parse_precio(texto: str) -> Optional[float]:
 
 def normalizar_url_imagen_600(img_url: str) -> str:
     if not img_url: return ""
+    # En cache las imagenes a veces apuntan a google, intentamos limpiar
+    if "googleusercontent" in img_url: return img_url 
+    
     img_url = img_url.replace("&amp;", "&")
+    # Si es relativa, la hacemos absoluta a ECI
+    if img_url.startswith("//"): img_url = "https:" + img_url
+    elif img_url.startswith("/"): img_url = BASE_URL + img_url
+    
     try:
         p = urlparse(img_url)
         q = dict(parse_qsl(p.query, keep_blank_values=True))
@@ -155,7 +157,22 @@ def normalizar_url_imagen_600(img_url: str) -> str:
 
 def limpiar_url_producto(url_rel_o_abs: str) -> str:
     if not url_rel_o_abs: return ""
-    abs_url = urljoin(BASE_URL, url_rel_o_abs)
+    # En Google Cache, los enlaces pueden venir sucios. Limpiamos.
+    # Si empieza por /url?q= es una redireccion de google
+    if "/url?q=" in url_rel_o_abs:
+        try:
+            parsed = parse_qsl(urlparse(url_rel_o_abs).query)
+            for k, v in parsed:
+                if k == 'q': 
+                    url_rel_o_abs = v
+                    break
+        except: pass
+
+    if url_rel_o_abs.startswith("/"):
+        abs_url = urljoin(BASE_URL, url_rel_o_abs)
+    else:
+        abs_url = url_rel_o_abs
+        
     p = urlparse(abs_url)
     return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
 
@@ -167,81 +184,53 @@ def build_url_con_afiliado(url_sin: str, aff: str) -> str:
     return f"{url_sin}{sep}{aff.lstrip('?&')}"
 
 # =========================
-# LÓGICA DE REDIRECCIÓN Y CAMUFLAJE
+# RED (Google Cache Fetcher)
 # =========================
 
 def get_session():
     if USAR_CURL_CFFI:
-        # CAMBIO CLAVE: Usamos 'safari15_5' en lugar de Chrome. 
-        # Apple suele tener IPs más variables y a veces Akamai es más suave.
-        print("🍏 Modo Camuflaje: Simulando Safari (iPhone/Mac)")
-        return requests.Session(impersonate="safari15_5", headers=HEADERS)
+        return requests.Session(impersonate="chrome120", headers=HEADERS)
     else:
         s = requests.Session()
         s.headers.update(HEADERS)
-        s.headers.update({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"})
         return s
 
-def fetch_html_smart(session, url: str, depth=0) -> str:
-    if depth > 3:
-        print("❌ Bucle de redirección detectado. Abortando.")
-        return ""
-
-    if depth == 0:
-        # Pausa inicial aleatoria para parecer humano
-        time.sleep(random.uniform(2, 5))
+def fetch_google_cache(session, original_url: str) -> str:
+    cache_link = to_google_cache_url(original_url)
     
-    print(f"🌍 Conectando a {mask_url(url)} (Intento {depth+1})...")
+    # Pausa humana
+    time.sleep(random.uniform(3, 7))
+    print(f"🕵️  Pidiendo a Google Cache: {original_url} ...")
     
     try:
-        r = session.get(url, timeout=TIMEOUT)
+        # A veces Google Cache redirige o da 404 si no tiene la página
+        r = session.get(cache_link, timeout=TIMEOUT)
+        
+        if r.status_code == 404:
+            print(f"❌ Google no tiene esta página en caché (404).")
+            return ""
+        if r.status_code == 429:
+            print(f"❌ Google nos ha limitado (429 Too Many Requests).")
+            return ""
+            
+        r.raise_for_status()
+        return r.text
     except Exception as e:
-        print(f"❌ Error de conexión: {e}")
+        print(f"⚠️  Error conectando con Google Cache: {e}")
         return ""
-
-    if r.status_code == 403:
-        # Si falla, imprimimos un aviso pero no crasheamos todo el script
-        print(f"🔒 Bloqueo 403 en {mask_url(url)}. La IP de GitHub sigue sucia.")
-        return ""
-    
-    html = r.text
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Detectar Meta Refresh (Waiting Room)
-    meta_refresh = soup.find("meta", attrs={"http-equiv": lambda x: x and x.lower() == "refresh"})
-    
-    if meta_refresh:
-        content = meta_refresh.get("content", "")
-        parts = content.split("URL=")
-        if len(parts) > 1:
-            try:
-                wait_time = int(parts[0].replace(";", "").strip())
-            except: 
-                wait_time = 5
-            
-            # Limpiamos la URL destino (quitamos comillas)
-            next_url_rel = parts[1].strip("'\" ")
-            next_url_abs = urljoin(BASE_URL, next_url_rel)
-            
-            print(f"🛑 SALA DE ESPERA DETECTADA.")
-            print(f"⏳ Esperando {wait_time}s + margen de seguridad...")
-            time.sleep(wait_time + 2) # Damos 2 segundos extra
-            
-            # Recurrimos a la nueva URL
-            return fetch_html_smart(session, next_url_abs, depth=depth+1)
-
-    return html
 
 # =========================
-# Parsing Productos
+# Parsing
 # =========================
 
 def detectar_cards(soup: BeautifulSoup):
+    # En Google Cache, la estructura se mantiene, pero cuidado con el header de google
     cards = soup.select('div.card') or soup.select('li.products_list-item') or soup.select('.product-preview') or soup.select('.grid-item')
     return cards
 
 def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]:
     tit, href = "", ""
+    # Título
     for sel in ["a.product_preview-title", "h2 a", ".product-name a", "a.js-product-link"]:
         a = card.select_one(sel)
         if a:
@@ -249,6 +238,7 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
             href = a.get("href") or ""
             break
             
+    # Precio
     p_act, p_org = None, None
     for sel in [".js-preview-pricing", ".pricing", ".price", ".product-price", ".prices-price"]:
         pricing = card.select_one(sel)
@@ -266,6 +256,7 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
     if p_act and not p_org: p_org = p_act
     if p_act and p_org and p_org == p_act: p_org = round(p_act * 1.2, 2)
 
+    # Imagen
     img_url = ""
     for sel in ["img.js_preview_image", "img[data-variant-image-src]", "img"]:
         img = card.select_one(sel)
@@ -277,22 +268,22 @@ def extraer_info_card(card: BeautifulSoup) -> Tuple[str, str, float, float, str]
 
     return tit, href, p_act, p_org, img_url
 
-def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
-    html = fetch_html_smart(session, url)
+def obtener_productos(session, url_objetivo: str, etiqueta: str) -> List[ProductoECI]:
+    html = fetch_google_cache(session, url_objetivo)
     if not html: return []
     
     soup = BeautifulSoup(html, "html.parser")
     cards = detectar_cards(soup)
     
     if not cards:
-        print(f"⚠️  DEBUG: HTML descargado pero sin productos en {etiqueta}.", flush=True)
+        print(f"⚠️  HTML obtenido de Google, pero no veo productos. ¿Cache antigua?", flush=True)
         return []
 
     productos = []
     for card in cards:
         tit, href, p_act, p_org, img = extraer_info_card(card)
         
-        if not tit or not href: continue
+        if not tit: continue
         
         t_clean = titulo_limpio(tit)
         specs = extraer_ram_rom(t_clean)
@@ -317,19 +308,19 @@ def obtener_productos(session, url: str, etiqueta: str) -> List[ProductoECI]:
     return productos
 
 def main() -> int:
-    print("--- FASE 1: ESCANEANDO EL CORTE INGLÉS (MODO SAFARI) ---", flush=True)
+    print("--- FASE 1: ECI VIA GOOGLE CACHE (BYPASS TOTAL) ---", flush=True)
     session = get_session()
     
     total = 0
-    for i, url in enumerate(URLS_PAGINAS, start=1):
-        print(f"\n📂 Procesando listado ({i}/{len(URLS_PAGINAS)})", flush=True)
+    for i, url in enumerate(RUTAS_OBJETIVO, start=1):
+        print(f"\n📂 Procesando ({i}/{len(RUTAS_OBJETIVO)})", flush=True)
         try:
             prods = obtener_productos(session, url, str(i))
         except Exception as e:
-            print(f"❌ Error general en {mask_url(url)}: {e}", flush=True)
+            print(f"❌ Error procesando {mask_url(url)}: {e}", flush=True)
             continue
             
-        print(f"✅ Encontrados: {len(prods)}", flush=True)
+        print(f"✅ Encontrados en Cache: {len(prods)}", flush=True)
         total += len(prods)
         
         for p in prods:
