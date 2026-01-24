@@ -7,7 +7,6 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import List
 from curl_cffi import requests
-from bs4 import BeautifulSoup
 
 @dataclass
 class ProductoECI:
@@ -16,87 +15,100 @@ class ProductoECI:
     url: str
 
 # =========================
-# EXTRACCIÓN DE DATOS
+# ESCANEO PROFUNDO (REGEX)
 # =========================
-def extraer_datos_eci(html: str) -> List[ProductoECI]:
+def buscar_productos_en_texto(html: str) -> List[ProductoECI]:
     productos = []
-    soup = BeautifulSoup(html, "html.parser")
     
-    # Buscamos elementos con data-json
-    items = soup.select('[data-json]')
+    # Buscamos el bloque de datos maestro de la página
+    # ECI suele inyectar un JSON gigante aquí
+    data_match = re.search(r'__PRELOADED_STATE__\s*=\s*({.+?});', html)
     
-    for item in items:
+    if data_match:
         try:
-            js = json.loads(item.get('data-json'))
-            if 'name' in js and 'price' in js:
-                price_data = js['price']
-                p_actual = price_data.get('f_price') or price_data.get('final') or 0
-                
+            full_data = json.loads(data_match.group(1))
+            # Navegamos por el laberinto del JSON (Catalog -> Products)
+            items = []
+            # Intentamos varias rutas porque Google Cache a veces las cambia
+            catalog = full_data.get("catalog", {})
+            items = catalog.get("category", {}).get("products", []) or catalog.get("search", {}).get("products", [])
+            
+            for item in items:
+                p_actual = item.get("price", {}).get("f_price") or item.get("price", {}).get("final")
+                if p_actual:
+                    productos.append(ProductoECI(
+                        nombre=item.get("name", "Móvil"),
+                        precio=float(p_actual),
+                        url=item.get("url", "")
+                    ))
+        except:
+            pass
+
+    # Si el bloque maestro falla, buscamos fragmentos de data-json sueltos
+    if not productos:
+        # Buscamos cualquier cosa que parezca un JSON de producto: {"name":"...", "price":...}
+        fragments = re.findall(r'data-json="({.+?})"', html)
+        for frag in fragments:
+            try:
+                # El HTML de la caché tiene las comillas escapadas (&quot;)
+                clean_frag = frag.replace('&quot;', '"')
+                js = json.loads(clean_frag)
                 productos.append(ProductoECI(
-                    nombre=js['name'],
-                    precio=float(p_actual),
+                    nombre=js.get('name', 'Móvil'),
+                    precio=float(js.get('price', {}).get('f_price', 0)),
                     url=js.get('url', '')
                 ))
-        except:
-            continue
+            except:
+                continue
+                
     return productos
 
 # =========================
-# NAVEGACIÓN VÍA GOOGLE CACHE
+# EJECUCIÓN
 # =========================
 def main():
-    print("--- 🛰️ MODO PUENTE: GOOGLE CACHE BYPASS ---", flush=True)
+    print("--- 🔍 MODO DEEP SCAN: BUSCANDO DATOS OCULTOS ---", flush=True)
     
     session = requests.Session(impersonate="chrome110")
-    
     base_cat = "https://www.elcorteingles.es/electronica/moviles-y-smartphones/"
     total = 0
 
-    # URLs a procesar
     urls_reales = [base_cat, f"{base_cat}2/", f"{base_cat}3/"]
 
     for i, url_real in enumerate(urls_reales, start=1):
-        # Construimos la URL de la caché de Google
-        cache_url = f"http://webcache.googleusercontent.com/search?q=cache:{urllib.parse.quote(url_real)}&strip=0"
+        # Usamos la versión de Google Cache (Modo normal para mantener scripts)
+        cache_url = f"http://webcache.googleusercontent.com/search?q=cache:{urllib.parse.quote(url_real)}"
         
-        print(f"\n📂 Consultando Caché de Página {i}...", flush=True)
+        print(f"\n📂 Analizando Página {i}...", flush=True)
         
-        headers = {
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "accept-language": "es-ES,es;q=0.9",
-            "referer": "https://www.google.com/"
-        }
-
         try:
-            # Pausa aleatoria para no saturar a Google
-            time.sleep(random.uniform(5, 10))
-            
-            res = session.get(cache_url, headers=headers, timeout=30)
+            time.sleep(random.uniform(5, 8))
+            res = session.get(cache_url, timeout=30)
             
             if res.status_code == 200:
-                # A veces Google nos pide un Captcha si abusamos
-                if "detected unusual traffic" in res.text:
-                    print("      ⚠️ Google Cache ha detectado tráfico inusual. Pausando...")
-                    break
-                
-                prods = extraer_datos_eci(res.text)
-                
-                if prods:
-                    print(f"      ✅ Éxito: {len(prods)} productos recuperados de la caché.")
-                    for p in prods[:2]:
-                        print(f"      📱 {p.nombre[:40]}... | {p.precio}€")
-                    total += len(prods)
+                # Comprobación de seguridad
+                if "Google" in res.text and "cache" in res.text.lower():
+                    prods = buscar_productos_en_texto(res.text)
+                    
+                    if prods:
+                        print(f"      ✅ ¡ENCONTRADOS! {len(prods)} productos.")
+                        for p in prods[:2]:
+                            print(f"      📱 {p.nombre[:40]}... | {p.precio}€")
+                        total += len(prods)
+                    else:
+                        print("      ⚠️ Google devolvió la página pero no veo el bloque de datos.")
+                        # DIAGNÓSTICO: ¿Qué tipo de página estamos viendo?
+                        if "captcha" in res.text.lower(): print("      🚨 Detectado Captcha de Google.")
+                        elif "moviles" in res.text.lower(): print("      ℹ️ Veo la palabra 'móviles', pero el JSON está ausente.")
                 else:
-                    print("      ⚠️ No se encontraron productos en la caché (posible error de renderizado).")
-            elif res.status_code == 404:
-                print("      ❌ Esta página no está en la caché de Google todavía.")
+                    print("      ❌ Google no devolvió una página de caché válida.")
             else:
-                print(f"      ❌ Error en Google Cache: {res.status_code}")
+                print(f"      ❌ Error HTTP {res.status_code}")
                 
         except Exception as e:
-            print(f"      ❌ Error de conexión: {e}")
+            print(f"      ❌ Error: {e}")
 
-    print(f"\n📋 PROCESO FINALIZADO. Total recuperado: {total}")
+    print(f"\n📋 ESCANEO FINALIZADO. Total recuperado: {total}")
 
 if __name__ == "__main__":
     main()
