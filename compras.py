@@ -69,9 +69,6 @@ ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
 
-# >>>>>>> CAMBIO PEDIDO: afiliado Xiaomi Store desde GitHub Secrets/Variables <<<<<<<
-ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
-
 # Acumuladores globales
 summary_creados = []
 summary_eliminados = []
@@ -232,9 +229,6 @@ def obtener_datos_remotos():
                         )
                     elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
                         url_importada_sin_afiliado = url_exp.split("?")[0]
-                    # >>>>>>> CAMBIO PEDIDO: Xiaomi Store / Mi Store -> cortar en "?" <<<<<<<
-                    elif fuente in ["Xiaomi Store", "Mi Store"]:
-                        url_importada_sin_afiliado = url_exp.split("?")[0]
                     else:
                         url_importada_sin_afiliado = url_exp
 
@@ -247,9 +241,6 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
-                    # >>>>>>> CAMBIO PEDIDO: Xiaomi Store / Mi Store -> añadir afiliado <<<<<<<
-                    elif fuente in ["Xiaomi Store", "Mi Store"] and ID_AFILIADO_XIAOMI_STORE:
-                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
                     else:
                         url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
@@ -406,11 +397,23 @@ def sincronizar(remotos):
                 cambios.append(f"enviado_desde_tg ({meta.get('enviado_desde_tg')} -> {match_remoto['enviado_desde_tg']})")
                 update_data["meta_data"].append({"key": "enviado_desde_tg", "value": match_remoto['enviado_desde_tg']})
             
-            # >>>>>>> CAMBIO PEDIDO: guardar URL imagen en ACF "imagen_producto" <<<<<<<
-            if match_remoto.get('imagen') and match_remoto['imagen'] != meta.get('imagen_producto'):
-                cambios.append(f"imagen_producto ({meta.get('imagen_producto')} -> {match_remoto['imagen']})")
+            # >>>>>>> CAMBIO PEDIDO: guardar imagen en ACF "imagen_producto" <<<<<<<
+            # ACF tipo "Imagen" suele requerir ID de adjunto (no URL). Aprovechamos el ID de la imagen del producto
+            # ya importada en WooCommerce (featured/gallery) y lo guardamos en imagen_producto.
+            try:
+                local_imgs = local.get('images') or []
+                local_img_id = local_imgs[0].get('id') if local_imgs else None
+            except Exception:
+                local_img_id = None
+
+            if local_img_id and str(local_img_id) != str(meta.get('imagen_producto', '')):
+                cambios.append(f"imagen_producto ({meta.get('imagen_producto')} -> {local_img_id})")
+                update_data["meta_data"].append({"key": "imagen_producto", "value": str(local_img_id)})
+            elif match_remoto.get('imagen') and not meta.get('imagen_producto'):
+                # Fallback si no hay ID disponible (mantiene compatibilidad si el campo ACF fuese tipo URL/texto)
+                cambios.append("imagen_producto (vacío -> URL)")
                 update_data["meta_data"].append({"key": "imagen_producto", "value": match_remoto['imagen']})
-            
+
             if cambios:
                 wcapi.put(f"products/{local['id']}", update_data)
                 summary_actualizados.append({"nombre": local['name'], "id": local['id'], "cambios": cambios})
@@ -436,8 +439,6 @@ def sincronizar(remotos):
                 {"key": "capacidad", "value": p['rom']},
                 {"key": "version", "value": p['ver']},
                 {"key": "fuente", "value": p['fuente']},
-                # >>>>>>> CAMBIO PEDIDO: guardar URL imagen en ACF "imagen_producto" <<<<<<<
-                {"key": "imagen_producto", "value": p['imagen']},
                 {"key": "precio_actual", "value": str(p['p_act'])},
                 {"key": "precio_original", "value": str(p['p_reg'])},
                 {"key": "codigo_de_descuento", "value": p['cup']},
@@ -472,6 +473,22 @@ def sincronizar(remotos):
                             "meta_data": [{"key": "url_post_acortada", "value": url_post_acortada}]
                         })
 
+                    # >>>>>>> CAMBIO PEDIDO: guardar imagen en ACF "imagen_producto" <<<<<<<
+                    # Guardamos el ID del adjunto importado por WooCommerce (si existe). Si no, guardamos la URL.
+                    try:
+                        img_id = None
+                        imgs = prod_res.get('images') or []
+                        if isinstance(imgs, list) and imgs:
+                            first = imgs[0] or {}
+                            if isinstance(first, dict) and first.get('id'):
+                                img_id = first.get('id')
+                        if img_id:
+                            wcapi.put(f"products/{new_id}", {"meta_data": [{"key": "imagen_producto", "value": str(img_id)}]})
+                        elif p.get('imagen'):
+                            wcapi.put(f"products/{new_id}", {"meta_data": [{"key": "imagen_producto", "value": p['imagen']}]})
+                    except Exception:
+                        pass
+
                     summary_creados.append({"nombre": p['nombre'], "id": new_id})
                     print(f"✅ CREADO -> {p['nombre']} (ID: {new_id})")
                     creado = True
@@ -480,7 +497,7 @@ def sincronizar(remotos):
             except Exception as e:
                 print(f"❌ Excepción durante la creación. Reintentando...", flush=True)
             
-            time.sleep(15)
+            time.sleep(60)
 
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n============================================================")
