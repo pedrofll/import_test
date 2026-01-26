@@ -397,23 +397,10 @@ def sincronizar(remotos):
                 cambios.append(f"enviado_desde_tg ({meta.get('enviado_desde_tg')} -> {match_remoto['enviado_desde_tg']})")
                 update_data["meta_data"].append({"key": "enviado_desde_tg", "value": match_remoto['enviado_desde_tg']})
             
-            # >>>>>>> CAMBIO PEDIDO: guardar imagen en ACF "imagen_producto" <<<<<<<
-            # ACF tipo "Imagen" suele requerir ID de adjunto (no URL). Aprovechamos el ID de la imagen del producto
-            # ya importada en WooCommerce (featured/gallery) y lo guardamos en imagen_producto.
-            try:
-                local_imgs = local.get('images') or []
-                local_img_id = local_imgs[0].get('id') if local_imgs else None
-            except Exception:
-                local_img_id = None
-
-            if local_img_id and str(local_img_id) != str(meta.get('imagen_producto', '')):
-                cambios.append(f"imagen_producto ({meta.get('imagen_producto')} -> {local_img_id})")
-                update_data["meta_data"].append({"key": "imagen_producto", "value": str(local_img_id)})
-            elif match_remoto.get('imagen') and not meta.get('imagen_producto'):
-                # Fallback si no hay ID disponible (mantiene compatibilidad si el campo ACF fuese tipo URL/texto)
-                cambios.append("imagen_producto (vacío -> URL)")
+            if match_remoto.get('imagen') and match_remoto['imagen'] != meta.get('imagen_producto'):
+                cambios.append(f"imagen_producto ({meta.get('imagen_producto')} -> {match_remoto['imagen']})")
                 update_data["meta_data"].append({"key": "imagen_producto", "value": match_remoto['imagen']})
-
+            
             if cambios:
                 wcapi.put(f"products/{local['id']}", update_data)
                 summary_actualizados.append({"nombre": local['name'], "id": local['id'], "cambios": cambios})
@@ -439,6 +426,7 @@ def sincronizar(remotos):
                 {"key": "capacidad", "value": p['rom']},
                 {"key": "version", "value": p['ver']},
                 {"key": "fuente", "value": p['fuente']},
+                {"key": "imagen_producto", "value": p['imagen']},
                 {"key": "precio_actual", "value": str(p['p_act'])},
                 {"key": "precio_original", "value": str(p['p_reg'])},
                 {"key": "codigo_de_descuento", "value": p['cup']},
@@ -472,22 +460,6 @@ def sincronizar(remotos):
                         wcapi.put(f"products/{new_id}", {
                             "meta_data": [{"key": "url_post_acortada", "value": url_post_acortada}]
                         })
-
-                    # >>>>>>> CAMBIO PEDIDO: guardar imagen en ACF "imagen_producto" <<<<<<<
-                    # Guardamos el ID del adjunto importado por WooCommerce (si existe). Si no, guardamos la URL.
-                    try:
-                        img_id = None
-                        imgs = prod_res.get('images') or []
-                        if isinstance(imgs, list) and imgs:
-                            first = imgs[0] or {}
-                            if isinstance(first, dict) and first.get('id'):
-                                img_id = first.get('id')
-                        if img_id:
-                            wcapi.put(f"products/{new_id}", {"meta_data": [{"key": "imagen_producto", "value": str(img_id)}]})
-                        elif p.get('imagen'):
-                            wcapi.put(f"products/{new_id}", {"meta_data": [{"key": "imagen_producto", "value": p['imagen']}]})
-                    except Exception:
-                        pass
 
                     summary_creados.append({"nombre": p['nombre'], "id": new_id})
                     print(f"✅ CREADO -> {p['nombre']} (ID: {new_id})")
