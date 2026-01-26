@@ -75,10 +75,12 @@ summary_eliminados = []
 summary_ignorados = []
 summary_actualizados = []
 
+
 def limpiar_precio(texto):
     if not texto:
         return "0"
     return texto.replace("€", "").replace(".", "").replace(",", ".").strip()
+
 
 def acortar_url(url):
     try:
@@ -88,12 +90,65 @@ def acortar_url(url):
     except:
         return url
 
-def expandir_url(url):
-    try:
-        r = requests.get(url, allow_redirects=True, timeout=10, stream=True)
-        return r.url
-    except:
-        return url
+
+def expandir_url(url: str) -> str:
+    """Expande enlaces (acortadores/redirects) con fallback HEAD→GET."""
+    if not url:
+        return ""
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "es-ES,es;q=0.9",
+    }
+    s = requests.Session()
+
+    for _ in range(3):
+        # HEAD primero (más rápido)
+        try:
+            r = s.head(url, allow_redirects=True, headers=headers, timeout=12)
+            if getattr(r, "url", None):
+                return r.url
+        except Exception:
+            pass
+
+        # GET fallback
+        try:
+            r = s.get(url, allow_redirects=True, headers=headers, timeout=20)
+            if getattr(r, "url", None):
+                return r.url
+        except Exception:
+            pass
+
+        time.sleep(1.0)
+
+    return url
+
+
+def deswrap_url(url: str) -> str:
+    """Quita wrappers de afiliación y devuelve la URL destino real si viene en querystring."""
+    u = url or ""
+    for _ in range(5):
+        p = urllib.parse.urlparse(u)
+        host = (p.netloc or "").lower()
+        qs = urllib.parse.parse_qs(p.query)
+
+        candidate = None
+        # Tradedoubler: .../click?...&url=https%3A%2F%2F...
+        if "tradedoubler" in host and "url" in qs:
+            candidate = qs["url"][0]
+        # Tradetracker: ...?u=https%3A%2F%2F...
+        elif "tradetracker" in host and "u" in qs:
+            candidate = qs["u"][0]
+
+        if not candidate:
+            break
+
+        candidate = urllib.parse.unquote(candidate)
+        if candidate == u:
+            break
+        u = candidate
+
+    return u
+
 
 # --- GESTIÓN DE CATEGORÍAS ---
 def obtener_todas_las_categorias():
@@ -110,6 +165,7 @@ def obtener_todas_las_categorias():
             break
     return categorias
 
+
 def resolver_jerarquia(nombre_completo, cache_categorias):
     palabras = nombre_completo.split()
     nombre_padre = palabras[0]
@@ -119,94 +175,119 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
     foto_final = None
 
     for cat in cache_categorias:
-        if cat['name'].lower() == nombre_padre.lower() and cat['parent'] == 0:
-            id_cat_padre = cat['id']
+        if cat["name"].lower() == nombre_padre.lower() and cat["parent"] == 0:
+            id_cat_padre = cat["id"]
             break
-    if not id_cat_padre:
-        res = wcapi.post("products/categories", {"name": nombre_padre}).json()
-        id_cat_padre = res.get('id')
-        cache_categorias.append(res)
 
+    if not id_cat_padre:
+        payload = {"name": nombre_padre, "parent": 0}
+        r = wcapi.post("products/categories", payload)
+        if r.status_code in [200, 201]:
+            nueva = r.json()
+            id_cat_padre = nueva["id"]
+            cache_categorias.append(nueva)
+
+    # Buscar hijo exacto dentro del padre
     for cat in cache_categorias:
-        if cat['name'].lower() == nombre_hijo.lower() and cat['parent'] == id_cat_padre:
-            id_cat_hijo = cat['id']
-            if cat.get('image') and cat['image'].get('src'):
-                foto_final = cat['image']['src']
+        if cat["name"].lower() == nombre_hijo.lower() and cat["parent"] == id_cat_padre:
+            id_cat_hijo = cat["id"]
+            # intentar reutilizar imagen de la subcategoría si existe
+            img = cat.get("image") or {}
+            foto_final = img.get("src")
             break
+
     if not id_cat_hijo:
-        res = wcapi.post("products/categories", {"name": nombre_hijo, "parent": id_cat_padre}).json()
-        id_cat_hijo = res.get('id')
-        cache_categorias.append(res)
-    
+        payload = {"name": nombre_hijo, "parent": id_cat_padre}
+        r = wcapi.post("products/categories", payload)
+        if r.status_code in [200, 201]:
+            nueva = r.json()
+            id_cat_hijo = nueva["id"]
+            cache_categorias.append(nueva)
+
     return id_cat_padre, id_cat_hijo, foto_final
 
-# --- FASE 1: SCRAPING ---
+
+def obtener_productos_existentes():
+    productos = []
+    page = 1
+    while True:
+        res = wcapi.get("products", params={"per_page": 100, "page": page, "status": "publish"}).json()
+        if not res or "message" in res:
+            break
+        productos.extend(res)
+        if len(res) < 100:
+            break
+        page += 1
+    return productos
+
+
+def meta_get(meta_list, key):
+    for m in meta_list:
+        if m.get("key") == key:
+            return m.get("value")
+    return ""
+
+
+def producto_match(p_existente, p_nuevo):
+    meta = p_existente.get("meta_data", [])
+    nombre = p_existente.get("name", "").strip()
+
+    memoria = meta_get(meta, "memoria")
+    capacidad = meta_get(meta, "capacidad")
+    precio_actual = meta_get(meta, "precio_actual")
+    precio_original = meta_get(meta, "precio_original")
+    fuente = meta_get(meta, "fuente")
+    importado_de = _norm_import_id(meta_get(meta, "importado_de"))
+
+    return (
+        nombre.lower() == p_nuevo["nombre"].lower()
+        and (memoria or "").strip().lower() == p_nuevo["ram"].strip().lower()
+        and (capacidad or "").strip().lower() == p_nuevo["rom"].strip().lower()
+        and str(precio_original).strip() == str(p_nuevo["p_reg"]).strip()
+        and str(precio_actual).strip() == str(p_nuevo["p_act"]).strip()
+        and (fuente or "").strip().lower() == p_nuevo["fuente"].strip().lower()
+        and importado_de == ID_IMPORTACION_NORM
+    )
+
+
 def obtener_datos_remotos():
-    print("--- FASE 1: ESCANEANDO COMPRAS SMARTPHONE ---")
+    fuentes_6_principales = ["PcComponentes", "MediaMarkt", "AliExpress Plaza", "Amazon", "Fnac", "Phone House"]
 
-    def _label_pagina(url: str) -> str:
-        try:
-            path = urllib.parse.urlparse(url).path.rstrip("/")
-            if not path:
-                return "root"
-            # /ofertas, /ofertas/apple, /ofertas/samsung, ...
-            if path.endswith("/ofertas"):
-                return "ofertas"
-            return path.split("/")[-1] or "ofertas"
-        except Exception:
-            return "ofertas"
+    print("\n--- FASE 1: ESCANEANDO COMPRAS SMARTPHONE ---")
+    print("-" * 60)
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "es-ES,es;q=0.9",
-    }
-
-    # Deduplicamos por (nombre + ram + rom + fuente) para evitar dobles altas si el mismo producto aparece
-    # en varias páginas (ofertas + marca, etc.). Para trazabilidad, acumulamos el/los orígenes en 'paginas_origen'.
     productos_por_clave = {}
-    fuentes_6_principales = ["MediaMarkt", "AliExpress Plaza", "PcComponentes", "Fnac", "Amazon", "Phone House"]
+    total_paginas = len(URLS_PAGINAS)
 
-    if not URLS_PAGINAS:
-        print("ERROR: No hay URLs configuradas. Define SOURCE_URL_COMPRAS o COMPRAS_URLS.")
-        return []
-
-    for idx, url_listado in enumerate(URLS_PAGINAS, start=1):
-        label = _label_pagina(url_listado)
-        print("-" * 60)
-        print(f"Escaneando listado ({idx}/{len(URLS_PAGINAS)}): {url_listado}")
-
+    for i, url in enumerate(URLS_PAGINAS, start=1):
         try:
-            r = requests.get(url_listado, headers=headers, timeout=30)
-            soup = BeautifulSoup(r.text, "lxml")
-            items = soup.select("ul.grid li")
+            print(f"Escaneando listado ({i}/{total_paginas}): {url}")
+            html = requests.get(url, timeout=15).text
+            soup = BeautifulSoup(html, "html.parser")
+
+            items = soup.select("div.flex.flex-col.gap-4.rounded-2xl.bg-gray-800")
             print(f"✅ Items detectados: {len(items)}")
 
             for item in items:
                 try:
-                    link_el = item.select_one("a.text-white")
-                    if not link_el:
+                    # Nombre
+                    nombre = item.select_one("h2").get_text(strip=True)
+
+                    # Ignorar tablets/relojes: si hay TAB o IPAD en el nombre
+                    nombre_upper = nombre.upper()
+                    if " TAB" in f" {nombre_upper} " or " IPAD" in f" {nombre_upper} ":
                         continue
 
-                    raw_nombre = link_el.get_text(strip=True)
-                    nombre = ' '.join(w[:1].upper() + w[1:] for w in raw_nombre.split())
-
-                    if any(k in nombre.upper() for k in ["TAB", "IPAD", "PAD"]):
+                    # RAM/ROM (debe existir si es móvil)
+                    data = item.select_one("p.text-white.text-sm").get_text(strip=True)
+                    if "/" not in data:
+                        # si no tiene memoria/capacidad, no se importa
                         continue
 
-                    img = item.select_one("img")
-                    img_src = img["src"] if img else ""
-                    if "url=" in img_src:
-                        parsed_img = urllib.parse.parse_qs(urllib.parse.urlparse(img_src).query)
-                        if "url" in parsed_img:
-                            img_src = parsed_img["url"][0]
+                    ram_part, rom_part = data.split("/")
+                    ram_part = ram_part.replace("RAM", "").strip()
+                    rom_part = rom_part.replace("ROM", "").strip()
 
-                    specs_text = item.select_one("p.text-sm").get_text(strip=True) if item.select_one("p.text-sm") else ""
-                    parts = specs_text.split("·")[0].replace("GB", "").split("/")
-                    if len(parts) < 2:
-                        continue
-
-                    ram_part = parts[0].strip()
-                    rom_part = parts[1].strip()
                     ram = ram_part if "TB" in ram_part else f"{ram_part} GB"
                     rom = rom_part if "TB" in rom_part else f"{rom_part} GB"
 
@@ -215,7 +296,9 @@ def obtener_datos_remotos():
 
                     btn = item.select_one("a.bg-fluor-green")
                     url_imp = btn["href"] if btn else ""
-                    url_exp = expandir_url(url_imp)
+                    url_exp_raw = expandir_url(url_imp)
+                    url_exp = deswrap_url(url_exp_raw)
+                    enlace_de_compra_importado = url_exp  # ACF: SIEMPRE expandido
 
                     fuente = btn.get_text(strip=True).replace("Cómpralo en", "").strip() if btn else "Tienda"
                     url_importada_sin_afiliado = url_exp
@@ -279,6 +362,10 @@ def obtener_datos_remotos():
                         else "OFERTA PROMO"
                     )
 
+                    # Imagen
+                    img = item.select_one("img")
+                    img_src = img["src"] if img and img.get("src") else ""
+
                     # --- LOGS DETALLADOS SOLICITADOS ---
                     print(f"Detectado {nombre}")
                     print(f"1) Nombre: {nombre}")
@@ -301,6 +388,7 @@ def obtener_datos_remotos():
                     print("-" * 60)
                     # -----------------------------------
 
+                    # clave para evitar duplicados en remoto
                     clave = f"{nombre}|{ram}|{rom}|{fuente}".lower()
                     if clave not in productos_por_clave:
                         productos_por_clave[clave] = {
@@ -314,163 +402,161 @@ def obtener_datos_remotos():
                             "cup": cup,
                             "url_exp": url_exp,
                             "url_imp": url_imp,
+                            "enlace_de_compra_importado": enlace_de_compra_importado,
                             "url_importada_sin_afiliado": url_importada_sin_afiliado,
                             "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
                             "url_oferta": url_oferta,
                             "imagen": img_src,
                             "enviado_desde": enviado_desde,
                             "enviado_desde_tg": enviado_desde_tg,
-                            "paginas_origen": {label},
+                            "paginas_origen": {url},
                         }
                     else:
-                        # Si ya existía, agregamos origen adicional para trazabilidad.
-                        productos_por_clave[clave].setdefault("paginas_origen", set()).add(label)
+                        productos_por_clave[clave]["paginas_origen"].add(url)
 
-                except Exception:
+                except Exception as e:
                     continue
 
         except Exception as e:
-            print(f"❌ ERROR escaneando listado '{url_listado}': {e}")
+            print(f"❌ Error al escanear {url}: {e}")
             continue
 
-    productos_lista = []
-    for p in productos_por_clave.values():
-        paginas = p.get("paginas_origen")
-        if isinstance(paginas, set):
-            p["paginas_origen"] = ",".join(sorted(paginas))
-        productos_lista.append(p)
+    return list(productos_por_clave.values())
 
-    return productos_lista
 
-# --- FASE 2: SINCRONIZACIÓN ---
 def sincronizar(remotos):
-    print("\n--- FASE 2: Sincronizando con WooCommerce ---")
     cache_categorias = obtener_todas_las_categorias()
-    locales_wc = []
-    page = 1
-    while True:
-        try:
-            res = wcapi.get("products", params={"per_page": 100, "page": page, "status": "any"}).json()
-            if not res or len(res) == 0:
-                break
-            locales_wc.extend(res)
-            page += 1
-        except:
-            break
+    existentes = obtener_productos_existentes()
 
-    propios_en_wc = []
-    for p in locales_wc:
-        meta = {m.get('key'): m.get('value') for m in (p.get('meta_data') or []) if isinstance(m, dict)}
-        imp = _norm_import_id(str(meta.get('importado_de', '') or ''))
-        if imp == ID_IMPORTACION_NORM:
-            propios_en_wc.append(p)
-
-    for local in propios_en_wc:
-        meta = {m['key']: str(m['value']) for m in local.get('meta_data', [])}
-        
-        match_remoto = next((r for r in remotos if r['nombre'].lower() == local['name'].lower() and 
-                             str(r['ram']).lower() == str(meta.get('memoria')).lower() and 
-                             str(r['rom']).lower() == str(meta.get('capacidad')).lower() and 
-                             str(r['fuente']).lower() == str(meta.get('fuente')).lower()), None)
-        
-        if match_remoto:
-            cambios = []
-            update_data = {"meta_data": []}
-            
-            try:
-                if float(match_remoto['p_act']) != float(meta.get('precio_actual', 0)):
-                    cambios.append(f"precio_actual ({meta.get('precio_actual')} -> {match_remoto['p_act']})")
-                    update_data["sale_price"] = str(match_remoto['p_act'])
-                    update_data["meta_data"].append({"key": "precio_actual", "value": str(match_remoto['p_act'])})
-            except Exception:
-                pass
-            
-            try:
-                if float(match_remoto['p_reg']) != float(meta.get('precio_original', 0)):
-                    cambios.append(f"precio_original ({meta.get('precio_original')} -> {match_remoto['p_reg']})")
-                    update_data["regular_price"] = str(match_remoto['p_reg'])
-                    update_data["meta_data"].append({"key": "precio_original", "value": str(match_remoto['p_reg'])})
-            except Exception:
-                pass
-
-            if match_remoto['enviado_desde_tg'] != meta.get('enviado_desde_tg'):
-                cambios.append(f"enviado_desde_tg ({meta.get('enviado_desde_tg')} -> {match_remoto['enviado_desde_tg']})")
-                update_data["meta_data"].append({"key": "enviado_desde_tg", "value": match_remoto['enviado_desde_tg']})
-            
-            if match_remoto.get('imagen') and match_remoto['imagen'] != meta.get('imagen_producto'):
-                cambios.append(f"imagen_producto ({meta.get('imagen_producto')} -> {match_remoto['imagen']})")
-                update_data["meta_data"].append({"key": "imagen_producto", "value": match_remoto['imagen']})
-            
-            if cambios:
-                wcapi.put(f"products/{local['id']}", update_data)
-                summary_actualizados.append({"nombre": local['name'], "id": local['id'], "cambios": cambios})
-                print(f"🔄 ACTUALIZADO -> {local['name']} (ID: {local['id']})")
-            else:
-                summary_ignorados.append({"nombre": local['name'], "id": local['id']})
-            
-            remotos.remove(match_remoto)
-        else:
-            wcapi.delete(f"products/{local['id']}", params={"force": True})
-            summary_eliminados.append({"nombre": local['name'], "id": local['id']})
-            print(f"🗑️ ELIMINADO -> {local['name']} (ID: {local['id']})")
-
+    # Conjunto de claves remotas para detectar obsoletos por importado_de + identidad (nombre+ram+rom+fuente)
+    claves_remotas = set()
     for p in remotos:
-        id_cat_padre, id_cat_hijo, _ = resolver_jerarquia(p['nombre'], cache_categorias)
+        clave = f"{p['nombre']}|{p['ram']}|{p['rom']}|{p['fuente']}".lower()
+        claves_remotas.add(clave)
+
+    # 1) Crear/actualizar
+    for p in remotos:
+        # Buscar si ya existe un producto idéntico (según reglas del proyecto)
+        encontrado_id = None
+        encontrado = None
+
+        for ex in existentes:
+            meta = ex.get("meta_data", [])
+            importado_de = _norm_import_id(meta_get(meta, "importado_de"))
+            if importado_de != ID_IMPORTACION_NORM:
+                continue
+
+            # comparar por identidad mínima (nombre + memoria + capacidad + fuente)
+            nombre = ex.get("name", "").strip()
+            memoria = (meta_get(meta, "memoria") or "").strip()
+            capacidad = (meta_get(meta, "capacidad") or "").strip()
+            fuente = (meta_get(meta, "fuente") or "").strip()
+
+            if (
+                nombre.lower() == p["nombre"].lower()
+                and memoria.lower() == p["ram"].lower()
+                and capacidad.lower() == p["rom"].lower()
+                and fuente.lower() == p["fuente"].lower()
+            ):
+                encontrado_id = ex["id"]
+                encontrado = ex
+                break
+
+        # Si existe y es idéntico en TODOS los campos a comparar => ignorado
+        if encontrado and producto_match(encontrado, p):
+            summary_ignorados.append({"nombre": p["nombre"], "id": encontrado_id})
+            continue
+
+        # Resolver categorías
+        id_cat_padre, id_cat_hijo, foto_subcat = resolver_jerarquia(p["nombre"], cache_categorias)
+
+        # Foto: reutilizar subcat si existe, si no usar imagen del producto (si la trae)
+        if foto_subcat:
+            imagen_final = foto_subcat
+        else:
+            imagen_final = p["imagen"]
+
+        # Payload producto
         data = {
-            "name": p['nombre'], "type": "simple", "status": "publish", "regular_price": str(p['p_reg']), "sale_price": str(p['p_act']),
-            "categories": [{"id": id_cat_padre}, {"id": id_cat_hijo}] if id_cat_hijo else [{"id": id_cat_padre}],
-            "images": [{"src": p['imagen']}] if p['imagen'] else [],
+            "name": p["nombre"],
+            "type": "external",
+            "status": "publish",
+            "regular_price": str(p["p_reg"]),
+            "sale_price": str(p["p_act"]),
+            "external_url": p["url_oferta"],
+            "button_text": "Comprar oferta",
+            "categories": [{"id": id_cat_hijo}] if id_cat_hijo else [{"id": id_cat_padre}],
+            "images": [{"src": imagen_final}] if imagen_final else [],
             "meta_data": [
                 {"key": "importado_de", "value": ID_IMPORTACION_NORM},
-                {"key": "memoria", "value": p['ram']},
-                {"key": "capacidad", "value": p['rom']},
-                {"key": "version", "value": p['ver']},
-                {"key": "fuente", "value": p['fuente']},
+                {"key": "memoria", "value": p["ram"]},
+                {"key": "capacidad", "value": p["rom"]},
+                {"key": "version", "value": p["ver"]},
+                {"key": "fuente", "value": p["fuente"]},
                 {"key": "imagen_producto", "value": p["imagen"]},
-                {"key": "precio_actual", "value": str(p['p_act'])},
-                {"key": "precio_original", "value": str(p['p_reg'])},
-                {"key": "codigo_de_descuento", "value": p['cup']},
-                {"key": "enlace_de_compra_importado", "value": p['url_imp']},
-                {"key": "url_oferta_sin_acortar", "value": p['url_exp']},
-                {"key": "url_importada_sin_afiliado", "value": p['url_importada_sin_afiliado']},
-                {"key": "url_sin_acortar_con_mi_afiliado", "value": p['url_sin_acortar_con_mi_afiliado']},
-                {"key": "url_oferta", "value": p['url_oferta']},
-                {"key": "enviado_desde", "value": p['enviado_desde']},
-                {"key": "enviado_desde_tg", "value": p['enviado_desde_tg']}
-            ]
+                {"key": "precio_actual", "value": str(p["p_act"])},
+                {"key": "precio_original", "value": str(p["p_reg"])},
+                {"key": "codigo_de_descuento", "value": p["cup"]},
+                {"key": "enlace_de_compra_importado", "value": p.get("enlace_de_compra_importado", p.get("url_exp", ""))},
+                {"key": "url_oferta_sin_acortar", "value": p.get("url_exp", "")},
+                {"key": "url_importada_sin_afiliado", "value": p["url_importada_sin_afiliado"]},
+                {"key": "url_sin_acortar_con_mi_afiliado", "value": p["url_sin_acortar_con_mi_afiliado"]},
+                {"key": "url_oferta", "value": p["url_oferta"]},
+                {"key": "enviado_desde", "value": p["enviado_desde"]},
+                {"key": "enviado_desde_tg", "value": p["enviado_desde_tg"]},
+                {"key": "fecha", "value": datetime.now().strftime("%d/%m/%Y")},
+            ],
         }
 
         intentos = 0
         max_intentos = 10
         creado = False
-        
+
         while intentos < max_intentos and not creado:
             intentos += 1
-            print(f"    ⏳ Intentando crear {p['nombre']} (Intento {intentos}/{max_intentos})...", flush=True)
             try:
-                res = wcapi.post("products", data)
-                if res.status_code in [200, 201]:
-                    prod_res = res.json()
-                    new_id = prod_res['id']
-                    product_url = prod_res.get('permalink')
-
-                    # Acortar URL del post en la web propia si existe
-                    url_post_acortada = acortar_url(product_url) if product_url else ""
-                    if url_post_acortada:
-                        wcapi.put(f"products/{new_id}", {
-                            "meta_data": [{"key": "url_post_acortada", "value": url_post_acortada}]
-                        })
-
-                    summary_creados.append({"nombre": p['nombre'], "id": new_id})
-                    print(f"✅ CREADO -> {p['nombre']} (ID: {new_id})")
-                    creado = True
+                if encontrado_id:
+                    r = wcapi.put(f"products/{encontrado_id}", data)
+                    if r.status_code in [200, 201]:
+                        summary_actualizados.append({"nombre": p["nombre"], "id": encontrado_id, "cambios": ["precio/meta"]})
+                        creado = True
+                        break
                 else:
-                    print(f"⚠️ Error {res.status_code} al crear {p['nombre']}. Reintentando...", flush=True)
-            except Exception as e:
-                print(f"❌ Excepción durante la creación. Reintentando...", flush=True)
-            
+                    r = wcapi.post("products", data)
+                    if r.status_code in [200, 201]:
+                        nuevo = r.json()
+                        summary_creados.append({"nombre": p["nombre"], "id": nuevo["id"]})
+                        creado = True
+                        break
+            except Exception:
+                pass
+
             time.sleep(15)
 
+        if not creado:
+            print(f"❌ No se pudo crear/actualizar: {p['nombre']}")
+
+    # 2) Eliminar obsoletos: SOLO los que son de esta importación y no están en remoto
+    for ex in existentes:
+        meta = ex.get("meta_data", [])
+        importado_de = _norm_import_id(meta_get(meta, "importado_de"))
+        if importado_de != ID_IMPORTACION_NORM:
+            continue
+
+        nombre = ex.get("name", "").strip()
+        memoria = (meta_get(meta, "memoria") or "").strip()
+        capacidad = (meta_get(meta, "capacidad") or "").strip()
+        fuente = (meta_get(meta, "fuente") or "").strip()
+
+        clave = f"{nombre}|{memoria}|{capacidad}|{fuente}".lower()
+        if clave not in claves_remotas:
+            try:
+                wcapi.delete(f"products/{ex['id']}", params={"force": True})
+                summary_eliminados.append({"nombre": nombre, "id": ex["id"]})
+            except:
+                pass
+
+    # Resumen final
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n============================================================")
     print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})")
@@ -488,13 +574,15 @@ def sincronizar(remotos):
     for item in summary_ignorados:
         print(f"- {item['nombre']} (ID: {item['id']})")
     print(f"============================================================")
-    
+
+
 def main():
     remotos = obtener_datos_remotos()
     if remotos:
         sincronizar(remotos)
     else:
         print("No se han obtenido productos remotos.")
+
 
 if __name__ == "__main__":
     main()
