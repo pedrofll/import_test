@@ -426,7 +426,7 @@ def sincronizar(remotos):
                 {"key": "capacidad", "value": p['rom']},
                 {"key": "version", "value": p['ver']},
                 {"key": "fuente", "value": p['fuente']},
-                {"key": "imagen_producto", "value": p['imagen']},
+                {"key": "imagen_producto", "value": p['img_src']},
                 {"key": "precio_actual", "value": str(p['p_act'])},
                 {"key": "precio_original", "value": str(p['p_reg'])},
                 {"key": "codigo_de_descuento", "value": p['cup']},
