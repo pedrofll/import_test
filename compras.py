@@ -1,9 +1,11 @@
+Aquí tienes el **archivo completo** ya corregido. Descarga: [compras_fix.py](sandbox:/mnt/data/compras_fix.py)
+
+```python
 # scraper_compras.py
 import os
 import time
 import requests
 import urllib.parse
-import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from woocommerce import API
@@ -149,70 +151,6 @@ def deswrap_url(url: str) -> str:
         u = candidate
 
     return u
-
-
-def extraer_url_embebida(url: str) -> str:
-    """
-    Extrae una URL real embebida en parámetros típicos de afiliados (url=, u=, redirect=...).
-    Maneja casos sin encoding (url=https://...) y con encoding (url=https%3A%2F%2F...).
-    """
-    if not url:
-        return ""
-
-    low = url.lower()
-    for key in ("url=", "u=", "redirect=", "dest=", "destination=", "target=", "to="):
-        kidx = low.find(key)
-        if kidx != -1:
-            tail = url[kidx + len(key):]
-            tail = tail.split("&")[0]  # cortar por & si existe
-            return urllib.parse.unquote(tail).strip()
-
-    # fallback parse_qs (si no hay '&' "rotos")
-    try:
-        p = urllib.parse.urlparse(url)
-        qs = urllib.parse.parse_qs(p.query)
-        for k in ("url", "u", "redirect", "dest", "destination", "target", "to"):
-            if k in qs and qs[k]:
-                return urllib.parse.unquote(qs[k][0]).strip()
-    except Exception:
-        pass
-
-    return ""
-
-
-def resolver_url_producto(url_imp: str) -> tuple[str, str]:
-    """
-    SIEMPRE devuelve:
-      - url_raw: expandida (acortadores/redirects) pero aún puede venir con wrapper
-      - url_final: destino real (unwrap + expand)
-    """
-    if not url_imp:
-        return "", ""
-
-    url_raw = expandir_url(url_imp)
-
-    # 1) unwrap directo (cuando viene url= en query ya parseable)
-    u = deswrap_url(url_raw)
-
-    # 2) si sigue wrapper, intentar extraer URL embebida manualmente (url=https://...)
-    if u == url_raw:
-        emb = extraer_url_embebida(url_raw)
-        if emb:
-            u = emb
-
-    u = deswrap_url(u)
-
-    # 3) expand final (por si emb lleva redirects)
-    url_final = expandir_url(u)
-
-    # 4) último intento: si aún es wrapper, volver a extraer embebida
-    host = (urllib.parse.urlparse(url_final).netloc or "").lower()
-    if any(x in host for x in ("tradedoubler", "tradetracker")):
-        emb2 = extraer_url_embebida(url_final)
-        if emb2:
-            url_final = expandir_url(deswrap_url(emb2))
-
-    return url_raw, url_final
 
 
 # --- GESTIÓN DE CATEGORÍAS ---
@@ -361,12 +299,9 @@ def obtener_datos_remotos():
 
                     btn = item.select_one("a.bg-fluor-green")
                     url_imp = btn["href"] if btn else ""
-
-                    # ✅ SIEMPRE: resolver acortador + unwrap de afiliados (tradedoubler, etc.)
-                    url_exp_raw, url_exp = resolver_url_producto(url_imp)
-
-                    # ACF: SIEMPRE expandido (destino real)
-                    enlace_de_compra_importado = url_exp
+                    url_exp_raw = expandir_url(url_imp)
+                    url_exp = deswrap_url(url_exp_raw)
+                    enlace_de_compra_importado = url_exp  # ACF: SIEMPRE expandido
 
                     fuente = btn.get_text(strip=True).replace("Cómpralo en", "").strip() if btn else "Tienda"
                     url_importada_sin_afiliado = url_exp
@@ -448,7 +383,6 @@ def obtener_datos_remotos():
                     print(f"10) URL Imagen: {img_src}")
                     print(f"11) Enlace Importado: {url_imp}")
                     print(f"12) Enlace Expandido: {url_exp}")
-                    print(f"12b) Enlace Expandido Raw: {url_exp_raw}")
                     print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
                     print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
                     print(f"15) URL acortada con mi afiliado: {url_oferta}")
@@ -470,7 +404,6 @@ def obtener_datos_remotos():
                             "fuente": fuente,
                             "cup": cup,
                             "url_exp": url_exp,
-                            "url_exp_raw": url_exp_raw,
                             "url_imp": url_imp,
                             "enlace_de_compra_importado": enlace_de_compra_importado,
                             "url_importada_sin_afiliado": url_importada_sin_afiliado,
@@ -656,3 +589,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
