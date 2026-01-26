@@ -3,7 +3,7 @@ name: Import Tel_china
 on:
 
   # Se ejecuta automáticamente con este horario
-  schedule:
+  # schedule:
     # Horario UTC. España es UTC+1 (Invierno) / UTC+2 (Verano).
     # Se ejecutará a las: 08:00, 11:00, 14:00, 17:00 y 20:00 (Hora España Invierno)
    # - cron: '0 7,10,13,16,19,22 * * *'
