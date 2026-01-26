@@ -329,12 +329,12 @@ async def gestionar_obsoletos():
                     try:
                         fecha_prod = datetime.strptime(fecha_str, "%Y-%m-%d")
                         dias_dif = (hoy_dt - fecha_prod).days
-                        if dias_dif >= 3:
-                            print(f"Obsoleto - fecha igual o superior a 3 días desde su creación: {p_nombre}")
+                        if dias_dif >= 5:
+                            print(f"Obsoleto - fecha igual o superior a 5 días desde su creación: {p_nombre}")
                             wcapi.delete(f"products/{p_id}", params={"force": True})
                             summary_eliminados.append({"nombre": p_nombre, "id": p_id})
                         else:
-                            print(f"No se elimina - fecha inferior a 3 días desde su creación: {p_nombre}")
+                            print(f"No se elimina - fecha inferior a 5 días desde su creación: {p_nombre}")
                     except Exception:
                         pass
     except Exception as e:
