@@ -1,0 +1,54 @@
+name: Import Tel_china
+
+on:
+
+  # Se ejecuta automáticamente con este horario
+  schedule:
+    # Horario UTC. España es UTC+1 (Invierno) / UTC+2 (Verano).
+    # Se ejecutará a las: 08:00, 11:00, 14:00, 17:00 y 20:00 (Hora España Invierno)
+   # - cron: '0 7,10,13,16,19,22 * * *'
+
+  # Te permite ejecutarlo manualmente con un botón si lo necesitas probar ya
+  workflow_dispatch:
+  
+  # --- SOLUCIÓN AL ERROR 403 ---
+permissions:
+  actions: write
+  contents: read
+# -----------------------------
+
+jobs:
+  ejecutar-scraper:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Descargar código
+      uses: actions/checkout@v3
+
+    - name: Configurar Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Instalar librerías
+      run: |
+        python -m pip install --upgrade pip
+        # Instalamos las librerías que usa tu script
+        pip install requests beautifulsoup4 woocommerce lxml
+
+    - name: Ejecutar Script
+      env:
+        # Aquí inyectamos los secretos que ya creaste
+        WP_URL: ${{ secrets.WP_URL }}
+        WP_KEY: ${{ secrets.WP_KEY }}
+        WP_SECRET: ${{ secrets.WP_SECRET }}
+      run: python Tel_china.py
+
+    # --- LIMPIEZA AUTOMÁTICA ---
+    - name: 🧹 Borrar historiales antiguos
+      uses: Mattraks/delete-workflow-runs@v2
+      with:
+        token: ${{ github.token }}
+        repository: ${{ github.repository }}
+        retain_days: 7       # Mantiene solo 1 semana de historial
+        keep_minimum_runs: 6 # Guarda mínimo las últimas 6 ejecuciones por seguridad
