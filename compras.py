@@ -426,7 +426,7 @@ def sincronizar(remotos):
                 {"key": "capacidad", "value": p['rom']},
                 {"key": "version", "value": p['ver']},
                 {"key": "fuente", "value": p['fuente']},
-                {"key": "imagen_producto", "value": p['imagen_producto']},
+                {"key": "imagen_producto", "value": p["imagen"]},
                 {"key": "precio_actual", "value": str(p['p_act'])},
                 {"key": "precio_original", "value": str(p['p_reg'])},
                 {"key": "codigo_de_descuento", "value": p['cup']},
@@ -469,7 +469,7 @@ def sincronizar(remotos):
             except Exception as e:
                 print(f"❌ Excepción durante la creación. Reintentando...", flush=True)
             
-            time.sleep(60)
+            time.sleep(15)
 
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n============================================================")
