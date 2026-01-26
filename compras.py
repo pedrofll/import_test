@@ -69,6 +69,9 @@ ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
 
+# >>>>>>> CAMBIO PEDIDO: afiliado Xiaomi Store desde GitHub Secrets/Variables <<<<<<<
+ID_AFILIADO_XIAOMI_STORE = os.environ.get("ID_AFILIADO_XIAOMI_STORE", "")
+
 # Acumuladores globales
 summary_creados = []
 summary_eliminados = []
@@ -229,6 +232,9 @@ def obtener_datos_remotos():
                         )
                     elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
                         url_importada_sin_afiliado = url_exp.split("?")[0]
+                    # >>>>>>> CAMBIO PEDIDO: Xiaomi Store / Mi Store -> cortar en "?" <<<<<<<
+                    elif fuente in ["Xiaomi Store", "Mi Store"]:
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
                     else:
                         url_importada_sin_afiliado = url_exp
 
@@ -241,6 +247,9 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
+                    # >>>>>>> CAMBIO PEDIDO: Xiaomi Store / Mi Store -> añadir tu afiliado <<<<<<<
+                    elif fuente in ["Xiaomi Store", "Mi Store"] and ID_AFILIADO_XIAOMI_STORE:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
                     else:
                         url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
