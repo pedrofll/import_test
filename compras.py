@@ -70,34 +70,7 @@ ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
 
 # >>>>>>> CAMBIO PEDIDO: afiliado Xiaomi Store desde GitHub Secrets/Variables <<<<<<<
-# Lee exactamente AFF_XIAOMI_STORE
-ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "").strip()
-
-
-def _append_afiliado(url_base: str, afiliado: str) -> str:
-    """
-    Añade el afiliado a la URL base de forma segura.
-    - Si afiliado empieza por '?' o '&' se concatena tal cual.
-    - Si no, se añade '?' o '&' según corresponda.
-    """
-    if not url_base:
-        return url_base
-    if not afiliado:
-        return url_base
-
-    afiliado = afiliado.strip()
-    if not afiliado:
-        return url_base
-
-    if afiliado[0] in ("?", "&"):
-        return f"{url_base}{afiliado}"
-
-    # Si ya hay query, añade con &
-    if "?" in url_base:
-        return f"{url_base}&{afiliado}"
-
-    return f"{url_base}?{afiliado}"
-
+ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
 
 # Acumuladores globales
 summary_creados = []
@@ -173,9 +146,6 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
 # --- FASE 1: SCRAPING ---
 def obtener_datos_remotos():
     print("--- FASE 1: ESCANEANDO COMPRAS SMARTPHONE ---")
-
-    # Debug NO sensible: confirma si llega la variable (sin imprimir su contenido)
-    print(f"[DBG] AFF_XIAOMI_STORE disponible: {bool(ID_AFILIADO_XIAOMI_STORE)} (len={len(ID_AFILIADO_XIAOMI_STORE)})")
 
     def _label_pagina(url: str) -> str:
         try:
@@ -277,9 +247,9 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
-                    # >>>>>>> CAMBIO PEDIDO: Xiaomi Store / Mi Store -> añadir tu afiliado <<<<<<<
+                    # >>>>>>> CAMBIO PEDIDO: Xiaomi Store / Mi Store -> añadir afiliado <<<<<<<
                     elif fuente in ["Xiaomi Store", "Mi Store"] and ID_AFILIADO_XIAOMI_STORE:
-                        url_sin_acortar_con_mi_afiliado = _append_afiliado(url_importada_sin_afiliado, ID_AFILIADO_XIAOMI_STORE)
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
                     else:
                         url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
