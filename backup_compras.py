@@ -397,6 +397,10 @@ def sincronizar(remotos):
                 cambios.append(f"enviado_desde_tg ({meta.get('enviado_desde_tg')} -> {match_remoto['enviado_desde_tg']})")
                 update_data["meta_data"].append({"key": "enviado_desde_tg", "value": match_remoto['enviado_desde_tg']})
             
+            if match_remoto.get('imagen') and match_remoto['imagen'] != meta.get('imagen_producto'):
+                cambios.append(f"imagen_producto ({meta.get('imagen_producto')} -> {match_remoto['imagen']})")
+                update_data["meta_data"].append({"key": "imagen_producto", "value": match_remoto['imagen']})
+            
             if cambios:
                 wcapi.put(f"products/{local['id']}", update_data)
                 summary_actualizados.append({"nombre": local['name'], "id": local['id'], "cambios": cambios})
@@ -422,6 +426,7 @@ def sincronizar(remotos):
                 {"key": "capacidad", "value": p['rom']},
                 {"key": "version", "value": p['ver']},
                 {"key": "fuente", "value": p['fuente']},
+                {"key": "imagen_producto", "value": p["imagen"]},
                 {"key": "precio_actual", "value": str(p['p_act'])},
                 {"key": "precio_original", "value": str(p['p_reg'])},
                 {"key": "codigo_de_descuento", "value": p['cup']},
@@ -464,7 +469,7 @@ def sincronizar(remotos):
             except Exception as e:
                 print(f"❌ Excepción durante la creación. Reintentando...", flush=True)
             
-            time.sleep(60)
+            time.sleep(15)
 
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n============================================================")
