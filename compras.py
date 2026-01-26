@@ -70,7 +70,7 @@ ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
 
 # >>>>>>> CAMBIO PEDIDO: afiliado Xiaomi Store desde GitHub Secrets/Variables <<<<<<<
-ID_AFILIADO_XIAOMI_STORE = os.environ.get("ID_AFILIADO_XIAOMI_STORE", "")
+ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
 
 # Acumuladores globales
 summary_creados = []
