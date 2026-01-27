@@ -5,6 +5,7 @@ import requests
 import urllib.parse
 import json
 import re
+import base64
 from datetime import datetime
 from bs4 import BeautifulSoup
 from woocommerce import API
@@ -249,6 +250,48 @@ def expandir_url(url: str) -> str:
         m = re.search(r'location\.replace\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
         if m:
             return urllib.parse.urljoin(base_url, m.group(1).strip())
+        # atob('...') base64 (común en acortadores)
+        m = re.search(r'atob\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
+        if m:
+            try:
+                b64 = m.group(1).strip()
+                # padding
+                pad = '=' * (-len(b64) % 4)
+                decoded = base64.b64decode((b64 + pad).encode('utf-8', 'ignore')).decode('utf-8', 'ignore')
+                # preferir El Corte Inglés si aparece en el decodificado
+                mm = re.search(r'https?://(?:www\.)?elcorteingles\.es/[^\s"\']+', decoded, re.I)
+                if mm:
+                    return mm.group(0).strip()
+                mm = re.search(r'https?://[^\s"\']+', decoded, re.I)
+                if mm:
+                    return mm.group(0).strip()
+            except Exception:
+                pass
+
+        # decodeURIComponent('...') (URL-encoded dentro de JS)
+        m = re.search(r'decodeURIComponent\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
+        if m:
+            try:
+                dec = urllib.parse.unquote(m.group(1).strip())
+                mm = re.search(r'https?://(?:www\.)?elcorteingles\.es/[^\s"\']+', dec, re.I)
+                if mm:
+                    return mm.group(0).strip()
+                mm = re.search(r'https?://[^\s"\']+', dec, re.I)
+                if mm:
+                    return mm.group(0).strip()
+            except Exception:
+                pass
+
+        # URLs escapadas en JSON (https:\/\/www.elcorteingles.es\/)
+        m = re.search(r'https?:\\/\\/(?:www\\.)?elcorteingles\\.es\\/[^\s"\']+', html, re.I)
+        if m:
+            return m.group(0).replace('\\/','/').replace('\\','').strip()
+
+        # Protocolo relativo: //www.elcorteingles.es/...
+        m = re.search(r'//(?:www\.)?elcorteingles\.es/[^\s"\']+', html, re.I)
+        if m:
+            return "https:" + m.group(0).strip()
+
 
         # Preferir El Corte Inglés si aparece
         m = re.search(r'https?://(?:www\.)?elcorteingles\.es/[^\s"\']+', html, re.I)
@@ -451,6 +494,8 @@ def obtener_datos_remotos():
                             url_exp.split(".html")[0] + ".html" if ".html" in url_exp else url_exp.split("?")[0]
                         )
                     elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
+                    elif fuente == "Xiaomi Store":
                         url_importada_sin_afiliado = url_exp.split("?")[0]
                     else:
                         url_importada_sin_afiliado = url_exp
