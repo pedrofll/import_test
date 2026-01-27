@@ -499,6 +499,7 @@ def obtener_datos_remotos():
                     url_exp = expandir_url(url_imp)
 
                     fuente = btn.get_text(strip=True).replace("Cómpralo en", "").strip() if btn else "Tienda"
+                    fuente_norm = (fuente or "").strip().lower()
                     url_importada_sin_afiliado = url_exp
 
                     # Normalización de URL sin parámetros según fuente
@@ -510,12 +511,16 @@ def obtener_datos_remotos():
                         )
                     elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
                         url_importada_sin_afiliado = url_exp.split("?")[0]
-                    elif fuente == "Xiaomi Store":
+                    elif fuente_norm == "xiaomi store":
                         url_importada_sin_afiliado = url_exp.split("?")[0]
-                    elif fuente == "Joom":
+                    elif fuente_norm == "joom" or "joom.com/" in (url_exp or ""):
                         url_importada_sin_afiliado = url_exp.split("?")[0]
                     else:
                         url_importada_sin_afiliado = url_exp
+
+                    # Seguridad extra: Joom siempre sin query
+                    if (fuente_norm == "joom") or ("joom.com/" in (url_exp or "")):
+                        url_importada_sin_afiliado = (url_exp or "").split("?")[0]
 
                     # Construir URL con afiliado usando variables de entorno
                     if fuente == "MediaMarkt" and ID_AFILIADO_MEDIAMARKT:
@@ -663,6 +668,7 @@ def obtener_datos_remotos():
                     url_exp = expandir_url(url_imp)
 
                     fuente = (data.get("fuente") or "").strip() or "Tienda"
+                    fuente_norm = (fuente or "").strip().lower()
                     url_importada_sin_afiliado = url_exp
 
                     # Normalización de URL sin parámetros según fuente
@@ -674,6 +680,9 @@ def obtener_datos_remotos():
                         )
                     elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House", "El Corte Inglés", "Joom"]:
                         url_importada_sin_afiliado = url_exp.split("?")[0]
+                    # Seguridad extra: Joom siempre sin query
+                    if (fuente_norm == "joom") or ("joom.com/" in (url_exp or "")):
+                        url_importada_sin_afiliado = (url_exp or "").split("?")[0]
                     else:
                         url_importada_sin_afiliado = url_exp.split("?")[0] if url_exp else url_exp
 
