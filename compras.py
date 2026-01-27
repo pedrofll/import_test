@@ -88,12 +88,60 @@ def acortar_url(url):
     except:
         return url
 
-def expandir_url(url):
+def expandir_url(url: str) -> str:
+    """
+    Expande enlaces siguiendo redirects.
+    Soporta el formato "pdt.tradedoubler.com/click?a(....)p(....)url(....)" (paréntesis)
+    convirtiéndolo a un enlace estándar de Tradedoubler para que requests pueda seguir el 302.
+    """
+    if not url:
+        return ""
+
+    u = str(url).strip()
+
+    # 1) Caso especial: Tradedoubler "pdt" con parámetros en paréntesis: a(3181447)p(270504)...url(ENCODED)
+    #    Esto no es una URL con querystring y a veces NO redirige con requests tal cual.
+    if "pdt.tradedoubler.com/click" in u and "url(" in u:
+        try:
+            pairs = re.findall(r"([a-zA-Z_]+)\((.*?)\)", u)
+            d = {k.lower(): v for k, v in pairs}
+            a = d.get("a")
+            p = d.get("p")
+            dest = d.get("url")
+            if a and p and dest:
+                dest = urllib.parse.unquote(dest)
+                # Construimos un click estándar (querystring) que sí suele redirigir al destino con tduid/utm
+                u = "https://clk.tradedoubler.com/click?" + urllib.parse.urlencode(
+                    {"p": p, "a": a, "url": dest},
+                    safe=":/?=&%#"
+                )
+        except Exception:
+            # si falla el parseo, seguimos con u tal cual
+            pass
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "es-ES,es;q=0.9",
+    }
+
     try:
-        r = requests.get(url, allow_redirects=True, timeout=10, stream=True)
-        return r.url
-    except:
-        return url
+        # 2) Seguir redirects normalmente
+        r = requests.get(u, allow_redirects=True, timeout=20, headers=headers)
+        final_url = r.url or u
+
+        # 3) Si aún quedase algún wrapper con destino embebido en querystring, extraerlo
+        parsed = urllib.parse.urlparse(final_url)
+        host = (parsed.netloc or "").lower()
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        if "tradedoubler" in host and "url" in qs and qs["url"]:
+            # ojo: aquí devolvemos el destino, no el wrapper
+            return urllib.parse.unquote(qs["url"][0])
+
+        return final_url
+    except Exception:
+        return u
+
 
 # --- GESTIÓN DE CATEGORÍAS ---
 def obtener_todas_las_categorias():
@@ -313,6 +361,7 @@ def obtener_datos_remotos():
                             "fuente": fuente,
                             "cup": cup,
                             "url_exp": url_exp,
+                            "url_oferta_sin_acortar": url_exp,
                             "url_imp": url_imp,
                             "url_importada_sin_afiliado": url_importada_sin_afiliado,
                             "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
@@ -431,7 +480,7 @@ def sincronizar(remotos):
                 {"key": "precio_original", "value": str(p['p_reg'])},
                 {"key": "codigo_de_descuento", "value": p['cup']},
                 {"key": "enlace_de_compra_importado", "value": p['url_imp']},
-                {"key": "url_oferta_sin_acortar", "value": p['url_exp']},
+                {"key": "url_oferta_sin_acortar", "value": p.get('url_oferta_sin_acortar', p.get('url_exp', ''))},
                 {"key": "url_importada_sin_afiliado", "value": p['url_importada_sin_afiliado']},
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": p['url_sin_acortar_con_mi_afiliado']},
                 {"key": "url_oferta", "value": p['url_oferta']},
