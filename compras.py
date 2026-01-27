@@ -289,180 +289,222 @@ def producto_match(p_existente, p_nuevo):
     )
 
 
+
 def obtener_datos_remotos():
-    fuentes_6_principales = ["PcComponentes", "MediaMarkt", "AliExpress Plaza", "Amazon", "Fnac", "Phone House"]
-
-    print("\n--- FASE 1: ESCANEANDO COMPRAS SMARTPHONE ---")
-    print("-" * 60)
-
+    """
+    Scraper robusto para comprasmartphone.com/ofertas (+subsecciones).
+    NO depende de clases CSS (que cambian con frecuencia). Se basa en patrones estables:
+      - Link del producto: href contiene "/telefonos/"
+      - Link de compra: texto comienza por "Cómpralo en"
+      - RAM/ROM: patrón 12/256GB, 8/128GB, etc.
+      - Precios: importes con "€" dentro del bloque
+    """
     productos_por_clave = {}
-    total_paginas = len(URLS_PAGINAS)
 
-    for i, url in enumerate(URLS_PAGINAS, start=1):
+    def fetch_html(url: str) -> str:
+        # Reintentos y cabeceras “browser-like” para minimizar bloqueos
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+            "Connection": "keep-alive",
+        }
+        last_exc = None
+        for i in range(1, 4):
+            try:
+                resp = requests.get(url, timeout=40, headers=headers)
+                status = resp.status_code
+                text = resp.text or ""
+                print(f"   ↳ HTTP {status} | bytes={len(text)}")
+                # Si hay bloqueo típico, deja pista clara en logs
+                low = text.lower()
+                if status in (403, 429, 503) or "cloudflare" in low or "captcha" in low:
+                    print("   ⚠️ Posible bloqueo (Cloudflare/captcha/rate-limit).")
+                return text
+            except Exception as e:
+                last_exc = e
+                print(f"   ⚠️ Error HTTP intento {i}/3: {e}")
+                time.sleep(5)
+        raise last_exc
+
+    # Helper: extrae ram/rom desde texto del bloque (ej "16/128GB", "8GB/1TB")
+    def extraer_ram_rom_de_bloque(texto: str):
+        t = (texto or "").upper().replace(" ", "")
+        # Caso principal: 16/128GB
+        m = re.search(r"\b(\d{1,3})/(\d{2,4})GB\b", t)
+        if m:
+            return f"{m.group(1)} GB", f"{m.group(2)} GB"
+        # Caso: 8GB/1TB
+        m = re.search(r"\b(\d{1,3})GB/(\d{1,2})TB\b", t)
+        if m:
+            return f"{m.group(1)} GB", f"{m.group(2)} TB"
+        return "", ""
+
+    for idx, url in enumerate(URLS_PAGINAS, start=1):
+        print(f"\nEscaneando listado ({idx}/{len(URLS_PAGINAS)}): {url}")
         try:
-            print(f"Escaneando listado ({i}/{total_paginas}): {url}")
-            html = requests.get(url, timeout=15).text
-            soup = BeautifulSoup(html, "html.parser")
+            html = fetch_html(url)
+        except Exception as e:
+            print(f"  ❌ Error leyendo {url}: {e}")
+            continue
 
-            items = soup.select("div.flex.flex-col.gap-4.rounded-2xl.bg-gray-800")
-            print(f"✅ Items detectados: {len(items)}")
+        soup = BeautifulSoup(html, "html.parser")
 
-            for item in items:
-                try:
-                    # Nombre
-                    nombre = item.select_one("h2").get_text(strip=True)
+        # 1) Detectar candidatos por “Cómpralo en …” (estable)
+        buy_links = soup.find_all("a", string=re.compile(r"^\s*Cómpralo en\b", re.I))
+        print(f"✅ Items detectados: {len(buy_links)}")
 
-                    # Ignorar tablets/relojes: si hay TAB o IPAD en el nombre
-                    nombre_upper = nombre.upper()
-                    if " TAB" in f" {nombre_upper} " or " IPAD" in f" {nombre_upper} ":
-                        continue
+        for buy in buy_links:
+            try:
+                fuente = buy.get_text(strip=True).replace("Cómpralo en", "").strip()
+                url_imp = buy.get("href", "") or ""
 
-                    # RAM/ROM (debe existir si es móvil)
-                    data = item.select_one("p.text-white.text-sm").get_text(strip=True)
-                    if "/" not in data:
-                        # si no tiene memoria/capacidad, no se importa
-                        continue
+                # Bloque contenedor (li / article / div)
+                cont = buy.find_parent(["li", "article", "div"], recursive=True) or buy.parent
+                bloque_txt = cont.get_text(" ", strip=True) if cont else buy.get_text(" ", strip=True)
 
-                    ram_part, rom_part = data.split("/")
-                    ram_part = ram_part.replace("RAM", "").strip()
-                    rom_part = rom_part.replace("ROM", "").strip()
+                # 2) Nombre: primer link /telefonos/ dentro del bloque
+                nombre = ""
+                prod_link = None
+                if cont:
+                    prod_link = cont.find("a", href=re.compile(r"/telefonos/", re.I))
+                if prod_link:
+                    nombre = normalizar_nombre(prod_link.get_text(strip=True))
 
-                    ram = ram_part if "TB" in ram_part else f"{ram_part} GB"
-                    rom = rom_part if "TB" in rom_part else f"{rom_part} GB"
+                if not nombre:
+                    # Fallback: usar alt del primer img, si existe
+                    img = cont.find("img") if cont else None
+                    if img and img.get("alt"):
+                        nombre = normalizar_nombre(img.get("alt"))
 
-                    p_act = limpiar_precio(item.select_one("p.text-fluor-green").get_text(strip=True))
-                    p_reg = limpiar_precio(item.select_one("span.line-through").get_text(strip=True)) if item.select_one("span.line-through") else p_act
-
-                    btn = item.select_one("a.bg-fluor-green")
-                    url_imp = btn["href"] if btn else ""
-
-                    # ✅ Expandir SIEMPRE antes de guardar en ACF "url_oferta_sin_acortar"
-                    url_oferta_sin_acortar = expandir_url(url_imp)
-                    url_exp = url_oferta_sin_acortar  # mantenemos el nombre para no romper el resto del flujo
-
-                    # Guardamos también el enlace original importado (acortador / afiliado de origen)
-                    enlace_de_compra_importado = url_imp
-
-                    fuente = btn.get_text(strip=True).replace("Cómpralo en", "").strip() if btn else "Tienda"
-                    url_importada_sin_afiliado = url_oferta_sin_acortar
-
-                    # Normalización de URL sin parámetros según fuente
-                    if fuente == "MediaMarkt":
-                        url_importada_sin_afiliado = url_exp.split("?")[0]
-                    elif fuente == "AliExpress Plaza":
-                        url_importada_sin_afiliado = (
-                            url_exp.split(".html")[0] + ".html" if ".html" in url_exp else url_exp.split("?")[0]
-                        )
-                    elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
-                        url_importada_sin_afiliado = url_exp.split("?")[0]
-                    else:
-                        url_importada_sin_afiliado = url_exp
-
-                    # Construir URL con afiliado usando variables de entorno
-                    if fuente == "MediaMarkt" and ID_AFILIADO_MEDIAMARKT:
-                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_MEDIAMARKT}"
-                    elif fuente == "AliExpress Plaza" and ID_AFILIADO_ALIEXPRESS:
-                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_ALIEXPRESS}"
-                    elif fuente == "Fnac" and ID_AFILIADO_FNAC:
-                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
-                    elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
-                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
-                    else:
-                        url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
-
-                    url_oferta = acortar_url(url_sin_acortar_con_mi_afiliado)
-
-                    # Enviado desde
-                    tiendas_espana = [
-                        "pccomponentes",
-                        "aliexpress plaza",
-                        "mediamarkt",
-                        "amazon",
-                        "fnac",
-                        "phone house",
-                        "powerplanet",
-                    ]
-                    enviado_desde = ""
-                    if fuente.lower() in tiendas_espana or "Desde España" in item.get_text():
-                        enviado_desde = "España"
-
-                    enviado_desde_tg = ""
-                    if enviado_desde == "España":
-                        enviado_desde_tg = "🇪🇸 España"
-                    elif enviado_desde == "Europa":
-                        enviado_desde_tg = "🇪🇺 Europa"
-                    elif enviado_desde == "China":
-                        enviado_desde_tg = "🇨🇳 China"
-
-                    if fuente not in fuentes_6_principales:
-                        ver = "Global Version"
-                    else:
-                        ver = "Versión Global" if "Global" in item.get_text() or "Desde España" in item.get_text() else "N/A"
-
-                    cup = (
-                        item.select_one("button.border-fluor-green").get_text(strip=True).replace("Código", "").strip()
-                        if item.select_one("button.border-fluor-green")
-                        else "OFERTA PROMO"
-                    )
-
-                    # Imagen
-                    img = item.select_one("img")
-                    img_src = img["src"] if img and img.get("src") else ""
-
-                    # --- LOGS DETALLADOS SOLICITADOS ---
-                    print(f"Detectado {nombre}")
-                    print(f"1) Nombre: {nombre}")
-                    print(f"2) Memoria: {ram}")
-                    print(f"3) Capacidad: {rom}")
-                    print(f"4) Versión: {ver}")
-                    print(f"5) Fuente: {fuente}")
-                    print(f"6) Precio actual: {p_act}")
-                    print(f"7) Precio original: {p_reg}")
-                    print(f"8) Código de descuento: {cup}")
-                    print(f"9) Version: {ver}")
-                    print(f"10) URL Imagen: {img_src}")
-                    print(f"11) Enlace Importado: {url_imp}")
-                    print(f"12) Enlace Expandido: {url_exp}")
-                    print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
-                    print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
-                    print(f"15) URL acortada con mi afiliado: {url_oferta}")
-                    print(f"16) Enviado desde: {enviado_desde}")
-                    print(f"17) Encolado para comparar con base de datos...")
-                    print("-" * 60)
-                    # -----------------------------------
-
-                    # clave para evitar duplicados en remoto
-                    clave = f"{nombre}|{ram}|{rom}|{fuente}".lower()
-                    if clave not in productos_por_clave:
-                        productos_por_clave[clave] = {
-                            "nombre": nombre,
-                            "p_act": p_act,
-                            "p_reg": p_reg,
-                            "ram": ram,
-                            "rom": rom,
-                            "ver": ver,
-                            "fuente": fuente,
-                            "cup": cup,
-                            "url_exp": url_exp,
-                            "url_imp": url_imp,
-                            "enlace_de_compra_importado": enlace_de_compra_importado,
-                            "url_importada_sin_afiliado": url_importada_sin_afiliado,
-                            "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
-                            "url_oferta": url_oferta,
-                            "imagen": img_src,
-                            "enviado_desde": enviado_desde,
-                            "enviado_desde_tg": enviado_desde_tg,
-                            "paginas_origen": {url},
-                        }
-                    else:
-                        productos_por_clave[clave]["paginas_origen"].add(url)
-
-                except Exception as e:
+                if not nombre:
                     continue
 
-        except Exception as e:
-            print(f"❌ Error al escanear {url}: {e}")
-            continue
+                # Ignorar tablets (regla tuya)
+                if "TAB" in nombre.upper() or "IPAD" in nombre.upper():
+                    continue
+
+                # 3) RAM/ROM (obligatorio para considerar “móvil”)
+                ram, rom = extraer_ram_rom_de_bloque(bloque_txt)
+                if not ram or not rom:
+                    # Si no tiene memoria/capacidad, lo ignoramos
+                    continue
+
+                # 4) Precios: buscamos importes con €
+                euros = re.findall(r"(\d[\d\.]*)\s*€", bloque_txt)
+                p_act = limpiar_precio(euros[0]) if len(euros) >= 1 else ""
+                p_reg = limpiar_precio(euros[1]) if len(euros) >= 2 else ""
+                if not p_act:
+                    continue
+                if not p_reg:
+                    p_reg = p_act
+
+                # 5) Código cupón
+                cup = "OFERTA PROMO"
+                m = re.search(r"\bC[oó]digo\s+([A-Z0-9_-]+)\b", bloque_txt, re.I)
+                if m:
+                    cup = m.group(1).strip()
+
+                # 6) Imagen
+                img_src = ""
+                img = cont.find("img") if cont else None
+                if img:
+                    img_src = img.get("src") or img.get("data-src") or ""
+
+                # 7) Expandir enlace SIEMPRE antes de url_oferta_sin_acortar
+                url_oferta_sin_acortar = expandir_url(url_imp)
+                url_exp = url_oferta_sin_acortar
+                enlace_de_compra_importado = url_imp
+
+                # 8) URL sin afiliado (depende de la tienda real)
+                url_importada_sin_afiliado = url_oferta_sin_acortar
+                if fuente == "MediaMarkt":
+                    url_importada_sin_afiliado = url_exp.split("?")[0]
+                elif fuente == "AliExpress Plaza":
+                    url_importada_sin_afiliado = (
+                        url_exp.split(".html")[0] + ".html"
+                        if ".html" in url_exp else url_exp.split("?")[0]
+                    )
+                elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
+                    url_importada_sin_afiliado = url_exp.split("?")[0]
+                else:
+                    url_importada_sin_afiliado = url_exp.split("?")[0] if url_exp else url_exp
+
+                # 9) Aplicar tu afiliado
+                url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
+
+                if fuente == "MediaMarkt" and AFF_MEDIAMARKT:
+                    sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                    url_sin_acortar_con_mi_afiliado += sep + AFF_MEDIAMARKT
+                elif fuente == "Amazon" and AFF_AMAZON:
+                    sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                    url_sin_acortar_con_mi_afiliado += sep + AFF_AMAZON
+                elif fuente == "Fnac" and AFF_FNAC:
+                    sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                    url_sin_acortar_con_mi_afiliado += sep + AFF_FNAC
+                elif fuente == "PcComponentes" and AFF_PCCOMPONENTES:
+                    sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                    url_sin_acortar_con_mi_afiliado += sep + AFF_PCCOMPONENTES
+                elif fuente in ["AliExpress", "AliExpress Plaza"] and AFF_ALIEXPRESS:
+                    sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                    url_sin_acortar_con_mi_afiliado += sep + AFF_ALIEXPRESS
+                elif fuente == "Phone House" and AFF_PHONEHOUSE:
+                    sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                    url_sin_acortar_con_mi_afiliado += sep + AFF_PHONEHOUSE
+
+                # 10) Acortar con is.gd
+                url_oferta = ""
+                try:
+                    rshort = requests.get(
+                        "https://is.gd/create.php",
+                        params={"format": "simple", "url": url_sin_acortar_con_mi_afiliado},
+                        timeout=15,
+                    )
+                    if rshort.status_code == 200:
+                        url_oferta = (rshort.text or "").strip()
+                except:
+                    url_oferta = url_sin_acortar_con_mi_afiliado
+
+                ver = detectar_version(nombre, fuente)
+                enviado_desde = detectar_enviado_desde(fuente)
+                enviado_desde_tg = bandera_enviado_desde(enviado_desde)
+
+                cat = nombre.split()[0] if nombre else "Móviles"
+                subcat = nombre
+
+                # Importante: puede haber duplicados del mismo móvil y specs pero de distinta página/tienda
+                clave = (nombre.lower(), ram, rom, fuente.lower())
+
+                if clave not in productos_por_clave:
+                    productos_por_clave[clave] = {
+                        "nombre": nombre,
+                        "p_act": p_act,
+                        "p_reg": p_reg,
+                        "ram": ram,
+                        "rom": rom,
+                        "ver": ver,
+                        "fuente": fuente,
+                        "cup": cup,
+                        "url_exp": url_exp,
+                        "url_oferta_sin_acortar": url_oferta_sin_acortar,
+                        "url_imp": url_imp,
+                        "enlace_de_compra_importado": enlace_de_compra_importado,
+                        "url_importada_sin_afiliado": url_importada_sin_afiliado,
+                        "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
+                        "url_oferta": url_oferta,
+                        "imagen": img_src,
+                        "enviado_desde": enviado_desde,
+                        "enviado_desde_tg": enviado_desde_tg,
+                        "cat": cat,
+                        "subcat": subcat,
+                        "paginas_origen": {url},
+                    }
+                else:
+                    productos_por_clave[clave]["paginas_origen"].add(url)
+
+            except Exception as e:
+                print(f"  ⚠️ Error parseando item: {e}")
+                continue
 
     return list(productos_por_clave.values())
 
