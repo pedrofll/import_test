@@ -4,6 +4,7 @@ import time
 import requests
 import urllib.parse
 import re
+import json
 from datetime import datetime
 from bs4 import BeautifulSoup
 from woocommerce import API
@@ -349,10 +350,211 @@ def obtener_datos_remotos():
             continue
 
         soup = BeautifulSoup(html, "html.parser")
+        # Fallback: si el HTML no trae el listado (render client-side), intentar extraer datos de __NEXT_DATA__
+        def extraer_items_desde_next_data(html_text: str):
+            items = []
+            try:
+                s2 = BeautifulSoup(html_text, "html.parser")
+                script = s2.find("script", id="__NEXT_DATA__")
+                if not script or not script.string:
+                    return items
+                data = json.loads(script.string)
+            except Exception:
+                return items
+
+            name_keys = ["name", "title", "productName", "model", "nombre"]
+            url_keys = ["url", "href", "link", "productUrl", "offerUrl", "buyUrl", "enlace", "targetUrl"]
+            store_keys = ["store", "shop", "merchant", "fuente", "source", "tienda"]
+            price_keys = ["price", "salePrice", "currentPrice", "precio", "precio_actual", "priceNow"]
+            old_keys = ["oldPrice", "regularPrice", "precio_original", "precioAnterior", "priceOld", "wasPrice"]
+            img_keys = ["image", "imageUrl", "img", "picture", "thumbnail", "foto"]
+
+            def pick(d, keys):
+                for k in keys:
+                    if k in d and d[k]:
+                        return d[k]
+                return None
+
+            def as_str(v):
+                if isinstance(v, str):
+                    return v
+                if isinstance(v, (int, float)):
+                    return str(v)
+                if isinstance(v, dict):
+                    for kk in ("href", "url", "link"):
+                        if kk in v and isinstance(v[kk], str):
+                            return v[kk]
+                return ""
+
+            def walk(o):
+                if isinstance(o, dict):
+                    n = pick(o, name_keys)
+                    u = pick(o, url_keys)
+                    p = pick(o, price_keys)
+                    # Candidato “producto/oferta”
+                    if n and u and p:
+                        item = {
+                            "nombre_raw": as_str(n),
+                            "url": as_str(u),
+                            "precio": as_str(p),
+                            "precio_old": as_str(pick(o, old_keys) or ""),
+                            "fuente": as_str(pick(o, store_keys) or ""),
+                            "imagen": as_str(pick(o, img_keys) or ""),
+                        }
+                        items.append(item)
+                    for v in o.values():
+                        walk(v)
+                elif isinstance(o, list):
+                    for it in o:
+                        walk(it)
+
+            walk(data)
+
+            # Dedup básico
+            uniq = []
+            seen = set()
+            for it in items:
+                key = (it.get("nombre_raw","")[:120], it.get("url","")[:200], it.get("precio",""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(it)
+            return uniq
+
+
 
         # 1) Detectar candidatos por “Cómpralo en …” (estable)
         buy_links = soup.find_all("a", string=re.compile(r"^\s*Cómpralo en\b", re.I))
         print(f"✅ Items detectados: {len(buy_links)}")
+
+        # Si no hay anchors "Cómpralo en", probablemente el contenido se hidrata por JS.
+        # Intentar extraer ofertas desde __NEXT_DATA__ (Next.js) y procesarlas.
+        if len(buy_links) == 0:
+            next_items = extraer_items_desde_next_data(html)
+            print(f"ℹ️ Fallback __NEXT_DATA__: {len(next_items)} items candidatos")
+
+            for it in next_items:
+                try:
+                    nombre_raw = it.get("nombre_raw", "")
+                    nombre = normalizar_nombre(nombre_raw)
+
+                    # Ignorar tablets
+                    if "TAB" in nombre.upper() or "IPAD" in nombre.upper():
+                        continue
+
+                    ram, rom = extraer_ram_rom(nombre_raw)
+                    if not ram or not rom:
+                        # Reglas: sin memoria/capacidad -> ignorar
+                        continue
+
+                    fuente = (it.get("fuente") or "").strip() or "Tienda"
+                    url_imp = (it.get("url") or "").strip()
+                    if not url_imp:
+                        continue
+
+                    p_act = limpiar_precio(it.get("precio", ""))
+                    p_reg = limpiar_precio(it.get("precio_old", "")) or p_act
+                    if not p_act:
+                        continue
+
+                    # ✅ expandir SIEMPRE antes de guardar url_oferta_sin_acortar
+                    url_oferta_sin_acortar = expandir_url(url_imp)
+                    url_exp = url_oferta_sin_acortar
+                    enlace_de_compra_importado = url_imp
+
+                    # URL sin afiliado (base) según fuente
+                    url_importada_sin_afiliado = url_oferta_sin_acortar
+                    if fuente == "MediaMarkt":
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
+                    elif fuente == "AliExpress Plaza":
+                        url_importada_sin_afiliado = (
+                            url_exp.split(".html")[0] + ".html"
+                            if ".html" in url_exp else url_exp.split("?")[0]
+                        )
+                    elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
+                    else:
+                        url_importada_sin_afiliado = url_exp.split("?")[0] if url_exp else url_exp
+
+                    # aplicar tu afiliado
+                    url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
+
+                    if fuente == "MediaMarkt" and AFF_MEDIAMARKT:
+                        sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                        url_sin_acortar_con_mi_afiliado = url_sin_acortar_con_mi_afiliado + sep + AFF_MEDIAMARKT
+                    elif fuente == "Amazon" and AFF_AMAZON:
+                        sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                        url_sin_acortar_con_mi_afiliado = url_sin_acortar_con_mi_afiliado + sep + AFF_AMAZON
+                    elif fuente == "Fnac" and AFF_FNAC:
+                        sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                        url_sin_acortar_con_mi_afiliado = url_sin_acortar_con_mi_afiliado + sep + AFF_FNAC
+                    elif fuente == "PcComponentes" and AFF_PCCOMPONENTES:
+                        sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                        url_sin_acortar_con_mi_afiliado = url_sin_acortar_con_mi_afiliado + sep + AFF_PCCOMPONENTES
+                    elif fuente in ["AliExpress", "AliExpress Plaza"] and AFF_ALIEXPRESS:
+                        sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                        url_sin_acortar_con_mi_afiliado = url_sin_acortar_con_mi_afiliado + sep + AFF_ALIEXPRESS
+                    elif fuente == "Phone House" and AFF_PHONEHOUSE:
+                        sep = "&" if "?" in url_sin_acortar_con_mi_afiliado else "?"
+                        url_sin_acortar_con_mi_afiliado = url_sin_acortar_con_mi_afiliado + sep + AFF_PHONEHOUSE
+
+                    # acortar con is.gd
+                    url_oferta = ""
+                    try:
+                        rshort = requests.get(
+                            "https://is.gd/create.php",
+                            params={"format": "simple", "url": url_sin_acortar_con_mi_afiliado},
+                            timeout=15
+                        )
+                        if rshort.status_code == 200:
+                            url_oferta = (rshort.text or "").strip()
+                    except:
+                        url_oferta = url_sin_acortar_con_mi_afiliado
+
+                    cup = "OFERTA PROMO"
+                    ver = detectar_version(nombre, fuente)
+                    enviado_desde = detectar_enviado_desde(fuente)
+                    enviado_desde_tg = bandera_enviado_desde(enviado_desde)
+                    img_src = (it.get("imagen") or "").strip()
+
+                    cat = nombre.split()[0] if nombre else "Móviles"
+                    subcat = nombre
+                    clave = (nombre.lower(), ram, rom, fuente.lower())
+
+                    if clave not in productos_por_clave:
+                        productos_por_clave[clave] = {
+                            "nombre": nombre,
+                            "p_act": p_act,
+                            "p_reg": p_reg,
+                            "ram": ram,
+                            "rom": rom,
+                            "ver": ver,
+                            "fuente": fuente,
+                            "cup": cup,
+                            "url_exp": url_exp,
+                            "url_oferta_sin_acortar": url_oferta_sin_acortar,
+                            "url_imp": url_imp,
+                            "enlace_de_compra_importado": enlace_de_compra_importado,
+                            "url_importada_sin_afiliado": url_importada_sin_afiliado,
+                            "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
+                            "url_oferta": url_oferta,
+                            "imagen": img_src,
+                            "enviado_desde": enviado_desde,
+                            "enviado_desde_tg": enviado_desde_tg,
+                            "cat": cat,
+                            "subcat": subcat,
+                            "paginas_origen": {url},
+                        }
+
+                    # log mínimo en fallback
+                    print(f"✅ NEXT item: {nombre} | {fuente} | {p_act}€ | {ram}/{rom}")
+                except Exception as e:
+                    print(f"  ⚠️ Error procesando item NEXT: {e}")
+                    continue
+
+            # Saltamos al siguiente listado (ya procesado por NEXT)
+            continue
+
 
         for buy in buy_links:
             try:
