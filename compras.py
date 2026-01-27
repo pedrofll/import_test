@@ -71,6 +71,7 @@ ID_AFILIADO_ALIEXPRESS = os.environ.get("AFF_ALIEXPRESS", "")
 ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
+ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
 
 # Acumuladores globales
 summary_creados = []
@@ -149,12 +150,11 @@ def acortar_url(url):
 
 def expandir_url(url: str) -> str:
     """
-    Expande enlaces (redirects + acortadores + wrappers).
-
-    IMPORTANTE:
-    - Para Amazon, NO intentamos "extraer" URLs del HTML (puede devolver sprites/recursos). Devolvemos la URL final tras redirects.
-    - Para acortadores (p. ej. topesdg.link) y wrappers, si el GET devuelve 200 con HTML, intentamos extraer el destino desde meta/JS.
-    - Soporta Tradedoubler PDT: pdt.tradedoubler.com/click?...url(ENCODED)
+    Expande enlaces (redirects + acortadores + wrappers), con especial cuidado en:
+      - Amazon: NO extraer del HTML (evita devolver sprites/recursos).
+      - Tradedoubler PDT: pdt.tradedoubler.com/click?...url(ENCODED) -> extrae destino.
+      - Awin: si aparece cread/pclick con 'ued=', se devuelve el destino real (tienda).
+      - topesdg.link: intenta Location header (302) y, si no, extracción por HTML/JS.
     """
     if not url:
         return ""
@@ -185,23 +185,36 @@ def expandir_url(url: str) -> str:
             return ""
 
     def _is_amazon(h: str) -> bool:
-        # www.amazon.es, amazon.es, smile.amazon.es, etc.
         return ("amazon." in h) and (not h.startswith("images-") and "ssl-images-amazon" not in h)
 
+    def _looks_like_resource(u: str) -> bool:
+        ul = (u or "").lower()
+        return ul.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".ico"))
+
+    def _extract_awin_destination(u: str) -> str:
+        try:
+            pu = urllib.parse.urlparse(u)
+            host = (pu.netloc or "").lower()
+            if "awin1.com" not in host:
+                return ""
+            qs = urllib.parse.parse_qs(pu.query)
+            for k in ("ued", "url", "desturl", "destination"):
+                if k in qs and qs[k]:
+                    return urllib.parse.unquote(qs[k][0])
+        except Exception:
+            pass
+        return ""
+
     def _unwrap_tradedoubler_pdt(u: str) -> str:
-        # Formato: https://pdt.tradedoubler.com/click?a(3181447)p(270504)...url(ENCODED)
+        # https://pdt.tradedoubler.com/click?a(3181447)p(270504)...url(ENCODED)
         try:
             if "pdt.tradedoubler.com/click" not in u:
                 return u
             m = re.search(r"a\((\d+)\).*?p\((\d+)\).*?url\(([^)]+)\)", u)
             if not m:
                 return u
-            a = m.group(1)
-            p = m.group(2)
-            dest_enc = m.group(3)
-            dest = urllib.parse.unquote(dest_enc)
-            # Convertimos a formato estándar con querystring (más compatible con requests)
-            return "https://clk.tradedoubler.com/click?" + urllib.parse.urlencode({"p": p, "a": a, "url": dest})
+            dest = urllib.parse.unquote(m.group(3))
+            return dest if dest.startswith("http") else u
         except Exception:
             return u
 
@@ -219,14 +232,14 @@ def expandir_url(url: str) -> str:
         return u
 
     def _extract_from_html(base_url: str, html: str) -> str:
-        """
-        Extrae destino de HTML de acortadores:
-        - <link rel="canonical" href=...>
-        - <meta property="og:url" content=...>
-        - meta refresh
-        - window.location / location.href / location.replace(...)
-        - y, como fallback, una URL que parezca de tienda (priorizando El Corte Inglés)
-        """
+        # Awin embed
+        m = re.search(r'https?://www\.awin1\.com/(?:cread|pclick)\.php\?[^"\']+', html, re.I)
+        if m:
+            aw = m.group(0).strip()
+            dest = _extract_awin_destination(aw)
+            if dest:
+                return dest
+
         # canonical
         m = re.search(r'rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html, re.I)
         if m:
@@ -243,110 +256,111 @@ def expandir_url(url: str) -> str:
             return urllib.parse.urljoin(base_url, m.group(1).strip())
 
         # JS redirects
-        m = re.search(r'(?:window\.location|location\.href|document\.location)\s*=\s*["\']([^"\']+)["\']', html, re.I)
-        if m:
-            return urllib.parse.urljoin(base_url, m.group(1).strip())
+        for pat in [
+            r'(?:window\.location|location\.href|document\.location)\s*=\s*["\']([^"\']+)["\']',
+            r'location\.replace\(\s*["\']([^"\']+)["\']\s*\)',
+        ]:
+            m = re.search(pat, html, re.I)
+            if m:
+                return urllib.parse.urljoin(base_url, m.group(1).strip())
 
-        m = re.search(r'location\.replace\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
-        if m:
-            return urllib.parse.urljoin(base_url, m.group(1).strip())
-        # atob('...') base64 (común en acortadores)
+        # atob('...') base64
         m = re.search(r'atob\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
         if m:
             try:
                 b64 = m.group(1).strip()
-                # padding
                 pad = '=' * (-len(b64) % 4)
                 decoded = base64.b64decode((b64 + pad).encode('utf-8', 'ignore')).decode('utf-8', 'ignore')
-                # preferir El Corte Inglés si aparece en el decodificado
-                mm = re.search(r'https?://(?:www\.)?elcorteingles\.es/[^\s"\']+', decoded, re.I)
-                if mm:
-                    return mm.group(0).strip()
                 mm = re.search(r'https?://[^\s"\']+', decoded, re.I)
                 if mm:
                     return mm.group(0).strip()
             except Exception:
                 pass
 
-        # decodeURIComponent('...') (URL-encoded dentro de JS)
+        # decodeURIComponent('...')
         m = re.search(r'decodeURIComponent\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
         if m:
             try:
                 dec = urllib.parse.unquote(m.group(1).strip())
-                mm = re.search(r'https?://(?:www\.)?elcorteingles\.es/[^\s"\']+', dec, re.I)
-                if mm:
-                    return mm.group(0).strip()
                 mm = re.search(r'https?://[^\s"\']+', dec, re.I)
                 if mm:
                     return mm.group(0).strip()
             except Exception:
                 pass
 
-        # URLs escapadas en JSON (https:\/\/www.elcorteingles.es\/)
-        m = re.search(r'https?:\\/\\/(?:www\\.)?elcorteingles\\.es\\/[^\s"\']+', html, re.I)
+        # URLs escapadas (https:\/\/...)
+        m = re.search(r'https?:\\/\\/[^\s"\']+', html, re.I)
         if m:
             return m.group(0).replace('\\/','/').replace('\\','').strip()
 
-        # Protocolo relativo: //www.elcorteingles.es/...
-        m = re.search(r'//(?:www\.)?elcorteingles\.es/[^\s"\']+', html, re.I)
+        # Protocolo relativo //...
+        m = re.search(r'//[^\s"\']+', html, re.I)
         if m:
             return "https:" + m.group(0).strip()
 
-
-        # Preferir El Corte Inglés si aparece
-        m = re.search(r'https?://(?:www\.)?elcorteingles\.es/[^\s"\']+', html, re.I)
-        if m:
-            return m.group(0).strip()
-
-        # fallback: una URL "razonable", evitando recursos
+        # fallback URL razonable
         for cand in re.findall(r'https?://[^\s"\']+', html):
             c = cand.strip()
-            ch = _host(c)
-            if not ch:
+            if _looks_like_resource(c):
                 continue
-            if "ssl-images-amazon" in ch or ch.startswith("images-") or c.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js")):
+            ch = _host(c)
+            if "ssl-images-amazon" in ch or ch.startswith("images-"):
                 continue
             return c
 
         return base_url
 
     s = requests.Session()
-    current = url
+    current = _unwrap_tradedoubler_pdt(url)
 
-    # primer unwrap de formato PDT si aplica
-    current = _unwrap_tradedoubler_pdt(current)
-
-    for _ in range(8):
-        # unwrap querystring wrappers (por si tras un hop volvemos a tradetracker/tradedoubler con url=)
+    for _ in range(10):
         current = _unwrap_query_wrappers(current)
+        h_cur = _host(current)
+
+        # Preflight sin redirects (Location)
+        if h_cur in SHORTENER_HOSTS:
+            try:
+                r0 = s.get(current, headers=headers, allow_redirects=False, timeout=20)
+                loc = r0.headers.get("Location") or r0.headers.get("location")
+                if loc:
+                    current = urllib.parse.urljoin(current, loc)
+                    aw = _extract_awin_destination(current)
+                    if aw and not _looks_like_resource(aw):
+                        return aw
+                    continue
+            except Exception:
+                pass
 
         try:
-            r = s.get(current, headers=headers, allow_redirects=True, timeout=20)
+            r = s.get(current, headers=headers, allow_redirects=True, timeout=25)
         except Exception:
             return current
 
         final_url = getattr(r, "url", "") or current
 
-        # Si acabamos en wrapper, intentamos desenvolverlo
+        # Awin destino directo
+        aw = _extract_awin_destination(final_url)
+        if aw and not _looks_like_resource(aw):
+            return aw
+
         unwrapped = _unwrap_query_wrappers(final_url)
         if unwrapped != final_url:
             current = unwrapped
             continue
 
         h_final = _host(final_url)
-        h_current = _host(current)
 
-        # ✅ Para Amazon: NO extraemos del HTML (evita devolver sprites/recursos)
-        if _is_amazon(h_final) or _is_amazon(h_current):
+        if _is_amazon(h_final) or _is_amazon(h_cur):
             return final_url
 
-        # Solo intentamos extraer desde HTML si es un acortador (o un wrapper conocido)
         content_type = (r.headers.get("Content-Type") or "").lower()
-        if final_url == current and r.status_code == 200 and "text/html" in content_type:
-            if h_final in SHORTENER_HOSTS or any(x in h_final for x in ["tradedoubler", "tradetracker"]):
-                html = r.text or ""
-                extracted = _extract_from_html(final_url, html)
-                if extracted and extracted != current:
+        if final_url == current and r.status_code == 200 and ("text/html" in content_type or "text/plain" in content_type or content_type == ""):
+            if h_final in SHORTENER_HOSTS or any(x in h_final for x in ["tradedoubler", "tradetracker", "awin1.com"]):
+                extracted = _extract_from_html(final_url, r.text or "")
+                if extracted and extracted != current and not _looks_like_resource(extracted):
+                    aw2 = _extract_awin_destination(extracted)
+                    if aw2 and not _looks_like_resource(aw2):
+                        return aw2
                     current = extracted
                     continue
 
@@ -509,6 +523,8 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
+                    elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
                     else:
                         url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
@@ -667,6 +683,8 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
+                    elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
                     else:
                         url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
