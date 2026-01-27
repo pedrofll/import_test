@@ -1,11 +1,9 @@
-Aquí tienes el **archivo completo** ya corregido. Descarga: [compras_fix.py](sandbox:/mnt/data/compras_fix.py)
-
-```python
 # scraper_compras.py
 import os
 import time
 import requests
 import urllib.parse
+import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from woocommerce import API
@@ -95,35 +93,73 @@ def acortar_url(url):
 
 
 def expandir_url(url: str) -> str:
-    """Expande enlaces (acortadores/redirects) con fallback HEAD→GET."""
+    """
+    Expande enlaces soportando:
+      - redirects 3xx (requests allow_redirects)
+      - wrappers (Tradedoubler url=, Tradetracker u=)
+      - redirecciones HTML/JS (meta refresh, window.location)
+    Devuelve la URL final (idealmente la URL real de la tienda).
+    """
     if not url:
         return ""
+
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept-Language": "es-ES,es;q=0.9",
     }
+
     s = requests.Session()
+    current = url
 
-    for _ in range(3):
-        # HEAD primero (más rápido)
+    # Evitar bucles
+    for _hop in range(8):
         try:
-            r = s.head(url, allow_redirects=True, headers=headers, timeout=12)
-            if getattr(r, "url", None):
-                return r.url
+            r = s.get(current, allow_redirects=True, headers=headers, timeout=20)
         except Exception:
-            pass
+            return current
 
-        # GET fallback
-        try:
-            r = s.get(url, allow_redirects=True, headers=headers, timeout=20)
-            if getattr(r, "url", None):
-                return r.url
-        except Exception:
-            pass
+        final_url = getattr(r, "url", "") or current
 
-        time.sleep(1.0)
+        # 1) Deswrapper por querystring (cuando el destino viene embebido)
+        p = urllib.parse.urlparse(final_url)
+        host = (p.netloc or "").lower()
+        qs = urllib.parse.parse_qs(p.query)
 
-    return url
+        if "tradedoubler" in host and "url" in qs:
+            nxt = urllib.parse.unquote(qs["url"][0])
+            if nxt and nxt != current:
+                current = nxt
+                continue
+
+        if "tradetracker" in host and "u" in qs:
+            nxt = urllib.parse.unquote(qs["u"][0])
+            if nxt and nxt != current:
+                current = nxt
+                continue
+
+        body = (r.text or "")
+
+        # 2) meta refresh: content="0;url=..."
+        m = re.search(r'http-equiv=["\']refresh["\'][^>]*content=["\'][^"\']*url=([^"\']+)["\']', body, re.I)
+        if m:
+            nxt = m.group(1).strip()
+            nxt = urllib.parse.urljoin(final_url, nxt)
+            if nxt and nxt != current:
+                current = nxt
+                continue
+
+        # 3) JS: window.location / location.href / document.location
+        m = re.search(r'(?:window\.location|location\.href|document\.location)\s*=\s*["\']([^"\']+)["\']', body, re.I)
+        if m:
+            nxt = m.group(1).strip()
+            nxt = urllib.parse.urljoin(final_url, nxt)
+            if nxt and nxt != current:
+                current = nxt
+                continue
+
+        return final_url
+
+    return current
 
 
 def deswrap_url(url: str) -> str:
@@ -299,12 +335,16 @@ def obtener_datos_remotos():
 
                     btn = item.select_one("a.bg-fluor-green")
                     url_imp = btn["href"] if btn else ""
-                    url_exp_raw = expandir_url(url_imp)
-                    url_exp = deswrap_url(url_exp_raw)
-                    enlace_de_compra_importado = url_exp  # ACF: SIEMPRE expandido
+
+                    # ✅ Expandir SIEMPRE antes de guardar en ACF "url_oferta_sin_acortar"
+                    url_oferta_sin_acortar = expandir_url(url_imp)
+                    url_exp = url_oferta_sin_acortar  # mantenemos el nombre para no romper el resto del flujo
+
+                    # Guardamos también el enlace original importado (acortador / afiliado de origen)
+                    enlace_de_compra_importado = url_imp
 
                     fuente = btn.get_text(strip=True).replace("Cómpralo en", "").strip() if btn else "Tienda"
-                    url_importada_sin_afiliado = url_exp
+                    url_importada_sin_afiliado = url_oferta_sin_acortar
 
                     # Normalización de URL sin parámetros según fuente
                     if fuente == "MediaMarkt":
@@ -501,7 +541,7 @@ def sincronizar(remotos):
                 {"key": "precio_original", "value": str(p["p_reg"])},
                 {"key": "codigo_de_descuento", "value": p["cup"]},
                 {"key": "enlace_de_compra_importado", "value": p.get("enlace_de_compra_importado", p.get("url_exp", ""))},
-                {"key": "url_oferta_sin_acortar", "value": p.get("url_exp", "")},
+                {"key": "url_oferta_sin_acortar", "value": p.get("url_oferta_sin_acortar", p.get("url_exp", ""))},
                 {"key": "url_importada_sin_afiliado", "value": p["url_importada_sin_afiliado"]},
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": p["url_sin_acortar_con_mi_afiliado"]},
                 {"key": "url_oferta", "value": p["url_oferta"]},
@@ -589,4 +629,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
