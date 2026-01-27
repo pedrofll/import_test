@@ -3,6 +3,9 @@ import os
 import time
 import requests
 import urllib.parse
+import json
+import re
+import base64
 from datetime import datetime
 from bs4 import BeautifulSoup
 from woocommerce import API
@@ -68,6 +71,8 @@ ID_AFILIADO_ALIEXPRESS = os.environ.get("AFF_ALIEXPRESS", "")
 ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
+ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
+ID_AFILIADO_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "")
 
 # Acumuladores globales
 summary_creados = []
@@ -80,6 +85,62 @@ def limpiar_precio(texto):
         return "0"
     return texto.replace("€", "").replace(".", "").replace(",", ".").strip()
 
+def extraer_items_next_data(html: str):
+    """Fallback para páginas Next.js: extrae items desde <script id="__NEXT_DATA__">.
+    Devuelve una lista de dicts con claves similares a las usadas por el parser HTML.
+    """
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        script = soup.find("script", id="__NEXT_DATA__")
+        if not script or not script.string:
+            return []
+        data = json.loads(script.string)
+
+        candidatos = []
+
+        def walk(x):
+            if isinstance(x, dict):
+                keys = {str(k).lower() for k in x.keys()}
+                has_name = ("name" in keys) or ("title" in keys)
+                has_url = ("url" in keys) or ("href" in keys) or ("link" in keys)
+                has_price = any(k in keys for k in ("price","precio","saleprice","currentprice","precio_actual"))
+                if has_name and has_url and has_price:
+                    candidatos.append(x)
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+
+        walk(data)
+
+        items = []
+        for c in candidatos:
+            nombre = c.get("name") or c.get("title") or ""
+            url_imp = c.get("url") or c.get("href") or c.get("link") or ""
+            fuente = c.get("store") or c.get("merchant") or c.get("fuente") or c.get("shop") or ""
+            img = c.get("image") or c.get("imageUrl") or c.get("img") or ""
+            p_act = c.get("salePrice") or c.get("currentPrice") or c.get("price") or c.get("precio_actual") or c.get("precio") or ""
+            p_reg = c.get("oldPrice") or c.get("regularPrice") or c.get("precio_original") or ""
+            ram = c.get("ram") or c.get("memoria") or ""
+            rom = c.get("rom") or c.get("storage") or c.get("capacidad") or ""
+            specs = c.get("specs") or c.get("description") or ""
+
+            items.append({
+                "raw_nombre": str(nombre),
+                "img_src": str(img),
+                "specs_text": str(specs),
+                "ram": str(ram),
+                "rom": str(rom),
+                "p_act": str(p_act),
+                "p_reg": str(p_reg),
+                "url_imp": str(url_imp),
+                "fuente": str(fuente),
+            })
+        return items
+    except Exception:
+        return []
+
 def acortar_url(url):
     try:
         url_encoded = urllib.parse.quote(url, safe="")
@@ -88,12 +149,226 @@ def acortar_url(url):
     except:
         return url
 
-def expandir_url(url):
-    try:
-        r = requests.get(url, allow_redirects=True, timeout=10, stream=True)
-        return r.url
-    except:
-        return url
+def expandir_url(url: str) -> str:
+    """
+    Expande enlaces (redirects + acortadores + wrappers), con especial cuidado en:
+      - Amazon: NO extraer del HTML (evita devolver sprites/recursos).
+      - Tradedoubler PDT: pdt.tradedoubler.com/click?...url(ENCODED) -> extrae destino.
+      - Awin: si aparece cread/pclick con 'ued=', se devuelve el destino real (tienda).
+      - topesdg.link: intenta Location header (302) y, si no, extracción por HTML/JS.
+    """
+    if not url:
+        return ""
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        "Accept-Language": "es-ES,es;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    SHORTENER_HOSTS = {
+        "topesdg.link",
+        "is.gd",
+        "bit.ly",
+        "t.co",
+        "tinyurl.com",
+        "cutt.ly",
+        "rebrand.ly",
+        "shorturl.at",
+        "rb.gy",
+        "amzn.to",
+    }
+
+    def _host(u: str) -> str:
+        try:
+            return (urllib.parse.urlparse(u).netloc or "").lower()
+        except Exception:
+            return ""
+
+    def _is_amazon(h: str) -> bool:
+        return ("amazon." in h) and (not h.startswith("images-") and "ssl-images-amazon" not in h)
+
+    def _looks_like_resource(u: str) -> bool:
+        ul = (u or "").lower()
+        return ul.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".ico"))
+
+    def _extract_awin_destination(u: str) -> str:
+        try:
+            pu = urllib.parse.urlparse(u)
+            host = (pu.netloc or "").lower()
+            if "awin1.com" not in host:
+                return ""
+            qs = urllib.parse.parse_qs(pu.query)
+            for k in ("ued", "url", "desturl", "destination"):
+                if k in qs and qs[k]:
+                    return urllib.parse.unquote(qs[k][0])
+        except Exception:
+            pass
+        return ""
+
+    def _unwrap_tradedoubler_pdt(u: str) -> str:
+        # https://pdt.tradedoubler.com/click?a(3181447)p(270504)...url(ENCODED)
+        try:
+            if "pdt.tradedoubler.com/click" not in u:
+                return u
+            m = re.search(r"a\((\d+)\).*?p\((\d+)\).*?url\(([^)]+)\)", u)
+            if not m:
+                return u
+            dest = urllib.parse.unquote(m.group(3))
+            return dest if dest.startswith("http") else u
+        except Exception:
+            return u
+
+    def _unwrap_query_wrappers(u: str) -> str:
+        try:
+            p = urllib.parse.urlparse(u)
+            host = (p.netloc or "").lower()
+            qs = urllib.parse.parse_qs(p.query)
+            if "tradedoubler" in host and "url" in qs and qs["url"]:
+                return urllib.parse.unquote(qs["url"][0])
+            if "tradetracker" in host and "u" in qs and qs["u"]:
+                return urllib.parse.unquote(qs["u"][0])
+        except Exception:
+            pass
+        return u
+
+    def _extract_from_html(base_url: str, html: str) -> str:
+        # Awin embed
+        m = re.search(r'https?://www\.awin1\.com/(?:cread|pclick)\.php\?[^"\']+', html, re.I)
+        if m:
+            aw = m.group(0).strip()
+            dest = _extract_awin_destination(aw)
+            if dest:
+                return dest
+
+        # canonical
+        m = re.search(r'rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html, re.I)
+        if m:
+            return urllib.parse.urljoin(base_url, m.group(1).strip())
+
+        # og:url
+        m = re.search(r'property=["\']og:url["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+        if m:
+            return urllib.parse.urljoin(base_url, m.group(1).strip())
+
+        # meta refresh
+        m = re.search(r'http-equiv=["\']refresh["\'][^>]*content=["\'][^"\']*url=([^"\']+)["\']', html, re.I)
+        if m:
+            return urllib.parse.urljoin(base_url, m.group(1).strip())
+
+        # JS redirects
+        for pat in [
+            r'(?:window\.location|location\.href|document\.location)\s*=\s*["\']([^"\']+)["\']',
+            r'location\.replace\(\s*["\']([^"\']+)["\']\s*\)',
+        ]:
+            m = re.search(pat, html, re.I)
+            if m:
+                return urllib.parse.urljoin(base_url, m.group(1).strip())
+
+        # atob('...') base64
+        m = re.search(r'atob\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
+        if m:
+            try:
+                b64 = m.group(1).strip()
+                pad = '=' * (-len(b64) % 4)
+                decoded = base64.b64decode((b64 + pad).encode('utf-8', 'ignore')).decode('utf-8', 'ignore')
+                mm = re.search(r'https?://[^\s"\']+', decoded, re.I)
+                if mm:
+                    return mm.group(0).strip()
+            except Exception:
+                pass
+
+        # decodeURIComponent('...')
+        m = re.search(r'decodeURIComponent\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
+        if m:
+            try:
+                dec = urllib.parse.unquote(m.group(1).strip())
+                mm = re.search(r'https?://[^\s"\']+', dec, re.I)
+                if mm:
+                    return mm.group(0).strip()
+            except Exception:
+                pass
+
+        # URLs escapadas (https:\/\/...)
+        m = re.search(r'https?:\\/\\/[^\s"\']+', html, re.I)
+        if m:
+            return m.group(0).replace('\\/','/').replace('\\','').strip()
+
+        # Protocolo relativo //...
+        m = re.search(r'//[^\s"\']+', html, re.I)
+        if m:
+            return "https:" + m.group(0).strip()
+
+        # fallback URL razonable
+        for cand in re.findall(r'https?://[^\s"\']+', html):
+            c = cand.strip()
+            if _looks_like_resource(c):
+                continue
+            ch = _host(c)
+            if "ssl-images-amazon" in ch or ch.startswith("images-"):
+                continue
+            return c
+
+        return base_url
+
+    s = requests.Session()
+    current = _unwrap_tradedoubler_pdt(url)
+
+    for _ in range(10):
+        current = _unwrap_query_wrappers(current)
+        h_cur = _host(current)
+
+        # Preflight sin redirects (Location)
+        if h_cur in SHORTENER_HOSTS:
+            try:
+                r0 = s.get(current, headers=headers, allow_redirects=False, timeout=20)
+                loc = r0.headers.get("Location") or r0.headers.get("location")
+                if loc:
+                    current = urllib.parse.urljoin(current, loc)
+                    aw = _extract_awin_destination(current)
+                    if aw and not _looks_like_resource(aw):
+                        return aw
+                    continue
+            except Exception:
+                pass
+
+        try:
+            r = s.get(current, headers=headers, allow_redirects=True, timeout=25)
+        except Exception:
+            return current
+
+        final_url = getattr(r, "url", "") or current
+
+        # Awin destino directo
+        aw = _extract_awin_destination(final_url)
+        if aw and not _looks_like_resource(aw):
+            return aw
+
+        unwrapped = _unwrap_query_wrappers(final_url)
+        if unwrapped != final_url:
+            current = unwrapped
+            continue
+
+        h_final = _host(final_url)
+
+        if _is_amazon(h_final) or _is_amazon(h_cur):
+            return final_url
+
+        content_type = (r.headers.get("Content-Type") or "").lower()
+        if final_url == current and r.status_code == 200 and ("text/html" in content_type or "text/plain" in content_type or content_type == ""):
+            if h_final in SHORTENER_HOSTS or any(x in h_final for x in ["tradedoubler", "tradetracker", "awin1.com"]):
+                extracted = _extract_from_html(final_url, r.text or "")
+                if extracted and extracted != current and not _looks_like_resource(extracted):
+                    aw2 = _extract_awin_destination(extracted)
+                    if aw2 and not _looks_like_resource(aw2):
+                        return aw2
+                    current = extracted
+                    continue
+
+        return final_url
+
+    return current
+
 
 # --- GESTIÓN DE CATEGORÍAS ---
 def obtener_todas_las_categorias():
@@ -181,6 +456,12 @@ def obtener_datos_remotos():
             items = soup.select("ul.grid li")
             print(f"✅ Items detectados: {len(items)}")
 
+            # Fallback Next.js: si el HTML no trae <li> (hidrata por JS), sacamos datos de __NEXT_DATA__
+            items_json = []
+            if len(items) == 0:
+                items_json = extraer_items_next_data(r.text)
+                print(f"✅ Items detectados (__NEXT_DATA__): {len(items_json)}")
+
             for item in items:
                 try:
                     link_el = item.select_one("a.text-white")
@@ -218,6 +499,7 @@ def obtener_datos_remotos():
                     url_exp = expandir_url(url_imp)
 
                     fuente = btn.get_text(strip=True).replace("Cómpralo en", "").strip() if btn else "Tienda"
+                    fuente_norm = (fuente or "").strip().lower()
                     url_importada_sin_afiliado = url_exp
 
                     # Normalización de URL sin parámetros según fuente
@@ -229,8 +511,16 @@ def obtener_datos_remotos():
                         )
                     elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
                         url_importada_sin_afiliado = url_exp.split("?")[0]
+                    elif fuente_norm == "xiaomi store":
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
+                    elif fuente_norm == "joom" or "joom.com/" in (url_exp or ""):
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
                     else:
                         url_importada_sin_afiliado = url_exp
+
+                    # Seguridad extra: Joom siempre sin query
+                    if (fuente_norm == "joom") or ("joom.com/" in (url_exp or "")):
+                        url_importada_sin_afiliado = (url_exp or "").split("?")[0]
 
                     # Construir URL con afiliado usando variables de entorno
                     if fuente == "MediaMarkt" and ID_AFILIADO_MEDIAMARKT:
@@ -241,6 +531,13 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
+                    elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
+                    elif fuente == "El Corte Inglés" and ID_AFILIADO_ELCORTEINGLES:
+                        aff = ID_AFILIADO_ELCORTEINGLES
+                        if "?" in url_importada_sin_afiliado and aff.startswith("?"):
+                            aff = "&" + aff[1:]
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{aff}"
                     else:
                         url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
@@ -328,6 +625,116 @@ def obtener_datos_remotos():
 
                 except Exception:
                     continue
+            # Procesar items extraídos de __NEXT_DATA__ (cuando el HTML no trae el grid)
+            for data in items_json:
+                try:
+                    raw_nombre = (data.get("raw_nombre") or "").strip()
+                    if not raw_nombre:
+                        continue
+                    nombre = ' '.join(w[:1].upper() + w[1:] for w in raw_nombre.split())
+
+                    if any(k in nombre.upper() for k in ["TAB", "IPAD", "PAD"]):
+                        continue
+
+                    img_src = (data.get("img_src") or "").strip()
+
+                    specs_text = (data.get("specs_text") or "").strip()
+
+                    # RAM/ROM: si vienen directas en JSON, usamos esas; si no, intentamos parsear como en HTML
+                    ram_raw = (data.get("ram") or "").strip()
+                    rom_raw = (data.get("rom") or "").strip()
+
+                    if ram_raw and rom_raw:
+                        ram_part = ram_raw.replace("GB", "").strip()
+                        rom_part = rom_raw.replace("GB", "").strip()
+                    else:
+                        parts = specs_text.split("·")[0].replace("GB", "").split("/")
+                        if len(parts) < 2:
+                            continue
+                        ram_part = parts[0].strip()
+                        rom_part = parts[1].strip()
+
+                    ram = ram_part if "TB" in ram_part.upper() else f"{ram_part} GB"
+                    rom = rom_part if "TB" in rom_part.upper() else f"{rom_part} GB"
+
+                    p_act = limpiar_precio(str(data.get("p_act") or ""))
+                    p_reg = limpiar_precio(str(data.get("p_reg") or "")) or p_act
+                    if not p_act:
+                        continue
+
+                    url_imp = (data.get("url_imp") or "").strip()
+                    if not url_imp:
+                        continue
+                    url_exp = expandir_url(url_imp)
+
+                    fuente = (data.get("fuente") or "").strip() or "Tienda"
+                    fuente_norm = (fuente or "").strip().lower()
+                    url_importada_sin_afiliado = url_exp
+
+                    # Normalización de URL sin parámetros según fuente
+                    if fuente == "MediaMarkt":
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
+                    elif fuente == "AliExpress Plaza":
+                        url_importada_sin_afiliado = (
+                            url_exp.split(".html")[0] + ".html" if ".html" in url_exp else url_exp.split("?")[0]
+                        )
+                    elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House", "El Corte Inglés", "Joom"]:
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
+                    # Seguridad extra: Joom siempre sin query
+                    if (fuente_norm == "joom") or ("joom.com/" in (url_exp or "")):
+                        url_importada_sin_afiliado = (url_exp or "").split("?")[0]
+                    else:
+                        url_importada_sin_afiliado = url_exp.split("?")[0] if url_exp else url_exp
+
+                    cup = "OFERTA PROMO"
+                    ver = detectar_version(nombre, fuente)
+                    enviado_desde = detectar_enviado_desde(fuente)
+                    enviado_desde_tg = bandera_enviado_desde(enviado_desde)
+
+                    # Construir URL con afiliado usando variables de entorno (mismo comportamiento que el parser HTML)
+                    if fuente == "MediaMarkt" and ID_AFILIADO_MEDIAMARKT:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_MEDIAMARKT}"
+                    elif fuente == "AliExpress Plaza" and ID_AFILIADO_ALIEXPRESS:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_ALIEXPRESS}"
+                    elif fuente == "Fnac" and ID_AFILIADO_FNAC:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
+                    elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
+                    elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
+                    elif fuente == "El Corte Inglés" and ID_AFILIADO_ELCORTEINGLES:
+                        aff = ID_AFILIADO_ELCORTEINGLES
+                        if "?" in url_importada_sin_afiliado and aff.startswith("?"):
+                            aff = "&" + aff[1:]
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{aff}"
+                    else:
+                        url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
+
+                    url_oferta = acortar_url(url_sin_acortar_con_mi_afiliado)
+
+                    clave = f"{nombre}|{ram}|{rom}|{fuente}".lower()
+                    if clave not in productos_por_clave:
+                        productos_por_clave[clave] = {
+                            "nombre": nombre,
+                            "p_act": p_act,
+                            "p_reg": p_reg,
+                            "ram": ram,
+                            "rom": rom,
+                            "ver": ver,
+                            "fuente": fuente,
+                            "cup": cup,
+                            "url_exp": url_exp,
+                            "url_imp": url_imp,
+                            "url_importada_sin_afiliado": url_importada_sin_afiliado,
+                            "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
+                            "url_oferta": url_oferta,
+                            "imagen": img_src,
+                            "enviado_desde": enviado_desde,
+                            "enviado_desde_tg": enviado_desde_tg,
+                        }
+                except Exception:
+                    continue
+
 
         except Exception as e:
             print(f"❌ ERROR escaneando listado '{url_listado}': {e}")
@@ -397,10 +804,6 @@ def sincronizar(remotos):
                 cambios.append(f"enviado_desde_tg ({meta.get('enviado_desde_tg')} -> {match_remoto['enviado_desde_tg']})")
                 update_data["meta_data"].append({"key": "enviado_desde_tg", "value": match_remoto['enviado_desde_tg']})
             
-            if match_remoto.get('imagen') and match_remoto['imagen'] != meta.get('imagen_producto'):
-                cambios.append(f"imagen_producto ({meta.get('imagen_producto')} -> {match_remoto['imagen']})")
-                update_data["meta_data"].append({"key": "imagen_producto", "value": match_remoto['imagen']})
-            
             if cambios:
                 wcapi.put(f"products/{local['id']}", update_data)
                 summary_actualizados.append({"nombre": local['name'], "id": local['id'], "cambios": cambios})
@@ -426,7 +829,6 @@ def sincronizar(remotos):
                 {"key": "capacidad", "value": p['rom']},
                 {"key": "version", "value": p['ver']},
                 {"key": "fuente", "value": p['fuente']},
-                {"key": "imagen_producto", "value": p["imagen"]},
                 {"key": "precio_actual", "value": str(p['p_act'])},
                 {"key": "precio_original", "value": str(p['p_reg'])},
                 {"key": "codigo_de_descuento", "value": p['cup']},
@@ -469,7 +871,7 @@ def sincronizar(remotos):
             except Exception as e:
                 print(f"❌ Excepción durante la creación. Reintentando...", flush=True)
             
-            time.sleep(15)
+            time.sleep(60)
 
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n============================================================")
