@@ -147,22 +147,52 @@ def acortar_url(url):
         return url
 
 def expandir_url(url: str) -> str:
-    """Expande enlaces (redirects + acortadores + Tradedoubler PDT url(...))."""
+    """
+    Expande enlaces (redirects + acortadores + wrappers).
+
+    IMPORTANTE:
+    - Para Amazon, NO intentamos "extraer" URLs del HTML (puede devolver sprites/recursos). Devolvemos la URL final tras redirects.
+    - Para acortadores (p. ej. topesdg.link) y wrappers, si el GET devuelve 200 con HTML, intentamos extraer el destino desde meta/JS.
+    - Soporta Tradedoubler PDT: pdt.tradedoubler.com/click?...url(ENCODED)
+    """
     if not url:
         return ""
 
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
         "Accept-Language": "es-ES,es;q=0.9",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
+
+    SHORTENER_HOSTS = {
+        "topesdg.link",
+        "is.gd",
+        "bit.ly",
+        "t.co",
+        "tinyurl.com",
+        "cutt.ly",
+        "rebrand.ly",
+        "shorturl.at",
+        "rb.gy",
+        "amzn.to",
+    }
+
+    def _host(u: str) -> str:
+        try:
+            return (urllib.parse.urlparse(u).netloc or "").lower()
+        except Exception:
+            return ""
+
+    def _is_amazon(h: str) -> bool:
+        # www.amazon.es, amazon.es, smile.amazon.es, etc.
+        return ("amazon." in h) and (not h.startswith("images-") and "ssl-images-amazon" not in h)
 
     def _unwrap_tradedoubler_pdt(u: str) -> str:
         # Formato: https://pdt.tradedoubler.com/click?a(3181447)p(270504)...url(ENCODED)
         try:
             if "pdt.tradedoubler.com/click" not in u:
                 return u
-            m = re.search(r"a\((\d+)\).*?p\((\d+)\).*?url\(([^\)]+)\)", u)
+            m = re.search(r"a\((\d+)\).*?p\((\d+)\).*?url\(([^)]+)\)", u)
             if not m:
                 return u
             a = m.group(1)
@@ -188,18 +218,53 @@ def expandir_url(url: str) -> str:
         return u
 
     def _extract_from_html(base_url: str, html: str) -> str:
+        """
+        Extrae destino de HTML de acortadores:
+        - <link rel="canonical" href=...>
+        - <meta property="og:url" content=...>
+        - meta refresh
+        - window.location / location.href / location.replace(...)
+        - y, como fallback, una URL que parezca de tienda (priorizando El Corte Inglés)
+        """
+        # canonical
+        m = re.search(r'rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html, re.I)
+        if m:
+            return urllib.parse.urljoin(base_url, m.group(1).strip())
+
+        # og:url
+        m = re.search(r'property=["\']og:url["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+        if m:
+            return urllib.parse.urljoin(base_url, m.group(1).strip())
+
         # meta refresh
         m = re.search(r'http-equiv=["\']refresh["\'][^>]*content=["\'][^"\']*url=([^"\']+)["\']', html, re.I)
         if m:
             return urllib.parse.urljoin(base_url, m.group(1).strip())
+
         # JS redirects
         m = re.search(r'(?:window\.location|location\.href|document\.location)\s*=\s*["\']([^"\']+)["\']', html, re.I)
         if m:
             return urllib.parse.urljoin(base_url, m.group(1).strip())
-        # Fallback: primera URL https://...
-        m = re.search(r'https?://[^\s"\']+', html)
+
+        m = re.search(r'location\.replace\(\s*["\']([^"\']+)["\']\s*\)', html, re.I)
+        if m:
+            return urllib.parse.urljoin(base_url, m.group(1).strip())
+
+        # Preferir El Corte Inglés si aparece
+        m = re.search(r'https?://(?:www\.)?elcorteingles\.es/[^\s"\']+', html, re.I)
         if m:
             return m.group(0).strip()
+
+        # fallback: una URL "razonable", evitando recursos
+        for cand in re.findall(r'https?://[^\s"\']+', html):
+            c = cand.strip()
+            ch = _host(c)
+            if not ch:
+                continue
+            if "ssl-images-amazon" in ch or ch.startswith("images-") or c.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js")):
+                continue
+            return c
+
         return base_url
 
     s = requests.Session()
@@ -209,7 +274,7 @@ def expandir_url(url: str) -> str:
     current = _unwrap_tradedoubler_pdt(current)
 
     for _ in range(8):
-        # unwrap querystring wrappers (por si tras un hop volvemos a tradedoubler con url=)
+        # unwrap querystring wrappers (por si tras un hop volvemos a tradetracker/tradedoubler con url=)
         current = _unwrap_query_wrappers(current)
 
         try:
@@ -225,13 +290,22 @@ def expandir_url(url: str) -> str:
             current = unwrapped
             continue
 
-        # Si no cambió pero hay HTML con redirect (topesdg.link suele hacer esto)
-        if final_url == current and r.status_code == 200:
-            html = r.text or ""
-            extracted = _extract_from_html(final_url, html)
-            if extracted and extracted != current:
-                current = extracted
-                continue
+        h_final = _host(final_url)
+        h_current = _host(current)
+
+        # ✅ Para Amazon: NO extraemos del HTML (evita devolver sprites/recursos)
+        if _is_amazon(h_final) or _is_amazon(h_current):
+            return final_url
+
+        # Solo intentamos extraer desde HTML si es un acortador (o un wrapper conocido)
+        content_type = (r.headers.get("Content-Type") or "").lower()
+        if final_url == current and r.status_code == 200 and "text/html" in content_type:
+            if h_final in SHORTENER_HOSTS or any(x in h_final for x in ["tradedoubler", "tradetracker"]):
+                html = r.text or ""
+                extracted = _extract_from_html(final_url, html)
+                if extracted and extracted != current:
+                    current = extracted
+                    continue
 
         return final_url
 
