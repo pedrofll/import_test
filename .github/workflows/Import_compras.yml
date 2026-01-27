@@ -50,6 +50,8 @@ jobs:
           AFF_AMAZON: ${{ secrets.AFF_AMAZON }}
           AFF_FNAC: ${{ secrets.AFF_FNAC }}
           AFF_XIAOMI_STORE: ${{ secrets.AFF_XIAOMI_STORE }}
+          AFF_ELCORTEINGLES: ${{ secrets.AFF_ELCORTEINGLES }}
+          
 
         run: python compras.py
 
