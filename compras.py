@@ -72,6 +72,7 @@ ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
 ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
+ID_AFILIADO_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "")
 
 # Acumuladores globales
 summary_creados = []
@@ -525,6 +526,11 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
                     elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
+                    elif fuente == "El Corte Inglés" and ID_AFILIADO_ELCORTEINGLES:
+                        aff = ID_AFILIADO_ELCORTEINGLES
+                        if "?" in url_importada_sin_afiliado and aff.startswith("?"):
+                            aff = "&" + aff[1:]
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{aff}"
                     else:
                         url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
@@ -685,6 +691,11 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
                     elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
+                    elif fuente == "El Corte Inglés" and ID_AFILIADO_ELCORTEINGLES:
+                        aff = ID_AFILIADO_ELCORTEINGLES
+                        if "?" in url_importada_sin_afiliado and aff.startswith("?"):
+                            aff = "&" + aff[1:]
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{aff}"
                     else:
                         url_sin_acortar_con_mi_afiliado = url_importada_sin_afiliado
 
