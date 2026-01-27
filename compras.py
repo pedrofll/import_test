@@ -512,6 +512,8 @@ def obtener_datos_remotos():
                         url_importada_sin_afiliado = url_exp.split("?")[0]
                     elif fuente == "Xiaomi Store":
                         url_importada_sin_afiliado = url_exp.split("?")[0]
+                    elif fuente == "Joom":
+                        url_importada_sin_afiliado = url_exp.split("?")[0]
                     else:
                         url_importada_sin_afiliado = url_exp
 
@@ -670,7 +672,7 @@ def obtener_datos_remotos():
                         url_importada_sin_afiliado = (
                             url_exp.split(".html")[0] + ".html" if ".html" in url_exp else url_exp.split("?")[0]
                         )
-                    elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House", "El Corte Inglés"]:
+                    elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House", "El Corte Inglés", "Joom"]:
                         url_importada_sin_afiliado = url_exp.split("?")[0]
                     else:
                         url_importada_sin_afiliado = url_exp.split("?")[0] if url_exp else url_exp
