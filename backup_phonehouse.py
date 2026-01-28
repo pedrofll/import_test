@@ -92,6 +92,27 @@ def calcular_precio_original(precio_actual: int, factor: float = 1.20) -> int:
 def normalize_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
+def titlecase_product_name(nombre: str) -> str:
+    """Normaliza el nombre del móvil:
+    - Primera letra de cada palabra en mayúscula.
+    - Si una palabra mezcla números + letras (p.ej. g85, 14t, 5g), las letras van en MAYÚSCULA.
+    """
+    t = normalize_spaces(nombre)
+    if not t:
+        return ""
+
+    out_words = []
+    for w in t.split():
+        # Palabras tipo "g85", "14t", "5g", "a55s", etc.: letras en mayúscula
+        if re.search(r"\d", w) and re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", w):
+            w2 = "".join(ch.upper() if ch.isalpha() else ch for ch in w)
+        else:
+            w2 = (w[:1].upper() + w[1:].lower()) if w else w
+        out_words.append(w2)
+
+    return " ".join(out_words)
+
+
 def mask_url(url: str) -> str:
     """Enmascara la URL para logs (no muestra querystring completa)."""
     try:
@@ -558,6 +579,7 @@ def obtener_productos_desde_dom(url: str, objetivo: int = 72, source_label: str 
 
             # specs desde título
             nombre, cap, ram = extraer_nombre_memoria_capacidad(titulo)
+            nombre = titlecase_product_name(nombre)
             es_iphone = "iphone" in (nombre or "").lower()
             if es_iphone and not ram:
                 ram = ram_por_modelo_iphone(nombre) or ""
@@ -1133,6 +1155,9 @@ def sincronizar(remotos):
             url_base = (r["url_imp"] or "").strip().split("?")[0]
             url_con_afiliado = f"{url_base}{AFF_RAW}" if AFF_RAW else url_base
             url_oferta = acortar_url(url_con_afiliado)
+
+            print(f"11) URL sin acortar con mi afiliado: {url_con_afiliado}", flush=True)
+            print(f"12) URL acortada con mi afiliado: {url_oferta}", flush=True)
 
             # match por enlace_de_compra_importado
             match = next(
