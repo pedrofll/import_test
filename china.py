@@ -30,6 +30,8 @@ ID_AFILIADO_DHGATE = os.environ.get("AFF_DHGATE", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_PHONE_HOUSE = os.environ.get("AFF_PHONEHOUSE", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
+ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
+ID_AFILIADO_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "")
 
 # --- LÓGICA "ENVIADO DESDE" (ACF) ---
 TIENDAS_ESPANA = ["pccomponentes", "aliexpress plaza", "aliexpress", "mediamarkt", "amazon", "fnac", "phone house", "powerplanet"]
