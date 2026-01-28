@@ -286,6 +286,33 @@ def strip_network_suffix(slug: str) -> List[str]:
     return res
 
 
+
+def unique_list(items):
+    """Return a de-duplicated list while preserving order.
+
+    - Flattens one level if 'items' contains nested iterables (list/tuple/set).
+    - Ignores None.
+    - Keeps strings as-is.
+    """
+    out = []
+    seen = set()
+
+    def _add(x):
+        if x is None:
+            return
+        if isinstance(x, (list, tuple, set)):
+            for y in x:
+                _add(y)
+            return
+        if not isinstance(x, str):
+            x = str(x)
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+
+    _add(items)
+    return out
+
 def add_network_suffixes(slug: str) -> List[str]:
     """Si no tiene -5g/-4g, añade variantes con esos sufijos."""
     if slug.endswith("-5g") or slug.endswith("-4g"):
@@ -293,37 +320,46 @@ def add_network_suffixes(slug: str) -> List[str]:
     return [slug, f"{slug}-5g", f"{slug}-4g"]
 
 
-def fix_oppo_reno_hyphen(slug: str) -> List[str]:
-    """Smart-GSM usa 'oppo-reno-12-...' en vez de 'oppo-reno12-...'."""
-    out = [slug]
-    m = re.match(r"^(oppo-)reno(\d)(.+)$", slug)
-    if m:
-        out.append(f"{m.group(1)}reno-{m.group(2)}{m.group(3)}")
+def fix_oppo_reno_hyphen(slugs):
+    """Smart-GSM uses 'oppo-reno-12...' (with a hyphen before the series number).
 
-    # Caso sin prefijo oppo en el slug, pero el nombre indica reno
-    m2 = re.match(r"^reno(\d)(.+)$", slug)
-    if m2:
-        out.append(f"reno-{m2.group(1)}{m2.group(2)}")
+    Accepts a list of slugs (or a single slug) and returns a de-duplicated list.
+    """
+    if slugs is None:
+        return []
+    if isinstance(slugs, str):
+        slugs = [slugs]
 
-    # dedupe
-    seen = set()
     res = []
-    for x in out:
-        if x not in seen:
-            seen.add(x)
-            res.append(x)
-    return res
+    for slug in slugs:
+        if not isinstance(slug, str):
+            continue
+        res.append(slug)
+        m = re.match(r"^(oppo-)reno(\d)(.+)$", slug)
+        if m:
+            # oppo-reno12-fs -> oppo-reno-12-fs
+            res.append(f"{m.group(1)}reno-{m.group(2)}{m.group(3)}")
 
+    return unique_list(res)
 
+def fix_honor_magic_number_hyphen(slugs):
+    """Honor Magic series sometimes appears as 'honor-magic-7-pro' instead of 'honor-magic7-pro'."""
+    if slugs is None:
+        return []
+    if isinstance(slugs, str):
+        slugs = [slugs]
 
+    res = []
+    for slug in slugs:
+        if not isinstance(slug, str):
+            continue
+        res.append(slug)
+        m = re.match(r"^(honor-)magic(\d)(-.+)$", slug)
+        if m:
+            # honor-magic7-pro -> honor-magic-7-pro
+            res.append(f"{m.group(1)}magic-{m.group(2)}{m.group(3)}")
 
-def fix_honor_magic_number_hyphen(slug: str) -> List[str]:
-    # Smart-GSM suele usar '...magic-7-...' en lugar de '...magic7-...'
-    out = [slug]
-    if 'magic' in slug:
-        out.append(re.sub(r"(?<!-)magic(\d)", r"magic-\1", slug))
-    return unique_list(out)
-
+    return unique_list(res)
 
 def fix_samsung_slug_variants(slug: str) -> List[str]:
     out = [slug]
@@ -360,11 +396,7 @@ def candidate_slugs(term_slug: str, term_name: str, parent_slug: str) -> List[st
         slugs.append(s)
 
     # 2) caso OPPO Reno (Smart-GSM usa 'reno-12', no 'reno12')
-    #    Nota: fix_oppo_reno_hyphen trabaja con un slug (str). Aquí lo aplicamos a toda la lista.
-    tmp: List[str] = []
-    for s in slugs:
-        tmp.extend(fix_oppo_reno_hyphen(s))
-    slugs = unique_list(tmp)
+    slugs = fix_oppo_reno_hyphen(slugs)
 
     # 3) normalizaciones por marca/modelo
     if parent == 'honor' or any(s.startswith('honor-magic') for s in slugs):
