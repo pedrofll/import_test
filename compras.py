@@ -68,8 +68,11 @@ def _norm_import_id(v: str) -> str:
 
 ID_IMPORTACION_NORM = _norm_import_id(ID_IMPORTACION)
 ID_AFILIADO_ALIEXPRESS = os.environ.get("AFF_ALIEXPRESS", "")
+ID_AFILIADO_TRADINGSENZHEN = os.environ.get("AFF_TRADINGSENZHEN", "")
 ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
+ID_AFILIADO_DHGATE = os.environ.get("AFF_DHGATE", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
+ID_AFILIADO_PHONE_HOUSE = os.environ.get("AFF_PHONEHOUSE", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
 ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
 ID_AFILIADO_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "")
