@@ -29,6 +29,7 @@ AFF_FNAC = os.getenv("AFF_FNAC", "").strip()
 AFF_MEDIAMARKT = os.getenv("AFF_MEDIAMARKT", "").strip()
 AFF_POWERPLANET = os.getenv("AFF_POWERPLANET", "").strip()
 AFF_GSHOPPER = os.getenv("AFF_GSHOPPER", "").strip()
+AFF_TRADINGSENZHEN = os.getenv("AFF_TRADINGSENZHEN", "").strip()
 
 summary_creados = []
 summary_eliminados = []
@@ -189,6 +190,8 @@ def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
         return unir_afiliado(url_base, AFF_POWERPLANET)
     if f == "gshopper":
         return unir_afiliado(url_base, AFF_GSHOPPER)
+    if f == "tradingshenzhen":
+        return unir_afiliado(url_base, AFF_TRADINGSENZHEN)
     return url_base
 
 
@@ -242,7 +245,7 @@ def extraer_datos(texto):
         return "SKIP_TABLET"
 
     # Regla especial: iQOO (Vivo) — si empieza por "IQ" y no lleva "Vivo" delante,
-    # forzamos marca/categoría Vivo y preservamos el prefijo "IQ..." en mayúsculas.
+    # forzamos marca/categoría Vivo.
     try:
         _parts = nombre.split()
         _first_raw = _parts[0] if _parts else ""
@@ -253,6 +256,7 @@ def extraer_datos(texto):
                 nombre = "Vivo " + " ".join(_parts)
     except Exception:
         pass
+
 
     # RAM / ROM
     gigas = re.findall(r"(\d+)\s*GB", t_clean, re.I)
@@ -304,6 +308,8 @@ def detectar_fuente_por_url(url: str) -> str:
         return "Fnac"
     if "phonehouse.es" in u or "phonehouse." in u:
         return "Phone House"
+    if "tradingshenzhen.com" in u:
+        return "TradingShenzhen"
     return "Tienda"
 
 
@@ -438,9 +444,9 @@ async def main():
         print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
         print(f"15) URL acortada con mi afiliado: {url_oferta}")
         print(f"16) Enviado desde: {enviado_desde}")
-        print(f"17) Encolado para comparar con base de datos.")
+        print(f"17) Encolado para comparar con base de datos...")
         if _contiene_ellipsis(url_sin_acortar_con_mi_afiliado):
-            print("⚠️ ATENCIÓN: La URL con afiliado contiene '.' (no debería ocurrir tras normalización).")
+            print("⚠️ ATENCIÓN: La URL con afiliado contiene '...' (no debería ocurrir tras normalización).")
         print("-" * 60)
         # -----------------------------------
 
@@ -463,7 +469,7 @@ async def main():
                 {"key": "enlace_de_compra_importado", "value": enlace_de_compra_importado},
                 {"key": "url_oferta_sin_acortar", "value": url_oferta_sin_acortar},
                 {"key": "url_importada_sin_afiliado", "value": url_importada_sin_afiliado},
-                # ✅ AQUÍ va siempre la URL completa con tu afiliado (sin '.')
+                # ✅ AQUÍ va siempre la URL completa con tu afiliado (sin '...')
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": url_sin_acortar_con_mi_afiliado},
                 {"key": "url_oferta", "value": url_oferta},
                 {"key": "enviado_desde", "value": enviado_desde},
