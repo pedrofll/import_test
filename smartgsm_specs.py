@@ -286,4 +286,95 @@ def main():
         "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
     })
 
-    f
+    for term in subs:
+        term_id = int(term.get("id"))
+        term_name = term.get("name") or ""
+        term_slug = (term.get("slug") or "").strip().lower()
+        term_desc = (term.get("description") or "").strip()
+
+        parent_id = int(term.get("parent") or 0)
+        parent_slug = (by_id.get(parent_id) or {}).get("slug") or ""
+
+        print("-" * 60)
+        print(f"📁 Subcategoría: {term_name} (ID: {term_id})")
+        print(f"   slug: {term_slug} | parent_slug: {parent_slug}")
+
+        # Tablets fuera
+        if is_tablet_term(term_name, term_slug):
+            print("   ⏭️  IGNORADA (parece tablet: TAB/IPAD/PAD).")
+            summary_ignoradas.append({"nombre": term_name, "id": term_id, "razon": "tablet"})
+            continue
+
+        # Si no quieres pisar lo que metes a mano
+        if (not OVERWRITE_EXISTING_DESCRIPTION) and term_desc:
+            print("   ⏭️  IGNORADA (ya tiene descripción y overwrite=0).")
+            summary_ignoradas.append({"nombre": term_name, "id": term_id, "razon": "ya tiene descripción"})
+            continue
+
+        candidates = build_candidate_slugs(term_slug, parent_slug)
+
+        found_specs = []
+        used_url = ""
+
+        for cand in candidates:
+            url = f"{SMARTGSM_BASE}/{cand}"
+            specs = fetch_smartgsm_specs_ordered(url, session)
+            if specs:
+                found_specs = specs
+                used_url = url
+                break
+
+        if not found_specs:
+            print(f"   ❌ NO ENCONTRADA ficha en Smart-GSM con slugs: {candidates}")
+            summary_no_encontradas.append({"nombre": term_name, "id": term_id, "slug": term_slug})
+            time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
+            continue
+
+        desc = build_description(found_specs)
+
+        # Log resumen de lo extraído
+        print(f"   ✅ Ficha encontrada: {used_url}")
+        print(f"   🔎 Campos extraídos: {len(found_specs)}")
+        # muestra 6 primeras líneas
+        preview = desc.splitlines()[:6]
+        for ln in preview:
+            print(f"      - {ln}")
+
+        ok = wc_update_category_description(term_id, desc)
+        if ok:
+            summary_actualizadas.append({"nombre": term_name, "id": term_id, "url": used_url, "campos": len(found_specs)})
+            print("   💾 DESCRIPCIÓN actualizada en Woo ✅")
+        else:
+            summary_error.append({"nombre": term_name, "id": term_id, "url": used_url})
+            print("   ❌ ERROR actualizando descripción en Woo")
+
+        time.sleep(SLEEP_BETWEEN_REQUESTS_SEC)
+
+    # =========================
+    # Resumen final
+    # =========================
+    hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n============================================================")
+    print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})")
+    print(f"============================================================")
+    print(f"a) SUBCATEGORÍAS ACTUALIZADAS: {len(summary_actualizadas)}")
+    for it in summary_actualizadas:
+        print(f"- {it['nombre']} (ID: {it['id']}): {it['campos']} campos")
+
+    print(f"\nb) SUBCATEGORÍAS NO ENCONTRADAS EN SMART-GSM: {len(summary_no_encontradas)}")
+    for it in summary_no_encontradas:
+        print(f"- {it['nombre']} (ID: {it['id']}) slug='{it.get('slug','')}'")
+
+    print(f"\nc) SUBCATEGORÍAS IGNORADAS: {len(summary_ignoradas)}")
+    for it in summary_ignoradas:
+        print(f"- {it['nombre']} (ID: {it['id']}): {it.get('razon','')}")
+
+    print(f"\nd) ERRORES ACTUALIZANDO EN WOO: {len(summary_error)}")
+    for it in summary_error:
+        print(f"- {it['nombre']} (ID: {it['id']})")
+
+    print(f"============================================================\n")
+
+
+if __name__ == "__main__":
+    main()
