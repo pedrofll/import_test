@@ -44,6 +44,7 @@ jobs:
         AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
         AFF_TRADINGSENZHEN: ${{ secrets.AFF_TRADINGSENZHEN }}
         AFF_DHGATE: ${{ secrets.AFF_DHGATE }}
+        AFF_ELCORTEINGLES: ${{ secrets.AFF_ELCORTEINGLES }}    
           
         
       run: python Tel_china.py
