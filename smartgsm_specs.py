@@ -360,7 +360,11 @@ def candidate_slugs(term_slug: str, term_name: str, parent_slug: str) -> List[st
         slugs.append(s)
 
     # 2) caso OPPO Reno (Smart-GSM usa 'reno-12', no 'reno12')
-    slugs = fix_oppo_reno_hyphen(slugs)
+    #    Nota: fix_oppo_reno_hyphen trabaja con un slug (str). Aquí lo aplicamos a toda la lista.
+    tmp: List[str] = []
+    for s in slugs:
+        tmp.extend(fix_oppo_reno_hyphen(s))
+    slugs = unique_list(tmp)
 
     # 3) normalizaciones por marca/modelo
     if parent == 'honor' or any(s.startswith('honor-magic') for s in slugs):
