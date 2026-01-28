@@ -1,84 +1,69 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """smartgsm_specs.py
 
-Sincroniza la "Ficha técnica" de Smart-GSM dentro de la DESCRIPCIÓN de
-las subcategorías (product_cat hijos) en WooCommerce.
+Importa la sección "Ficha técnica" desde Smart-GSM y la guarda en la
+DESCRIPCIÓN de las subcategorías de WooCommerce (product_cat).
 
-- Recorre todas las subcategorías (términos con parent != 0)
-- Construye el slug de Smart-GSM y descarga la tabla de "Ficha técnica"
-- Convierte la ficha en HTML (lista) y la guarda en la descripción del término
+Base Smart-GSM:
+    https://www.smart-gsm.com/moviles
 
-ENV requeridas:
-  WP_URL      -> https://tudominio.com
-  WP_KEY      -> consumer_key
-  WP_SECRET   -> consumer_secret
+Ficha de un dispositivo:
+    https://www.smart-gsm.com/moviles/<slug>
 
-ENV opcionales:
-  SMARTGSM_OVERWRITE -> 1/0 (default 0) si 1, sobreescribe descripciones existentes
-  SMARTGSM_SLEEP     -> pausa entre requests a Smart-GSM (default 0.8)
-  SMARTGSM_TIMEOUT   -> timeout requests (default 25)
+ENV:
+    WP_URL                -> https://ofertasdemoviles.com
+    WP_KEY                -> Woo consumer key
+    WP_SECRET             -> Woo consumer secret
+    SMARTGSM_OVERWRITE    -> 1/0 (default 0). Si 0, sólo escribe si la descripción está vacía.
+    SMARTGSM_SLEEP        -> segundos de pausa entre requests a Smart-GSM (default 0.8)
 
 Notas:
-- Filtra tablets (TAB, IPAD, PAD, TABLET) y no toca esas subcategorías.
-- Nunca guarda "Precio" (o variantes) si aparece en la ficha de Smart-GSM.
-- Si no encuentra la ficha con el slug, prueba variantes:
-    * quitar sufijo -5g / -4g
-    * prefijos para marcas "internas" (poco/redmi -> xiaomi)
-    * slug regenerado desde el nombre (normalizado)
+- No importamos tablets: si el nombre de la subcategoría contiene TAB o IPAD => IGNORADA.
+- No queremos que se “cuele” el precio (Smart-GSM a veces lo muestra): se ignora cualquier
+  fila cuyo label sea "Precio" (o empiece por "Precio").
+- Mejoras de matching de slugs:
+    * Si no encuentra, prueba quitando sufijos -5g/-4g.
+    * Si no encuentra, prueba añadiendo -5g y/o -4g.
+    * POCO/Redmi: a veces Smart-GSM los publica como "xiaomi-poco-..." / "xiaomi-redmi-...".
+    * Realme: Smart-GSM los publica bajo OPPO: "oppo-realme-...".
+    * OPPO Reno: Smart-GSM usa "oppo-reno-12-..." (con guión entre reno y el número).
 
 """
 
 from __future__ import annotations
 
+import html
 import os
 import re
 import sys
 import time
-import json
-import unicodedata
-import html
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import requests
+from bs4 import BeautifulSoup
 
-try:
-    from bs4 import BeautifulSoup
-except Exception as e:
-    print("❌ Falta dependencia: bs4 (BeautifulSoup). Instala con: pip install beautifulsoup4")
-    raise
 
+# ------------------------------- Config ------------------------------------
 
 SMARTGSM_BASE = "https://www.smart-gsm.com/moviles"
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Connection": "keep-alive",
-}
+# Filtrado tablets
+TABLET_TOKENS = {"TAB", "IPAD"}
 
-# Palabras que implican que NO es un móvil
-TABLET_WORD_RE = re.compile(r"\b(tab|ipad|tablet|pad)\b", re.IGNORECASE)
+# Labels que NO queremos importar jamás
+BANNED_LABEL_PREFIXES = (
+    "precio",
+)
 
-# Campos que NO queremos importar jamás
-# (lo hacemos por contains porque Smart-GSM puede usar variantes tipo "Precio" / "Precio aprox" / etc.)
-SKIP_KEY_RE = re.compile(r"\b(precio|precios|price|prices)\b", re.IGNORECASE)
-
-# Prefijos de Smart-GSM cuando nuestra subcategoría es de una marca "interna"
-# Ejemplo real: POCO M7 Pro 5G -> https://www.smart-gsm.com/moviles/xiaomi-poco-m7-pro-5g
-PREFIX_MAP = {
-    "poco": "xiaomi",
-    "redmi": "xiaomi",
-    # En Smart-GSM muchos Realme salen como "Oppo Realme" y usan prefijo "oppo-"
-    # Ej: https://www.smart-gsm.com/moviles/oppo-realme-gt-7t
-    "realme": "oppo",
-}
+# Para el caso "subcategoría == marca" (p.ej. Xiaomi > Xiaomi)
+IGNORE_IF_EQUAL_PARENT = True
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -90,160 +75,127 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def env_float(name: str, default: float) -> float:
     v = os.getenv(name)
-    if not v:
+    if v is None:
         return default
     try:
-        return float(v)
+        return float(str(v).strip())
     except Exception:
         return default
 
 
-def env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    if not v:
-        return default
-    try:
-        return int(v)
-    except Exception:
-        return default
+OVERWRITE = env_bool("SMARTGSM_OVERWRITE", default=False)
+SLEEP_SECONDS = env_float("SMARTGSM_SLEEP", default=0.8)
+
+WP_URL = os.getenv("WP_URL", "").strip().rstrip("/")
+WP_KEY = os.getenv("WP_KEY", "").strip()
+WP_SECRET = os.getenv("WP_SECRET", "").strip()
+
+if not WP_URL or not WP_KEY or not WP_SECRET:
+    print("❌ Faltan variables de entorno WP_URL / WP_KEY / WP_SECRET")
+    sys.exit(1)
 
 
-def now_fmt() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# ------------------------------- Woo API -----------------------------------
 
-
-def strip_accents(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s)
-    return "".join(ch for ch in s if not unicodedata.combining(ch))
-
-
-def smart_slugify(name: str) -> str:
-    """Convierte 'Xiaomi 15T Pro' -> 'xiaomi-15t-pro' (manteniendo 5g/4g)."""
-    s = strip_accents(name).lower().strip()
-    # normaliza símbolos raros
-    s = s.replace("+", " plus ")
-    s = re.sub(r"[’'`´]", "", s)
-    # cambia cualquier no-alfanum por guion
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = re.sub(r"-+", "-", s).strip("-")
-    return s
-
-
-def candidates_from_slug(slug: str) -> List[str]:
-    """Genera variantes por -5g / -4g al final."""
-    out = [slug]
-    if slug.endswith("-5g"):
-        out.append(slug[:-3])
-    if slug.endswith("-4g"):
-        out.append(slug[:-3])
-    # casos como ...-5g-xxx (a veces viene redundante), solo intentamos quitar el último token
-    # pero SIN destrozar otros slugs; lo dejamos simple.
-    # remove trailing '-5g' / '-4g' ya cubierto.
-    # unique
-    uniq = []
-    for s in out:
-        if s and s not in uniq:
-            uniq.append(s)
-    return uniq
-
-
-def is_tablet_term(term_name: str) -> bool:
-    return bool(TABLET_WORD_RE.search(term_name or ""))
-
-
-@dataclass
-class WPTerm:
-    id: int
-    name: str
-    slug: str
-    parent: int
-    description: str
-
-
-class WooClient:
-    def __init__(self, base_url: str, ck: str, cs: str, timeout: int = 25):
+class Woo:
+    def __init__(self, base_url: str, key: str, secret: str, timeout: int = 40):
         self.base_url = base_url.rstrip("/")
-        self.ck = ck
-        self.cs = cs
+        self.key = key
+        self.secret = secret
         self.timeout = timeout
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}/wp-json/wc/v3{path}"
 
-    def get_all_categories(self) -> List[WPTerm]:
-        terms: List[WPTerm] = []
-        page = 1
-        per_page = 100
-        while True:
-            url = self._url("/products/categories")
-            params = {
-                "consumer_key": self.ck,
-                "consumer_secret": self.cs,
-                "per_page": per_page,
-                "page": page,
-                "hide_empty": False,
-            }
-            r = requests.get(url, params=params, timeout=self.timeout)
-            if r.status_code != 200:
-                raise RuntimeError(f"Woo GET categories HTTP {r.status_code}: {r.text[:300]}")
-            data = r.json()
-            if not data:
-                break
-            for t in data:
-                terms.append(
-                    WPTerm(
-                        id=int(t.get("id")),
-                        name=str(t.get("name") or ""),
-                        slug=str(t.get("slug") or ""),
-                        parent=int(t.get("parent") or 0),
-                        description=str(t.get("description") or ""),
-                    )
-                )
-            if len(data) < per_page:
-                break
-            page += 1
-        return terms
+    def get(self, path: str, params: Optional[dict] = None) -> requests.Response:
+        params = params or {}
+        params.update({"consumer_key": self.key, "consumer_secret": self.secret})
+        return requests.get(
+            self._url(path),
+            params=params,
+            timeout=self.timeout,
+            headers={"User-Agent": USER_AGENT},
+        )
 
-    def update_category_description(self, term_id: int, html: str) -> None:
-        url = self._url(f"/products/categories/{term_id}")
-        params = {
-            "consumer_key": self.ck,
-            "consumer_secret": self.cs,
-        }
-        payload = {"description": html}
-        r = requests.put(url, params=params, json=payload, timeout=self.timeout)
-        if r.status_code not in (200, 201):
-            raise RuntimeError(f"Woo PUT category {term_id} HTTP {r.status_code}: {r.text[:400]}")
+    def put(self, path: str, json_payload: dict) -> requests.Response:
+        params = {"consumer_key": self.key, "consumer_secret": self.secret}
+        return requests.put(
+            self._url(path),
+            params=params,
+            json=json_payload,
+            timeout=self.timeout,
+            headers={"User-Agent": USER_AGENT},
+        )
 
 
-def fetch_smartgsm_html(slug: str, timeout: int = 25) -> Optional[str]:
-    url = f"{SMARTGSM_BASE}/{slug}"
-    r = requests.get(url, headers=HEADERS, timeout=timeout)
-    if r.status_code != 200:
+def woocommerce_get_all_categories(woo: Woo) -> List[dict]:
+    """Devuelve TODAS las categorías de productos de Woo (incluyendo vacías)."""
+    all_items: List[dict] = []
+    page = 1
+    per_page = 100
+
+    while True:
+        r = woo.get("/products/categories", params={"per_page": per_page, "page": page, "hide_empty": False})
+        if r.status_code != 200:
+            raise RuntimeError(f"Woo GET categories error {r.status_code}: {r.text[:200]}")
+        batch = r.json()
+        if not batch:
+            break
+        all_items.extend(batch)
+        if len(batch) < per_page:
+            break
+        page += 1
+
+    return all_items
+
+
+def woocommerce_update_category_description(woo: Woo, term_id: int, new_desc_html: str) -> None:
+    r = woo.put(f"/products/categories/{term_id}", json_payload={"description": new_desc_html})
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Woo PUT term {term_id} error {r.status_code}: {r.text[:250]}")
+
+
+# ----------------------------- Smart-GSM -----------------------------------
+
+def http_get(url: str) -> Optional[str]:
+    try:
+        r = requests.get(
+            url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=40,
+        )
+        if r.status_code != 200:
+            return None
+        return r.text
+    except Exception:
         return None
-    # Heurística rápida para evitar páginas irrelevantes
-    if "Ficha técnica" not in r.text:
-        return None
-    return r.text
 
 
-def parse_ficha_tecnica(html: str) -> Dict[str, str]:
-    soup = BeautifulSoup(html, "html.parser")
+def extract_ficha_tecnica(html_text: str) -> Dict[str, str]:
+    """Extrae la tabla de 'Ficha técnica' y devuelve dict label->value."""
+    soup = BeautifulSoup(html_text, "html.parser")
 
-    # busca el H2 exacto "Ficha técnica"
+    # Normalmente está en un <h2>Ficha técnica</h2> seguido de una tabla
+    # pero para robustez buscamos cualquier <h2> que contenga "Ficha técnica".
     h2 = None
-    for node in soup.find_all(["h2", "h3"]):
-        txt = " ".join(node.get_text(" ", strip=True).split())
-        if txt.lower() == "ficha técnica" or txt.lower() == "ficha tecnica":
-            h2 = node
+    for tag in soup.find_all(["h2", "h3"]):
+        t = tag.get_text(" ", strip=True).lower()
+        if "ficha" in t and "técnica" in t:
+            h2 = tag
             break
 
-    if not h2:
-        return {}
+    table = None
+    if h2 is not None:
+        # buscar tabla cercana
+        nxt = h2.find_next("table")
+        if nxt is not None:
+            table = nxt
 
-    # La tabla suele estar dentro del mismo bloque/row; buscamos la primera tabla tras el h2
-    table = h2.find_next("table")
-    if not table:
+    if table is None:
+        # fallback: primera tabla con "table-striped" o "table"
+        table = soup.find("table", class_=re.compile(r"table"))
+
+    if table is None:
         return {}
 
     specs: Dict[str, str] = {}
@@ -252,242 +204,349 @@ def parse_ficha_tecnica(html: str) -> Dict[str, str]:
         if len(tds) < 2:
             continue
 
-        # key: normalmente en el primer td hay <strong>Clave</strong>
-        key = tds[0].get_text(" ", strip=True)
-        key = re.sub(r"\s+", " ", key).strip()
-        # elimina iconos/ruidos: nos quedamos con el texto del strong si existe
+        # Label: prioriza <strong>
         strong = tds[0].find("strong")
         if strong:
-            key2 = strong.get_text(" ", strip=True)
-            if key2:
-                key = key2
+            label = strong.get_text(" ", strip=True)
+        else:
+            label = tds[0].get_text(" ", strip=True)
 
-        val = tds[1].get_text(" ", strip=True)
-        val = re.sub(r"\s+", " ", val).strip()
+        value = tds[1].get_text(" ", strip=True)
 
-        if not key or not val:
-            continue
-        if SKIP_KEY_RE.search(key):
+        if not label or not value:
             continue
 
-        specs[key] = val
+        # Limpieza
+        label_clean = re.sub(r"\s+", " ", label).strip()
+        value_clean = re.sub(r"\s+", " ", value).strip()
+
+        # No importar precio
+        l_low = label_clean.lower()
+        if any(l_low.startswith(pfx) for pfx in BANNED_LABEL_PREFIXES):
+            continue
+
+        specs[label_clean] = value_clean
 
     return specs
 
 
-def build_specs_html(specs: Dict[str, str]) -> str:
-    """Genera HTML robusto (evita que quede "pegado" en themes/plugins que limpian listas/tablas).
+def build_specs_html_table(specs: Dict[str, str]) -> str:
+    """Genera HTML estable y legible en Woo."""
+    if not specs:
+        return ""
 
-    Usamos <br> para que, incluso si el tema hace sanitizado agresivo,
-    el contenido siga legible.
-    """
-    lines: List[str] = []
-    lines.append('<div class="smartgsm-specs">')
-    lines.append("<h2>Ficha técnica</h2>")
-    lines.append("<p>")
-    first = True
+    # Escapar valores por seguridad (labels también)
+    rows = []
     for k, v in specs.items():
-        # Escape HTML (seguro y consistente)
-        k_esc = html.escape(k, quote=False)
-        v_esc = html.escape(v, quote=False)
-        if not first:
-            lines.append("<br>")
-        first = False
-        lines.append(f"<strong>{k_esc}</strong>: {v_esc}")
-    lines.append("</p>")
-    lines.append("</div>")
-    return "\n".join(lines)
+        k_esc = html.escape(k)
+        v_esc = html.escape(v)
+        rows.append(
+            f"<tr><td class=\"text-nowrap\"><strong>{k_esc}</strong></td><td>{v_esc}</td></tr>"
+        )
+
+    rows_html = "\n".join(rows)
+
+    return (
+        "<h2>Ficha técnica</h2>\n"
+        "<table class=\"table table-striped smartgsm-specs\">\n"
+        "<tbody>\n"
+        f"{rows_html}\n"
+        "</tbody>\n"
+        "</table>\n"
+    )
 
 
-def build_slug_candidates(term: WPTerm, parent_slug: str, parent_name: str) -> List[str]:
-    """Genera lista de slugs a intentar en Smart-GSM."""
-    candidates: List[str] = []
+# ------------------------------ Slug utils ---------------------------------
 
-    # 1) el slug existente (y variantes -5g/-4g)
-    for s in candidates_from_slug(term.slug):
-        candidates.append(s)
+_slug_re_non_alnum = re.compile(r"[^a-z0-9\-]+")
 
-    # 2) slug regenerado desde el nombre (por si el slug del término está raro: f7-pro, motorola-motorola, etc.)
-    name_slug = smart_slugify(term.name)
-    for s in candidates_from_slug(name_slug):
-        candidates.append(s)
 
-    # 3) Prefijos de Smart-GSM para ciertas marcas
-    #    - Si el parent es poco/redmi/realme, Smart-GSM puede usar prefijos distintos.
-    #    - Además, si el slug o el nombre empiezan por poco/redmi/realme, aplicamos el prefijo
-    #      aunque el árbol de categorías esté "raro".
-    p = (parent_slug or "").strip().lower()
+def normalize_slug(s: str) -> str:
+    s = s.strip().lower()
+    s = s.replace("_", "-")
+    s = _slug_re_non_alnum.sub("-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s
 
-    # señales para aplicar prefijos aunque el parent no sea exacto
-    name_l = (term.name or "").strip().lower()
-    base_slugs = [term.slug, name_slug]
 
-    def should_apply(prefix_key: str) -> bool:
-        if p == prefix_key:
-            return True
-        if name_l.startswith(prefix_key + " "):
-            return True
-        if any((bs or "").lower().startswith(prefix_key + "-") for bs in base_slugs):
-            return True
-        return False
+def strip_network_suffix(slug: str) -> List[str]:
+    """Devuelve [slug, slug_sin_-5g/-4g] si aplica."""
+    out = [slug]
+    if slug.endswith("-5g"):
+        out.append(slug[:-3])
+    if slug.endswith("-4g"):
+        out.append(slug[:-3])
+    # dedupe manteniendo orden
+    seen = set()
+    res = []
+    for x in out:
+        if x and x not in seen:
+            seen.add(x)
+            res.append(x)
+    return res
 
-    for k, pref in PREFIX_MAP.items():
-        if not should_apply(k):
-            continue
-        for base in base_slugs:
-            for s in candidates_from_slug(base):
-                # evita doble prefijo tipo xiaomi-xiaomi-...
-                if s.startswith(pref + "-"):
-                    candidates.append(s)
-                else:
-                    candidates.append(f"{pref}-{s}")
 
-    # 4) Heurística: si el nombre empieza por una marca conocida distinta del parent
-    #    (ej: si el parent es 'poco' y el nombre es 'POCO ...', ya lo cubrimos con prefijo xiaomi)
-    #    (ej: subcat 'Vivo IQOO ...' a veces parent 'iqoo' o 'vivo')
-    if p == "iqoo":
-        for base in [term.slug, name_slug]:
-            for s in candidates_from_slug(base):
-                candidates.append(f"vivo-{s}")
+def add_network_suffixes(slug: str) -> List[str]:
+    """Si no tiene -5g/-4g, añade variantes con esos sufijos."""
+    if slug.endswith("-5g") or slug.endswith("-4g"):
+        return [slug]
+    return [slug, f"{slug}-5g", f"{slug}-4g"]
 
-    # unique manteniendo orden
-    uniq: List[str] = []
-    for s in candidates:
-        s = (s or "").strip()
+
+def fix_oppo_reno_hyphen(slug: str) -> List[str]:
+    """Smart-GSM usa 'oppo-reno-12-...' en vez de 'oppo-reno12-...'."""
+    out = [slug]
+    m = re.match(r"^(oppo-)reno(\d)(.+)$", slug)
+    if m:
+        out.append(f"{m.group(1)}reno-{m.group(2)}{m.group(3)}")
+
+    # Caso sin prefijo oppo en el slug, pero el nombre indica reno
+    m2 = re.match(r"^reno(\d)(.+)$", slug)
+    if m2:
+        out.append(f"reno-{m2.group(1)}{m2.group(2)}")
+
+    # dedupe
+    seen = set()
+    res = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            res.append(x)
+    return res
+
+
+def candidate_slugs(term_slug: str, term_name: str, parent_slug: str) -> List[str]:
+    """Genera slugs candidatos para Smart-GSM a partir del slug de Woo.
+
+    Incluye reglas específicas:
+    - Quitar y añadir sufijos 5g/4g.
+    - POCO/Redmi => prefijo xiaomi-
+    - Realme => prefijo oppo-
+    - OPPO Reno => reno-12 en lugar de reno12
+    - Samsung FE => suele tener -5g al final
+    """
+
+    base = normalize_slug(term_slug)
+    name_norm = term_name.strip()
+    parent = normalize_slug(parent_slug)
+
+    slugs: List[str] = []
+
+    # 1) base + sin sufijo 5g/4g
+    for s in strip_network_suffix(base):
+        slugs.append(s)
+
+    # 2) Fix OPPO Reno (oppo-reno12 -> oppo-reno-12)
+    tmp: List[str] = []
+    for s in slugs:
+        tmp.extend(fix_oppo_reno_hyphen(s))
+    slugs = tmp
+
+    # 3) Prefijos especiales
+    prefixed: List[str] = []
+    if parent in {"poco", "redmi"}:
+        for s in slugs:
+            if not s.startswith("xiaomi-"):
+                prefixed.append(f"xiaomi-{s}")
+    if parent == "realme":
+        for s in slugs:
+            if not s.startswith("oppo-"):
+                prefixed.append(f"oppo-{s}")
+
+    slugs.extend(prefixed)
+
+    # 4) Añadir sufijos de red (si procede)
+    with_net: List[str] = []
+    for s in slugs:
+        with_net.extend(add_network_suffixes(s))
+
+    # 5) Samsung FE suele llevar -5g
+    if (" fe" in name_norm.lower() or base.endswith("-fe")) and parent == "samsung":
+        for s in list(with_net):
+            if not s.endswith("-5g") and not s.endswith("-4g"):
+                with_net.append(f"{s}-5g")
+
+    # 6) Si el nombre termina en " 5G" o " 4G" pero slug no lo trae, prioriza ese sufijo
+    nlow = name_norm.lower().strip()
+    if nlow.endswith(" 5g"):
+        for s in list(with_net):
+            if not s.endswith("-5g"):
+                with_net.append(f"{strip_network_suffix(s)[0]}-5g")
+    if nlow.endswith(" 4g"):
+        for s in list(with_net):
+            if not s.endswith("-4g"):
+                with_net.append(f"{strip_network_suffix(s)[0]}-4g")
+
+    # Dedupe manteniendo orden
+    seen = set()
+    res: List[str] = []
+    for s in with_net:
+        s = normalize_slug(s)
         if not s:
             continue
-        if s not in uniq:
-            uniq.append(s)
+        if s not in seen:
+            seen.add(s)
+            res.append(s)
 
-    return uniq
+    return res
+
+
+def build_smartgsm_url(slug: str) -> str:
+    return f"{SMARTGSM_BASE}/{slug}"
+
+
+def fetch_specs_for_candidates(slugs: List[str]) -> Tuple[Optional[str], Dict[str, str], List[str]]:
+    """Intenta varios slugs hasta que encuentra ficha válida.
+
+    Returns:
+        (url_encontrada, specs_dict, slugs_probados)
+    """
+    tried: List[str] = []
+    for s in slugs:
+        tried.append(s)
+        url = build_smartgsm_url(s)
+        html_text = http_get(url)
+        if not html_text:
+            time.sleep(SLEEP_SECONDS)
+            continue
+
+        specs = extract_ficha_tecnica(html_text)
+        # Consideramos válido si hay al menos 4 campos (evita falsas coincidencias)
+        if len(specs) >= 4:
+            return url, specs, tried
+
+        time.sleep(SLEEP_SECONDS)
+
+    return None, {}, tried
+
+
+# ----------------------------- Main logic ----------------------------------
+
+
+def is_tablet(name: str) -> bool:
+    n = name.upper()
+    return any(tok in n for tok in TABLET_TOKENS)
+
+
+def build_parent_map(categories: List[dict]) -> Dict[int, dict]:
+    return {int(c["id"]): c for c in categories}
 
 
 def main() -> int:
-    wp_url = os.getenv("WP_URL", "").strip()
-    wp_key = os.getenv("WP_KEY", "").strip()
-    wp_secret = os.getenv("WP_SECRET", "").strip()
+    woo = Woo(WP_URL, WP_KEY, WP_SECRET)
 
-    if not wp_url or not wp_key or not wp_secret:
-        print("❌ Faltan variables de entorno WP_URL / WP_KEY / WP_SECRET")
-        return 2
+    hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    overwrite = env_bool("SMARTGSM_OVERWRITE", False)
-    sleep_s = env_float("SMARTGSM_SLEEP", 0.8)
-    timeout_s = env_int("SMARTGSM_TIMEOUT", 25)
-
-    woo = WooClient(wp_url, wp_key, wp_secret, timeout=timeout_s)
-
-    print("=" * 60)
-    print(f"📡 SMART-GSM → Woo (Subcategorías) ({now_fmt()})")
-    print("=" * 60)
-    print(f"Overwrite descripción existente: {overwrite}")
-    print(f"Pausa entre requests: {sleep_s}s")
+    print("============================================================")
+    print(f"📡 SMART-GSM → Woo (Subcategorías) ({hoy_fmt})")
+    print("============================================================")
+    print(f"Overwrite descripción existente: {OVERWRITE}")
+    print(f"Pausa entre requests: {SLEEP_SECONDS}s")
     print(f"Base Smart-GSM: {SMARTGSM_BASE}")
-    print("=" * 60)
+    print("============================================================")
 
-    terms = woo.get_all_categories()
-    by_id = {t.id: t for t in terms}
+    categories = woocommerce_get_all_categories(woo)
+    parent_map = build_parent_map(categories)
 
-    subcats = [t for t in terms if t.parent != 0]
+    # Subcategorías = categorías con parent != 0
+    subcats = [c for c in categories if int(c.get("parent") or 0) != 0]
     print(f"📦 Subcategorías detectadas: {len(subcats)}")
-    print("-" * 60)
 
-    updated: List[Tuple[str, int, int]] = []  # (name, id, campos)
-    not_found: List[Tuple[str, int, str]] = []  # (name, id, slug)
-    ignored: List[Tuple[str, int, str]] = []  # (name, id, reason)
-    errors: List[Tuple[str, int, str]] = []
+    summary_actualizadas: List[dict] = []
+    summary_no_encontradas: List[dict] = []
+    summary_ignoradas: List[dict] = []
+    summary_errores: List[dict] = []
 
     for term in subcats:
-        parent = by_id.get(term.parent)
-        parent_slug = parent.slug if parent else ""
-        parent_name = parent.name if parent else ""
+        term_id = int(term["id"])
+        name = (term.get("name") or "").strip()
+        slug = (term.get("slug") or "").strip()
+        parent_id = int(term.get("parent") or 0)
+        parent_term = parent_map.get(parent_id, {})
+        parent_slug = (parent_term.get("slug") or "").strip()
+        parent_name = (parent_term.get("name") or "").strip()
 
-        # Filtro tablets
-        if is_tablet_term(term.name):
-            ignored.append((term.name, term.id, "tablet"))
+        # Ignorar tablets
+        if is_tablet(name):
+            summary_ignoradas.append({"nombre": name, "id": term_id, "motivo": "tablet"})
             continue
 
-        # Si el término es básicamente la marca (ej: Motorola (slug motorola-motorola)), lo ignoramos
-        if parent and smart_slugify(term.name) == smart_slugify(parent.name):
-            ignored.append((term.name, term.id, "subcategoría == marca"))
-            continue
-
-        # Si no overwrite y ya tiene descripción, ignorar
-        if (not overwrite) and term.description and term.description.strip():
-            ignored.append((term.name, term.id, "ya tiene descripción"))
-            continue
-
-        print(f"📁 Subcategoría: {term.name} (ID: {term.id})")
-        print(f"   slug: {term.slug} | parent_slug: {parent_slug}")
-
-        slug_candidates = build_slug_candidates(term, parent_slug, parent_name)
-
-        found_slug = None
-        found_specs: Dict[str, str] = {}
-        for cand in slug_candidates:
-            html_txt = fetch_smartgsm_html(cand, timeout=timeout_s)
-            if not html_txt:
+        # Ignorar subcategorías que son igual a la marca (p.ej. Xiaomi > Xiaomi)
+        if IGNORE_IF_EQUAL_PARENT:
+            if normalize_slug(name) == normalize_slug(parent_name) or normalize_slug(slug) == normalize_slug(parent_slug):
+                summary_ignoradas.append({"nombre": name, "id": term_id, "motivo": "subcategoría == marca"})
                 continue
-            specs = parse_ficha_tecnica(html_txt)
-            # defensivo: si parsea pero no hay nada útil, sigue probando
-            if specs:
-                found_slug = cand
-                found_specs = specs
-                break
 
-        if not found_slug:
-            print(f"   ❌ NO ENCONTRADA ficha en Smart-GSM con slugs: {slug_candidates}")
-            not_found.append((term.name, term.id, term.slug))
-            print("-" * 60)
+        current_desc = (term.get("description") or "").strip()
+        if current_desc and not OVERWRITE:
+            # ya hay descripción, no sobreescribimos
             continue
 
-        html_desc = build_specs_html(found_specs)
+        print("------------------------------------------------------------")
+        print(f"📁 Subcategoría: {name} (ID: {term_id})")
+        print(f"   slug: {slug} | parent_slug: {parent_slug}")
 
-        print(f"   ✅ Ficha encontrada: {SMARTGSM_BASE}/{found_slug}")
-        print(f"   🔎 Campos extraídos: {len(found_specs)}")
-        # muestra solo algunos campos (sin saturar logs)
-        for i, (k, v) in enumerate(found_specs.items()):
-            if i >= 6:
+        cands = candidate_slugs(slug, name, parent_slug)
+
+        url, specs, tried = fetch_specs_for_candidates(cands)
+
+        if not url:
+            print(f"   ❌ NO ENCONTRADA ficha en Smart-GSM con slugs: {tried[:8]}{' ...' if len(tried) > 8 else ''}")
+            summary_no_encontradas.append({"nombre": name, "id": term_id, "slug": slug, "slugs_probados": tried})
+            continue
+
+        print(f"   ✅ Ficha encontrada: {url}")
+        print(f"   🔎 Campos extraídos: {len(specs)}")
+
+        # Log de algunos campos (sin saturar)
+        shown = 0
+        for k, v in specs.items():
+            if shown >= 10:
                 break
             print(f"      - {k}: {v}")
+            shown += 1
+
+        new_html = build_specs_html_table(specs)
+        if not new_html:
+            print("   ⚠️ No se generó HTML (sin datos).")
+            summary_no_encontradas.append({"nombre": name, "id": term_id, "slug": slug, "slugs_probados": tried})
+            continue
 
         try:
-            woo.update_category_description(term.id, html_desc)
+            woocommerce_update_category_description(woo, term_id, new_html)
             print("   💾 DESCRIPCIÓN actualizada en Woo ✅")
-            updated.append((term.name, term.id, len(found_specs)))
+            summary_actualizadas.append({"nombre": name, "id": term_id, "campos": len(specs), "url": url})
         except Exception as e:
-            msg = str(e)
-            print(f"   ❌ Error actualizando en Woo: {msg}")
-            errors.append((term.name, term.id, msg))
+            print(f"   ❌ ERROR actualizando en Woo: {e}")
+            summary_errores.append({"nombre": name, "id": term_id, "error": str(e)})
 
-        print("-" * 60)
-        time.sleep(max(0.0, sleep_s))
+        time.sleep(SLEEP_SECONDS)
 
-    # RESUMEN
-    print("=" * 60)
-    print(f"📋 RESUMEN DE EJECUCIÓN ({now_fmt()})")
-    print("=" * 60)
+    # Resumen
+    hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print("\n============================================================")
+    print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})")
+    print("============================================================")
 
-    print(f"a) SUBCATEGORÍAS ACTUALIZADAS: {len(updated)}")
-    for name, tid, nfields in updated:
-        print(f"- {name} (ID: {tid}): {nfields} campos")
+    print(f"a) SUBCATEGORÍAS ACTUALIZADAS: {len(summary_actualizadas)}")
+    for item in summary_actualizadas[:300]:
+        print(f"- {item['nombre']} (ID: {item['id']}): {item['campos']} campos")
 
-    print(f"b) SUBCATEGORÍAS NO ENCONTRADAS EN SMART-GSM: {len(not_found)}")
-    for name, tid, slug in not_found:
-        print(f"- {name} (ID: {tid}) slug='{slug}'")
+    print(f"b) SUBCATEGORÍAS NO ENCONTRADAS EN SMART-GSM: {len(summary_no_encontradas)}")
+    for item in summary_no_encontradas[:300]:
+        print(f"- {item['nombre']} (ID: {item['id']}) slug='{item['slug']}'")
 
-    print(f"c) SUBCATEGORÍAS IGNORADAS: {len(ignored)}")
-    for name, tid, reason in ignored:
-        print(f"- {name} (ID: {tid}): {reason}")
+    print(f"c) SUBCATEGORÍAS IGNORADAS: {len(summary_ignoradas)}")
+    for item in summary_ignoradas[:300]:
+        print(f"- {item['nombre']} (ID: {item['id']}): {item['motivo']}")
 
-    print(f"d) ERRORES ACTUALIZANDO EN WOO: {len(errors)}")
-    for name, tid, msg in errors:
-        print(f"- {name} (ID: {tid}): {msg}")
+    print(f"d) ERRORES ACTUALIZANDO EN WOO: {len(summary_errores)}")
+    for item in summary_errores[:50]:
+        print(f"- {item['nombre']} (ID: {item['id']}): {item['error']}")
 
-    print("=" * 60)
+    print("============================================================")
 
-    # exit code: 0 si no hay errores
-    return 0 if not errors else 1
+    return 0
 
 
 if __name__ == "__main__":
