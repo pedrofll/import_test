@@ -45,6 +45,10 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from bs4 import BeautifulSoup
 
+# Regex helpers
+_slug_re_non_alnum = re.compile(r"[^a-z0-9-]+")
+
+
 
 # ------------------------------- Config ------------------------------------
 
