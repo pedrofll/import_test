@@ -14,7 +14,7 @@ on:
 
   schedule:
     # 2 veces al día (UTC). Ajusta si quieres otro horario.
-    - cron: "5 6 * * *"
+    #- cron: "5 6 * * *"
     - cron: "5 18 * * *"
 
 concurrency:
@@ -45,7 +45,7 @@ jobs:
           WP_URL: ${{ secrets.WP_URL }}
           WP_KEY: ${{ secrets.WP_KEY }}
           WP_SECRET: ${{ secrets.WP_SECRET }}
-          SMARTGSM_OVERWRITE: ${{ github.event.inputs.overwrite || '1' }}
+          SMARTGSM_OVERWRITE: ${{ github.event.inputs.overwrite || '0' }}
           SMARTGSM_SLEEP: ${{ github.event.inputs.sleep || '0.8' }}
         run: |
           echo "Running smartgsm_specs.py..."
