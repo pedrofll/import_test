@@ -60,6 +60,7 @@ TABLET_TOKENS = {"TAB", "IPAD"}
 # Labels que NO queremos importar jamás
 BANNED_LABEL_PREFIXES = (
     "precio",
+    "price",
 )
 
 # Para el caso "subcategoría == marca" (p.ej. Xiaomi > Xiaomi)
@@ -231,30 +232,31 @@ def extract_ficha_tecnica(html_text: str) -> Dict[str, str]:
 
 
 def build_specs_html_table(specs: Dict[str, str]) -> str:
-    """Genera HTML estable y legible en Woo."""
+    """Genera HTML estable y legible en Woo.
+
+    Nota: algunos themes/sanitizers de WP terminan "aplanando" tablas (tr/td)
+    en descripciones de taxonomías. Para evitar que se vea todo concatenado,
+    renderizamos la ficha como lista <ul><li>, que suele sobrevivir mejor.
+    """
     if not specs:
         return ""
 
-    # Escapar valores por seguridad (labels también)
-    rows = []
+    items = []
     for k, v in specs.items():
         k_esc = html.escape(k)
         v_esc = html.escape(v)
-        rows.append(
-            f"<tr><td class=\"text-nowrap\"><strong>{k_esc}</strong></td><td>{v_esc}</td></tr>"
-        )
+        items.append(f"<li><strong>{k_esc}</strong>: {v_esc}</li>")
 
-    rows_html = "\n".join(rows)
+    items_html = "\n".join(items)
 
     return (
+        "<div class=\"smartgsm-specs\">\n"
         "<h2>Ficha técnica</h2>\n"
-        "<table class=\"table table-striped smartgsm-specs\">\n"
-        "<tbody>\n"
-        f"{rows_html}\n"
-        "</tbody>\n"
-        "</table>\n"
+        "<ul>\n"
+        f"{items_html}\n"
+        "</ul>\n"
+        "</div>\n"
     )
-
 
 # ------------------------------ Slug utils ---------------------------------
 
@@ -314,6 +316,42 @@ def fix_oppo_reno_hyphen(slug: str) -> List[str]:
             res.append(x)
     return res
 
+def base_without_network(slug: str) -> str:
+    """Devuelve el slug sin sufijo final -5g / -4g (si lo tuviera)."""
+    return re.sub(r"-(5g|4g)$", "", slug.strip().lower())
+
+
+def fix_special_hyphens(slug: str) -> List[str]:
+    """Genera variantes de slug corrigiendo patrones habituales de Smart-GSM.
+
+    Casos cubiertos (ejemplos):
+    - samsung-galaxy-z-flip6  -> samsung-galaxy-z-flip-6
+    - samsung-galaxy-z-fold7  -> samsung-galaxy-z-fold-7
+    - oppo-realme-gt8         -> oppo-realme-gt-8
+    - realme-gt8-pro          -> realme-gt-8-pro
+    """
+    s = normalize_slug(slug)
+    if not s:
+        return []
+
+    out = [s]
+
+    # Samsung Z Flip/Fold: insertar guión entre flip/fold y el número
+    out.append(re.sub(r"(z-(?:flip|fold))(\d+)(?=-|$)", r"\1-\2", s))
+
+    # Realme GTx: insertar guión entre gt y el número (con o sin prefijo oppo-)
+    out.append(re.sub(r"((?:oppo-)?realme-gt)(\d+)(?=-|$)", r"\1-\2", s))
+
+    # Dedupe preservando orden
+    seen = set()
+    res: List[str] = []
+    for x in out:
+        x = normalize_slug(x)
+        if x and x not in seen:
+            seen.add(x)
+            res.append(x)
+    return res
+
 
 def candidate_slugs(term_slug: str, term_name: str, parent_slug: str) -> List[str]:
     """Genera slugs candidatos para Smart-GSM a partir del slug de Woo.
@@ -336,6 +374,12 @@ def candidate_slugs(term_slug: str, term_name: str, parent_slug: str) -> List[st
     for s in strip_network_suffix(base):
         slugs.append(s)
 
+    # 1b) Correcciones de guiones típicas (flip6 -> flip-6, gt8 -> gt-8, etc.)
+    tmp: List[str] = []
+    for s in slugs:
+        tmp.extend(fix_special_hyphens(s))
+    slugs = tmp
+
     # 2) Fix OPPO Reno (oppo-reno12 -> oppo-reno-12)
     tmp: List[str] = []
     for s in slugs:
@@ -344,6 +388,10 @@ def candidate_slugs(term_slug: str, term_name: str, parent_slug: str) -> List[st
 
     # 3) Prefijos especiales
     prefixed: List[str] = []
+    if parent == "samsung":
+        for s in slugs:
+            if s.startswith("samsung-") and not s.startswith("samsung-galaxy-"):
+                prefixed.append(f"samsung-galaxy-{s[len('samsung-'):]}")
     if parent in {"poco", "redmi"}:
         for s in slugs:
             if not s.startswith("xiaomi-"):
@@ -354,6 +402,12 @@ def candidate_slugs(term_slug: str, term_name: str, parent_slug: str) -> List[st
                 prefixed.append(f"oppo-{s}")
 
     slugs.extend(prefixed)
+
+    # 3b) Aplicar de nuevo correcciones de guiones sobre variantes nuevas
+    tmp2: List[str] = []
+    for s in slugs:
+        tmp2.extend(fix_special_hyphens(s))
+    slugs = tmp2
 
     # 4) Añadir sufijos de red (si procede)
     with_net: List[str] = []
@@ -371,11 +425,11 @@ def candidate_slugs(term_slug: str, term_name: str, parent_slug: str) -> List[st
     if nlow.endswith(" 5g"):
         for s in list(with_net):
             if not s.endswith("-5g"):
-                with_net.append(f"{strip_network_suffix(s)[0]}-5g")
+                with_net.append(f"{base_without_network(s)}-5g")
     if nlow.endswith(" 4g"):
         for s in list(with_net):
             if not s.endswith("-4g"):
-                with_net.append(f"{strip_network_suffix(s)[0]}-4g")
+                with_net.append(f"{base_without_network(s)}-4g")
 
     # Dedupe manteniendo orden
     seen = set()
