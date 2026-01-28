@@ -241,6 +241,19 @@ def extraer_datos(texto):
     if any(x in nombre.upper() for x in ["PAD", "IPAD", "TAB"]):
         return "SKIP_TABLET"
 
+    # Regla especial: iQOO (Vivo) — si empieza por "IQ" y no lleva "Vivo" delante,
+    # forzamos marca/categoría Vivo y preservamos el prefijo "IQ..." en mayúsculas.
+    try:
+        _parts = nombre.split()
+        _first_raw = _parts[0] if _parts else ""
+        _first_clean = re.sub(r"[^A-Za-z0-9]+", "", _first_raw)
+        if _first_clean.upper().startswith("IQ") and not nombre.strip().lower().startswith("vivo "):
+            if _parts:
+                _parts[0] = _first_clean.upper() if _first_clean else _parts[0].upper()
+                nombre = "Vivo " + " ".join(_parts)
+    except Exception:
+        pass
+
     # RAM / ROM
     gigas = re.findall(r"(\d+)\s*GB", t_clean, re.I)
     memoria = f"{gigas[0]} GB" if len(gigas) >= 1 else "N/A"
@@ -425,9 +438,9 @@ async def main():
         print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
         print(f"15) URL acortada con mi afiliado: {url_oferta}")
         print(f"16) Enviado desde: {enviado_desde}")
-        print(f"17) Encolado para comparar con base de datos...")
+        print(f"17) Encolado para comparar con base de datos.")
         if _contiene_ellipsis(url_sin_acortar_con_mi_afiliado):
-            print("⚠️ ATENCIÓN: La URL con afiliado contiene '...' (no debería ocurrir tras normalización).")
+            print("⚠️ ATENCIÓN: La URL con afiliado contiene '.' (no debería ocurrir tras normalización).")
         print("-" * 60)
         # -----------------------------------
 
@@ -450,7 +463,7 @@ async def main():
                 {"key": "enlace_de_compra_importado", "value": enlace_de_compra_importado},
                 {"key": "url_oferta_sin_acortar", "value": url_oferta_sin_acortar},
                 {"key": "url_importada_sin_afiliado", "value": url_importada_sin_afiliado},
-                # ✅ AQUÍ va siempre la URL completa con tu afiliado (sin '...')
+                # ✅ AQUÍ va siempre la URL completa con tu afiliado (sin '.')
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": url_sin_acortar_con_mi_afiliado},
                 {"key": "url_oferta", "value": url_oferta},
                 {"key": "enviado_desde", "value": enviado_desde},
