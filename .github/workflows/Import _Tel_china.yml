@@ -1,14 +1,8 @@
 name: Import Tel_china
 
 on:
-
-  # Se ejecuta automáticamente con este horario
-   schedule:
-    # Horario UTC. España es UTC+1 (Invierno) / UTC+2 (Verano).
-    # Se ejecutará a las: 08:00, 11:00, 14:00, 17:00 y 20:00 (Hora España Invierno)
-    - cron: '0 14,22 * * *'
-    
-    # Te permite ejecutarlo manualmente con un botón si lo necesitas probar ya
+  schedule:
+    - cron: '00 10,16,22 * * *'
   workflow_dispatch:
   
   # --- SOLUCIÓN AL ERROR 403 ---
