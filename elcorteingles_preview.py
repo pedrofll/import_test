@@ -5,7 +5,6 @@ import os
 import re
 import sys
 import time
-import json
 import html
 import random
 import urllib.parse
@@ -20,7 +19,7 @@ from bs4 import BeautifulSoup
 # =========================
 # CONFIG
 # =========================
-SCRAPER_VERSION = "ECI_PREVIEW_v1.3_curl_fallback"
+SCRAPER_VERSION = "ECI_PREVIEW_v1.4_http1_preflight"
 
 PLP_URL = os.getenv(
     "ECI_PLP_URL",
@@ -48,7 +47,8 @@ BASE_URL = "https://www.elcorteingles.es"
 # =========================
 SESSION = requests.Session()
 
-# Headers "browser-ish". Importante: NO pedir br para evitar problemas de decode.
+# Headers "browser-ish"
+# Importante: NO pedir br para evitar problemas de decode
 SESSION.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -60,6 +60,7 @@ SESSION.headers.update({
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     "DNT": "1",
+    "Referer": "https://www.elcorteingles.es/",
 })
 
 
@@ -72,6 +73,10 @@ def now_str() -> str:
 
 def log(s: str) -> None:
     print(s, flush=True)
+
+
+def sleep_polite() -> None:
+    time.sleep(PAUSE_SECONDS + random.uniform(0.05, 0.25))
 
 
 def absolutize_url(href: str) -> str:
@@ -90,48 +95,40 @@ def normalize_spaces(s: str) -> str:
 
 def title_case_product_name(name: str) -> str:
     """
-    Regla general: primera letra de cada palabra en mayúscula.
-    Además, si hay tokens mixtos número+letras (14T, 5G, 4G) => letras en mayúsculas.
+    - Primera letra de cada palabra en mayúscula
+    - Tokens mixtos número+letras (14T, 5G, g85) => letras en mayúscula
     """
     if not name:
         return name
     words = normalize_spaces(name).split(" ")
     out = []
     for w in words:
-        # Mantener separadores tipo "+" como token normal.
         token = w.strip()
         if not token:
             continue
 
-        # Si token es algo como "5g" / "14t" / "4g", subir letras
-        m = re.fullmatch(r"(\d+)([a-zA-Z]+)", token)
-        if m:
-            out.append(m.group(1) + m.group(2).upper())
+        # g85 / 14t / 5g / 4g -> G85 / 14T / 5G / 4G
+        if re.search(r"\d", token) and re.search(r"[A-Za-z]", token):
+            out.append("".join(ch.upper() if ch.isalpha() else ch for ch in token))
             continue
 
-        # Si token es todo mayúsculas tipo "HONOR" lo normalizamos a "Honor"
-        # excepto si es muy corto y parece sigla.
+        # HONOR -> Honor (si no es sigla cortísima)
         if token.isupper() and len(token) > 3:
             out.append(token.capitalize())
             continue
 
-        # Capitalización estándar
         out.append(token[:1].upper() + token[1:])
     return " ".join(out)
 
 
 def extract_ram_rom_from_name(name: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Busca patrones tipo:
-      '8GB + 256GB'
-      '8 GB + 256 GB'
-      '12GB+512GB'
+    '8GB + 256GB' / '8 GB + 256 GB'
     """
     if not name:
         return None, None
 
     s = name.replace("\u00a0", " ")
-    # RAM + ROM
     m = re.search(r"(\d{1,3})\s*GB\s*\+\s*(\d{2,4})\s*GB", s, re.IGNORECASE)
     if m:
         ram = f"{int(m.group(1))} GB"
@@ -142,9 +139,6 @@ def extract_ram_rom_from_name(name: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def is_tablet_or_non_mobile(name: str) -> bool:
-    """
-    Tus reglas: no importar tablets ni iPad ni si falta RAM/ROM.
-    """
     n = (name or "").upper()
     if "TAB" in n or "IPAD" in n:
         return True
@@ -153,7 +147,6 @@ def is_tablet_or_non_mobile(name: str) -> bool:
 
 def build_affiliate_url(product_url: str) -> str:
     """
-    Construcción flexible:
     - Si AFF_ELCORTEINGLES contiene '{url}' => reemplaza
     - Si parece prefijo tipo '...p=' o '...url=' => concatena url encoded
     - Si viene vacío => devuelve original
@@ -166,10 +159,8 @@ def build_affiliate_url(product_url: str) -> str:
     try:
         if "{url}" in AFF_ELCORTEINGLES:
             return AFF_ELCORTEINGLES.replace("{url}", urllib.parse.quote(product_url, safe=""))
-        # si es un prefijo típico
         if AFF_ELCORTEINGLES.endswith("=") or "url=" in AFF_ELCORTEINGLES or "p=" in AFF_ELCORTEINGLES:
             return AFF_ELCORTEINGLES + urllib.parse.quote(product_url, safe="")
-        # si nos pasan una url completa de tracking sin plantilla, no inventamos
         return product_url
     except Exception:
         return product_url
@@ -177,9 +168,7 @@ def build_affiliate_url(product_url: str) -> str:
 
 def image_to_600(url: str) -> str:
     """
-    En ECI suele venir:
-      ...?impolicy=Resize&width=640&height=640
-    Lo pasamos a 600x600.
+    ...?impolicy=Resize&width=640&height=640 -> 600x600
     """
     if not url:
         return url
@@ -192,6 +181,17 @@ def image_to_600(url: str) -> str:
 # =========================
 # Fetch strategies
 # =========================
+def preflight_home_requests() -> None:
+    """
+    Preflight para sembrar cookies y reducir bloqueos.
+    Si falla, no pasa nada.
+    """
+    try:
+        SESSION.get(BASE_URL, timeout=(CONNECT_TIMEOUT, min(READ_TIMEOUT, 20)), allow_redirects=True)
+    except Exception:
+        pass
+
+
 def fetch_with_requests(url: str) -> str:
     r = SESSION.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), allow_redirects=True)
     r.raise_for_status()
@@ -200,40 +200,42 @@ def fetch_with_requests(url: str) -> str:
 
 def fetch_with_curl(url: str) -> str:
     """
-    Fallback robusto: curl suele pasar donde python-requests falla por fingerprint TLS/WAF.
+    Fallback robusto.
+    CLAVE: forzar HTTP/1.1 para evitar curl(92) INTERNAL_ERROR HTTP/2.
     """
-    # Importante: --compressed para manejar gzip/deflate
-    # -L follow redirects, -s silent pero mantenemos errores con -S
+    # curl retries:
+    # --retry-all-errors: reintenta también errores "no HTTP status" (TLS/HTTP2/etc.)
+    # --http1.1: evita el bug/limitación HTTP/2 en algunos runners
     cmd = [
         "curl", "-sS", "-L",
-        "--max-time", str(int(READ_TIMEOUT)),
+        "--http1.1",
         "--connect-timeout", str(int(CONNECT_TIMEOUT)),
-        "--compressed",
-        "-H", SESSION.headers.get("User-Agent", ""),
-        url
-    ]
-
-    # Curl no acepta "User-Agent: ..." como header suelto si viene sin "User-Agent:"
-    # Construimos bien:
-    cmd = [
-        "curl", "-sS", "-L",
         "--max-time", str(int(READ_TIMEOUT)),
-        "--connect-timeout", str(int(CONNECT_TIMEOUT)),
+        "--retry", "3",
+        "--retry-delay", "2",
+        "--retry-all-errors",
         "--compressed",
         "-H", f"User-Agent: {SESSION.headers.get('User-Agent')}",
         "-H", f"Accept: {SESSION.headers.get('Accept')}",
         "-H", f"Accept-Language: {SESSION.headers.get('Accept-Language')}",
+        "-H", f"Referer: {SESSION.headers.get('Referer')}",
         url,
     ]
 
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
-        raise RuntimeError(f"curl_error rc={p.returncode} stderr={p.stderr.strip()[:300]}")
+        err = (p.stderr or "").strip().replace("\n", " ")
+        raise RuntimeError(f"curl_error rc={p.returncode} stderr={err[:400]}")
     return p.stdout
 
 
 def fetch_html(url: str) -> str:
     last_err = None
+
+    # Preflight (no bloqueante)
+    log("🧪 Preflight: home (requests)")
+    preflight_home_requests()
+
     for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
         log(f"🌐 GET {url} (intento {attempt}/{MAX_FETCH_ATTEMPTS}) timeout=({CONNECT_TIMEOUT:.1f},{READ_TIMEOUT:.1f})")
 
@@ -246,9 +248,9 @@ def fetch_html(url: str) -> str:
             last_err = e
             log(f"⚠️  Error fetch (requests) -> {type(e).__name__}: {e}")
 
-        # 2) fallback curl
+        # 2) curl fallback (HTTP/1.1)
         try:
-            log("🧰 Probando fallback: curl ...")
+            log("🧰 Probando fallback: curl --http1.1 ...")
             html_text = fetch_with_curl(url)
             log(f"✅ OK (curl) bytes={len(html_text.encode('utf-8', errors='ignore'))}")
             return html_text
@@ -270,71 +272,64 @@ def parse_plp(html_text: str) -> List[Dict]:
     soup = BeautifulSoup(html_text, "lxml")
 
     items = []
-    # Estructura típica: li.products_list-item > article.product_preview
-    for li in soup.select("li.products_list-item article.product_preview"):
-        # Nombre
-        name = li.get("aria-label") or ""
-        name = normalize_spaces(name)
-        if not name:
-            # fallback h2 a
-            a = li.select_one("h2 a.product_preview-title")
-            if a:
-                name = normalize_spaces(a.get_text(" ", strip=True))
+    for art in soup.select("li.products_list-item article.product_preview"):
+        raw_name = art.get("aria-label") or ""
+        raw_name = normalize_spaces(raw_name)
 
-        if not name:
+        if not raw_name:
+            a = art.select_one("h2 a.product_preview-title")
+            if a:
+                raw_name = normalize_spaces(a.get_text(" ", strip=True))
+
+        if not raw_name:
+            continue
+
+        if is_tablet_or_non_mobile(raw_name):
+            continue
+
+        ram, rom = extract_ram_rom_from_name(raw_name)
+        if not ram or not rom:
+            # regla: si no tiene memoria + capacidad, lo descartamos
             continue
 
         # URL
-        a = li.select_one("h2 a.product_preview-title")
+        a = art.select_one("h2 a.product_preview-title")
         href = a.get("href") if a else ""
         url = absolutize_url(href)
 
         # Imagen
-        img = li.select_one("img.js_preview_image")
-        img_url = img.get("src") if img else ""
-        img_url = html.unescape(img_url or "")
-        img_url_600 = image_to_600(img_url)
+        img = art.select_one("img.js_preview_image")
+        img_url = html.unescape((img.get("src") if img else "") or "")
+        img_url = image_to_600(img_url)
 
-        # RAM/ROM
-        ram, rom = extract_ram_rom_from_name(name)
-
-        # Precio (la PLP a veces lo carga por JS; intentamos capturar algo si viene)
-        price_text = li.get_text(" ", strip=True)
-        price_text = normalize_spaces(price_text)
+        # Precio: en PLP muchas veces viene por JS; aquí intentamos capturar si hay "€" en el texto
+        price_text = normalize_spaces(art.get_text(" ", strip=True))
         price = None
         mprice = re.search(r"(\d{1,4}(?:[.,]\d{2})?)\s*€", price_text)
         if mprice:
-            price = mprice.group(1).replace(".", "").replace(",", ".")  # "1.099,00" -> "1099.00"
-            # dejamos price como str
+            price = mprice.group(1).replace(".", "").replace(",", ".")
 
-        # filtros de negocio
-        if is_tablet_or_non_mobile(name):
-            continue
-        if not ram or not rom:
-            # tu regla: si no tiene memoria y capacidad, no es móvil (para importar)
-            continue
+        nombre_final = title_case_product_name(raw_name)
 
-        nombre_final = title_case_product_name(name)
-
-        # Version (reglas: tienda España -> versión global salvo iPhone)
         version = "Versión Global"
-        if nombre_final.upper().startswith("IPHONE") or " IPHONE " in (" " + nombre_final.upper() + " "):
+        if re.search(r"\biphone\b", nombre_final, re.IGNORECASE):
             version = "IOS"
 
         item = {
             "nombre": nombre_final,
             "memoria": ram,
             "capacidad": rom,
+            "version": version,
+            "fuente": "El Corte Inglés",
+            "enviado_desde": "España",
             "precio_actual": price,
             "precio_original": None,
             "codigo_de_descuento": "OFERTA: PROMO.",
-            "fuente": "El Corte Inglés",
-            "enviado_desde": "España",
-            "imagen_producto": img_url_600 or img_url,
+            "imagen_producto": img_url,
             "url_producto": url,
             "url_importada_sin_afiliado": url,
             "url_con_afiliado": build_affiliate_url(url),
-            "id_origen": li.get("id") or None,
+            "id_origen": art.get("id") or None,
         }
         items.append(item)
 
@@ -364,7 +359,7 @@ def main() -> None:
 
     try:
         html_text = fetch_html(PLP_URL)
-        time.sleep(PAUSE_SECONDS)
+        sleep_polite()
         items = parse_plp(html_text)
     except Exception as e:
         log(f"❌ ERROR al descargar/parsear PLP: {type(e).__name__}: {e}")
@@ -380,23 +375,22 @@ def main() -> None:
         log(f"1) Nombre: {p['nombre']}")
         log(f"2) Memoria: {p['memoria']}")
         log(f"3) Capacidad: {p['capacidad']}")
-        log(f"4) Versión: {('IOS' if p['nombre'].upper().startswith('IPHONE') else 'Versión Global')}")
+        log(f"4) Versión: {p['version']}")
         log(f"5) Fuente: {p['fuente']}")
         log(f"6) Precio actual: {p['precio_actual'] if p['precio_actual'] else 'NO DETECTADO (JS)'}")
         log(f"7) Precio original: {p['precio_original'] if p['precio_original'] else 'NO DETECTADO'}")
         log(f"8) Código de descuento: {p['codigo_de_descuento']}")
         log(f"9) Enviado desde: {p['enviado_desde']}")
-        log(f"10) URL Imagen: {p['imagen_producto']}")
-        log(f"11) Enlace Producto: {p['url_producto']}")
-        log(f"12) URL importada sin afiliado: {p['url_importada_sin_afiliado']}")
-        log(f"13) URL con mi afiliado: {p['url_con_afiliado']}")
+        log(f"10) URL Imagen: {p['imagen_producto'] if p['imagen_producto'] else 'N/D'}")
+        log(f"11) Enlace Producto: {p['url_producto'] if p['url_producto'] else 'N/D'}")
+        log(f"12) URL importada sin afiliado: {p['url_importada_sin_afiliado'] if p['url_importada_sin_afiliado'] else 'N/D'}")
+        log(f"13) URL con mi afiliado: {p['url_con_afiliado'] if p['url_con_afiliado'] else 'N/D'}")
         if p.get("id_origen"):
             log(f"14) ID origen (ECI): {p['id_origen']}")
         log("------------------------------------------------------------")
 
-    hoy_fmt = now_str()
     log("\n============================================================")
-    log(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})")
+    log(f"📋 RESUMEN DE EJECUCIÓN ({now_str()})")
     log("============================================================")
     log(f"\nA) DETECTADOS: {len(summary_detectados)}")
     for n in summary_detectados[:200]:
