@@ -9,7 +9,6 @@ permissions:
   contents: read
   actions: write
 
-
 jobs:
   ejecutar-scraper:
     runs-on: ubuntu-latest
@@ -28,11 +27,15 @@ jobs:
       - name: Instalar librerías
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 woocommerce lxml
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 lxml woocommerce
 
-      
-      - name: Ejecutar Script
+      - name: Check rápido de conectividad ECI (curl)
+        run: |
+          echo "---- CURL CHECK ECI ----"
+          curl -I -L --max-time 20 "https://www.elcorteingles.es/limite-48-horas/electronica/moviles-y-smartphones/" || true
+          echo "-------------------------"
+
+      - name: Ejecutar Script (PREVIEW)
         env:
           WP_URL: ${{ secrets.WP_URL }}
           WP_KEY: ${{ secrets.WP_KEY }}
@@ -43,9 +46,18 @@ jobs:
           AFF_FNAC: ${{ secrets.AFF_FNAC }}
           AFF_XIAOMI_STORE: ${{ secrets.AFF_XIAOMI_STORE }}
           AFF_ELCORTEINGLES: ${{ secrets.AFF_ELCORTEINGLES }}
-          
 
-        run: python elcorteingles_preview.py
+          # 🔧 Para que el preview no se quede colgado muchos minutos
+          ECI_CONNECT_TIMEOUT: "12"
+          ECI_READ_TIMEOUT: "40"
+          ECI_MAX_FETCH_ATTEMPTS: "4"
+          ECI_RETRY_SLEEP_SECONDS: "10"
+
+          # (Opcional) Limita productos para logs rápidos
+          # MAX_PRODUCTS: "20"
+        run: |
+          echo "---- RUN ECI PREVIEW ----"
+          PYTHONUNBUFFERED=1 python -u elcorteingles_preview.py
 
       - name: Borrar historiales antiguos
         uses: Mattraks/delete-workflow-runs@v2
