@@ -19,12 +19,34 @@ from bs4 import BeautifulSoup
 # =========================
 # CONFIG
 # =========================
-SCRAPER_VERSION = "ECI_PREVIEW_v1.4_http1_preflight"
+SCRAPER_VERSION = "ECI_PREVIEW_v1.5_multi_plp_ipv4_cookiejar"
 
-PLP_URL = os.getenv(
-    "ECI_PLP_URL",
-    "https://www.elcorteingles.es/limite-48-horas/electronica/moviles-y-smartphones/"
-).strip()
+BASE_URL = "https://www.elcorteingles.es"
+
+# Puedes sobreescribir con:
+#   ECI_PLP_URLS="url1,url2,url3"
+# o con:
+#   ECI_PLP_URL="una_url"
+ECI_PLP_URL = (os.getenv("ECI_PLP_URL") or "").strip()
+ECI_PLP_URLS = (os.getenv("ECI_PLP_URLS") or "").strip()
+
+DEFAULT_PLP_URLS = [
+    # Más "clásicas"/paginadas de Ofertas Límite (suelen ser más ligeras)
+    "https://www.elcorteingles.es/limite-48-horas/electronica/moviles/",
+    "https://www.elcorteingles.es/limite-48-horas/electronica/moviles/2/",
+    # La que estabas usando (más SPA)
+    "https://www.elcorteingles.es/limite-48-horas/electronica/moviles-y-smartphones/",
+    # Fallback adicional (no es “limite 48h”, pero útil para verificar scraping)
+    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/",
+]
+
+if ECI_PLP_URLS:
+    PLP_URLS = [u.strip() for u in ECI_PLP_URLS.split(",") if u.strip()]
+elif ECI_PLP_URL:
+    PLP_URLS = [ECI_PLP_URL]
+else:
+    PLP_URLS = DEFAULT_PLP_URLS
+
 
 PAUSE_SECONDS = float(os.getenv("PAUSE_SECONDS", "0.8"))
 
@@ -34,12 +56,15 @@ READ_TIMEOUT = float(os.getenv("ECI_READ_TIMEOUT", "40"))
 MAX_FETCH_ATTEMPTS = int(os.getenv("ECI_MAX_FETCH_ATTEMPTS", "4"))
 RETRY_SLEEP_SECONDS = int(os.getenv("ECI_RETRY_SLEEP_SECONDS", "10"))
 
+# curl max-time independiente (porque a veces requests cae pero curl tarda más)
+CURL_MAX_TIME = float(os.getenv("ECI_CURL_MAX_TIME", "55"))
+
 MAX_PRODUCTS = os.getenv("MAX_PRODUCTS", "").strip()
 MAX_PRODUCTS_N = int(MAX_PRODUCTS) if MAX_PRODUCTS.isdigit() else None
 
-AFF_ELCORTEINGLES = (os.getenv("AFF_ELCORTEINGLES") or os.getenv("AFF_ELCORTEINGLES", "")).strip()
+AFF_ELCORTEINGLES = (os.getenv("AFF_ELCORTEINGLES") or "").strip()
 
-BASE_URL = "https://www.elcorteingles.es"
+COOKIE_JAR = os.getenv("ECI_COOKIE_JAR", ".eci_cookies.txt").strip()
 
 
 # =========================
@@ -47,8 +72,6 @@ BASE_URL = "https://www.elcorteingles.es"
 # =========================
 SESSION = requests.Session()
 
-# Headers "browser-ish"
-# Importante: NO pedir br para evitar problemas de decode
 SESSION.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -107,12 +130,10 @@ def title_case_product_name(name: str) -> str:
         if not token:
             continue
 
-        # g85 / 14t / 5g / 4g -> G85 / 14T / 5G / 4G
         if re.search(r"\d", token) and re.search(r"[A-Za-z]", token):
             out.append("".join(ch.upper() if ch.isalpha() else ch for ch in token))
             continue
 
-        # HONOR -> Honor (si no es sigla cortísima)
         if token.isupper() and len(token) > 3:
             out.append(token.capitalize())
             continue
@@ -167,9 +188,6 @@ def build_affiliate_url(product_url: str) -> str:
 
 
 def image_to_600(url: str) -> str:
-    """
-    ...?impolicy=Resize&width=640&height=640 -> 600x600
-    """
     if not url:
         return url
     u = url
@@ -182,10 +200,6 @@ def image_to_600(url: str) -> str:
 # Fetch strategies
 # =========================
 def preflight_home_requests() -> None:
-    """
-    Preflight para sembrar cookies y reducir bloqueos.
-    Si falla, no pasa nada.
-    """
     try:
         SESSION.get(BASE_URL, timeout=(CONNECT_TIMEOUT, min(READ_TIMEOUT, 20)), allow_redirects=True)
     except Exception:
@@ -200,21 +214,24 @@ def fetch_with_requests(url: str) -> str:
 
 def fetch_with_curl(url: str) -> str:
     """
-    Fallback robusto.
-    CLAVE: forzar HTTP/1.1 para evitar curl(92) INTERNAL_ERROR HTTP/2.
+    Fallback robusto:
+    - --http1.1 (ya lo tenías)
+    - --ipv4 (evita hangs por IPv6 en runners)
+    - cookie jar persistente (a veces WAF/consent)
+    - retry nativo de curl
     """
-    # curl retries:
-    # --retry-all-errors: reintenta también errores "no HTTP status" (TLS/HTTP2/etc.)
-    # --http1.1: evita el bug/limitación HTTP/2 en algunos runners
     cmd = [
         "curl", "-sS", "-L",
         "--http1.1",
+        "--ipv4",
         "--connect-timeout", str(int(CONNECT_TIMEOUT)),
-        "--max-time", str(int(READ_TIMEOUT)),
+        "--max-time", str(int(CURL_MAX_TIME)),
         "--retry", "3",
         "--retry-delay", "2",
         "--retry-all-errors",
         "--compressed",
+        "-c", COOKIE_JAR,
+        "-b", COOKIE_JAR,
         "-H", f"User-Agent: {SESSION.headers.get('User-Agent')}",
         "-H", f"Accept: {SESSION.headers.get('Accept')}",
         "-H", f"Accept-Language: {SESSION.headers.get('Accept-Language')}",
@@ -229,10 +246,9 @@ def fetch_with_curl(url: str) -> str:
     return p.stdout
 
 
-def fetch_html(url: str) -> str:
+def fetch_html_one_url(url: str) -> str:
     last_err = None
 
-    # Preflight (no bloqueante)
     log("🧪 Preflight: home (requests)")
     preflight_home_requests()
 
@@ -248,9 +264,9 @@ def fetch_html(url: str) -> str:
             last_err = e
             log(f"⚠️  Error fetch (requests) -> {type(e).__name__}: {e}")
 
-        # 2) curl fallback (HTTP/1.1)
+        # 2) curl fallback (HTTP/1.1 + IPv4 + cookies)
         try:
-            log("🧰 Probando fallback: curl --http1.1 ...")
+            log("🧰 Probando fallback: curl --http1.1 --ipv4 (cookiejar) ...")
             html_text = fetch_with_curl(url)
             log(f"✅ OK (curl) bytes={len(html_text.encode('utf-8', errors='ignore'))}")
             return html_text
@@ -261,6 +277,25 @@ def fetch_html(url: str) -> str:
         if attempt < MAX_FETCH_ATTEMPTS:
             log(f"⏳ Sleep {RETRY_SLEEP_SECONDS}s")
             time.sleep(RETRY_SLEEP_SECONDS)
+
+    raise last_err
+
+
+def fetch_html_any_url(urls: List[str]) -> Tuple[str, str]:
+    """
+    Prueba varias PLPs (de más ligera a más pesada).
+    Devuelve (html, url_ok)
+    """
+    last_err = None
+    for idx, url in enumerate(urls, start=1):
+        log("------------------------------------------------------------")
+        log(f"🔁 PROBANDO URL {idx}/{len(urls)}: {url}")
+        try:
+            html_text = fetch_html_one_url(url)
+            return html_text, url
+        except Exception as e:
+            last_err = e
+            log(f"❌ Falló URL: {type(e).__name__}: {e}")
 
     raise last_err
 
@@ -289,20 +324,17 @@ def parse_plp(html_text: str) -> List[Dict]:
 
         ram, rom = extract_ram_rom_from_name(raw_name)
         if not ram or not rom:
-            # regla: si no tiene memoria + capacidad, lo descartamos
             continue
 
-        # URL
         a = art.select_one("h2 a.product_preview-title")
         href = a.get("href") if a else ""
         url = absolutize_url(href)
 
-        # Imagen
         img = art.select_one("img.js_preview_image")
         img_url = html.unescape((img.get("src") if img else "") or "")
         img_url = image_to_600(img_url)
 
-        # Precio: en PLP muchas veces viene por JS; aquí intentamos capturar si hay "€" en el texto
+        # Precio: en páginas "clásicas" suele venir en HTML y esto captura bien.
         price_text = normalize_spaces(art.get_text(" ", strip=True))
         price = None
         mprice = re.search(r"(\d{1,4}(?:[.,]\d{2})?)\s*€", price_text)
@@ -347,24 +379,31 @@ def main() -> None:
     log(f"🔎 PREVIEW EL CORTE INGLÉS (SIN CREAR) ({now_str()})")
     log("============================================================")
     log(f"SCRAPER_VERSION: {SCRAPER_VERSION}")
-    log(f"PLP: {PLP_URL}")
+    log("PLP_URLS (fallback):")
+    for u in PLP_URLS:
+        log(f"- {u}")
     log(f"Pausa entre requests: {PAUSE_SECONDS}s")
-    log(f"Timeout connect/read: {CONNECT_TIMEOUT:.1f}s / {READ_TIMEOUT:.1f}s")
-    log(f"Reintentos fetch: {MAX_FETCH_ATTEMPTS} (sleep {RETRY_SLEEP_SECONDS}s)")
+    log(f"Timeout connect/read (requests): {CONNECT_TIMEOUT:.1f}s / {READ_TIMEOUT:.1f}s")
+    log(f"curl max-time: {CURL_MAX_TIME:.1f}s | cookiejar: {COOKIE_JAR}")
+    log(f"Reintentos fetch por URL: {MAX_FETCH_ATTEMPTS} (sleep {RETRY_SLEEP_SECONDS}s)")
     log(f"Afiliado ECI configurado: {'SI' if bool(AFF_ELCORTEINGLES) else 'NO'}")
     log(f"MAX_PRODUCTS: {MAX_PRODUCTS_N if MAX_PRODUCTS_N else 'SIN LÍMITE'}")
     log("============================================================")
 
     summary_detectados = []
+    url_ok = None
+    items = []
 
     try:
-        html_text = fetch_html(PLP_URL)
+        html_text, url_ok = fetch_html_any_url(PLP_URLS)
         sleep_polite()
         items = parse_plp(html_text)
     except Exception as e:
-        log(f"❌ ERROR al descargar/parsear PLP: {type(e).__name__}: {e}")
+        log(f"❌ ERROR al descargar/parsear TODAS las PLPs: {type(e).__name__}: {e}")
         items = []
 
+    log("============================================================")
+    log(f"✅ URL usada finalmente: {url_ok if url_ok else 'NINGUNA (todo falló)'}")
     log(f"📦 Productos móviles detectados (con RAM+ROM): {len(items)}")
     log("------------------------------------------------------------")
 
@@ -377,7 +416,7 @@ def main() -> None:
         log(f"3) Capacidad: {p['capacidad']}")
         log(f"4) Versión: {p['version']}")
         log(f"5) Fuente: {p['fuente']}")
-        log(f"6) Precio actual: {p['precio_actual'] if p['precio_actual'] else 'NO DETECTADO (JS)'}")
+        log(f"6) Precio actual: {p['precio_actual'] if p['precio_actual'] else 'NO DETECTADO (JS o no visible)'}")
         log(f"7) Precio original: {p['precio_original'] if p['precio_original'] else 'NO DETECTADO'}")
         log(f"8) Código de descuento: {p['codigo_de_descuento']}")
         log(f"9) Enviado desde: {p['enviado_desde']}")
