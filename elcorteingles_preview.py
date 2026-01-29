@@ -1,248 +1,172 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-PREVIEW El Corte Inglés (SIN CREAR PRODUCTOS)
-- Scrapea PLP
-- Extrae: nombre, memoria, capacidad, precios (si aparecen), imagen, URL limpia + URL con afiliado
-- Logs estilo ODM (ACF)
-- Reintentos + backoff (10 intentos, 15s) para evitar timeouts
-"""
-
 import os
 import re
 import time
+import random
 import html
 from datetime import datetime
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
 
 import requests
 from bs4 import BeautifulSoup
 
 
-# =========================
+# ============================================================
 # CONFIG
-# =========================
-SCRAPER_VERSION = "ECI_PREVIEW_v1.1_retry_headers_timeout"
-BASE = "https://www.elcorteingles.es"
+# ============================================================
+SCRAPER_VERSION = "ECI_PREVIEW_v1.2_runner_fix"
 
-# URL principal (la que tú pasaste)
-PLP_URL_PRIMARY = "https://www.elcorteingles.es/limite-48-horas/electronica/moviles-y-smartphones/"
+PLP_URL = "https://www.elcorteingles.es/limite-48-horas/electronica/moviles-y-smartphones/"
+BASE_URL = "https://www.elcorteingles.es"
 
-# Fallbacks (por si el primary está especialmente pesado)
-PLP_URL_FALLBACKS = [
-    "https://www.elcorteingles.es/electronica/moviles-y-smartphones/",
-    # antiguos patrones indexados; a veces responden más “ligero”
-    "https://www.elcorteingles.es/limite-48-horas/electronica/moviles-y-smartphones/2/",
-]
+PAUSA_REQUESTS = float(os.getenv("PAUSA_REQUESTS", "0.8"))
 
-# Puedes sobreescribir por ENV si quieres probar otra
-PLP_URL = os.getenv("ECI_PLP_URL", PLP_URL_PRIMARY)
-
-REQUEST_PAUSE = float(os.getenv("REQUEST_PAUSE", "0.8"))
-
-# Reintentos estilo ODM
+# Estándar ODM: reintentos y pausas
 MAX_FETCH_ATTEMPTS = int(os.getenv("ECI_MAX_FETCH_ATTEMPTS", "10"))
 RETRY_SLEEP_SECONDS = int(os.getenv("ECI_RETRY_SLEEP_SECONDS", "15"))
 
-# Timeout: (connect, read)
+# Timeout separado connect/read (ECI en Actions a veces tarda mucho)
 CONNECT_TIMEOUT = float(os.getenv("ECI_CONNECT_TIMEOUT", "12"))
 READ_TIMEOUT = float(os.getenv("ECI_READ_TIMEOUT", "120"))
 
-# Afiliado (tu runner lo tiene como secret AFF_ELCORTEINGLES)
-AFF_ECI = (
-    os.getenv("AFF_ELCORTEINGLES")
-    or os.getenv("AFF_ELCORTE_INGLES")
-    or os.getenv("AFF_ECI")
-    or ""
-).strip()
+# Limitar productos en preview (opcional)
+MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "0"))  # 0 = sin límite
 
-TIENDAS_ESPANA = ["pccomponentes", "aliexpress plaza", "aliexpress", "mediamarkt", "amazon", "fnac", "phone house", "powerplanet", "xiaomi store", "el corte ingles"]
+# Afiliado: tu secret en GitHub Actions se llama AFF_ELCORTEINGLES
+AFF_ECI = (os.getenv("AFF_ELCORTEINGLES") or "").strip()
+
+FUENTE = "El Corte Inglés"
+ENVIADO_DESDE = "España"
+IMPORTADO_DE = "https://www.elcorteingles.es"
 
 SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-})
+SESSION.headers.update(
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1",
+        "Referer": "https://www.elcorteingles.es/",
+    }
+)
 
 
-# =========================
-# HELPERS (formato ODM)
-# =========================
+# ============================================================
+# HELPERS
+# ============================================================
+RE_RAM_ROM = re.compile(r"(\d{1,3})\s*(GB|TB)\s*\+\s*(\d{2,4})\s*(GB|TB)", re.IGNORECASE)
+RE_TABLET = re.compile(r"\b(TAB|IPAD)\b", re.IGNORECASE)
+
+
 def now_fmt():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def clean_spaces(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip())
+def sleep_polite():
+    time.sleep(PAUSA_REQUESTS + random.uniform(0.05, 0.25))
 
 
 def strip_query(url: str) -> str:
-    """Quita querystring y fragment."""
     if not url:
         return url
-    parts = urlsplit(url)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    p = urlparse(url)
+    return urlunparse((p.scheme, p.netloc, p.path, p.params, "", ""))
 
 
 def with_affiliate(url_clean: str, aff: str) -> str:
-    """Añade afiliado (aff normalmente empieza por '?')."""
-    if not url_clean:
+    aff = (aff or "").strip()
+    if not url_clean or not aff:
         return url_clean
-    if not aff:
-        return url_clean
-    # si el aff no empieza por ?, lo añadimos bien
+    # aff puede venir como "utm=..." o como "?utm=..."
     if not aff.startswith("?"):
         aff = "?" + aff.lstrip("&?")
     return url_clean + aff
 
 
-def image_to_600(img_url: str) -> str:
-    """Intenta forzar 600x600 en URLs tipo ...?impolicy=Resize&width=640&height=640"""
-    if not img_url:
-        return img_url
-    # reemplazos típicos
-    img_url = img_url.replace("width=640", "width=600").replace("height=640", "height=600")
-    img_url = img_url.replace("width=1200", "width=600").replace("height=1200", "height=600")
-    return img_url
+def image_to_600(url_img: str) -> str:
+    """Fuerza width/height a 600 si vienen en query."""
+    if not url_img:
+        return url_img
+    p = urlparse(url_img)
+    qs = dict(parse_qsl(p.query, keep_blank_values=True))
+    # ECI usa impolicy=Resize&width=640&height=640 (o 1200)
+    qs["width"] = "600"
+    qs["height"] = "600"
+    qs.setdefault("impolicy", "Resize")
+    return urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(qs, doseq=True), p.fragment))
 
 
-def normalize_token(tok: str) -> str:
+def titlecase_keep_alnum(s: str) -> str:
     """
-    - Primera letra mayúscula por palabra
-    - Si hay mezcla letras+números: letras en mayúsculas (ej: g85 -> G85, 5g -> 5G)
+    - Primera letra de cada palabra en mayúscula
+    - Si hay números + letras: letras en mayúscula (g85 -> G85, 5g -> 5G, 14t -> 14T)
     """
-    tok = tok.strip()
-    if not tok:
-        return tok
+    s = re.sub(r"\s+", " ", (s or "").strip())
 
-    # conserva separadores tipo "/"
-    if re.fullmatch(r"[+/]", tok):
-        return tok
+    def fix_token(tok: str) -> str:
+        if not tok:
+            return tok
+        if re.search(r"\d", tok) and re.search(r"[A-Za-z]", tok):
+            return "".join(ch.upper() if ch.isalpha() else ch for ch in tok)
+        if tok.isupper():
+            return tok
+        return tok[:1].upper() + tok[1:].lower()
 
-    # tokens con dígitos: upper a letras
-    if re.search(r"\d", tok):
-        out = []
-        for ch in tok:
-            if ch.isalpha():
-                out.append(ch.upper())
-            else:
-                out.append(ch)
-        return "".join(out)
-
-    # tokens sin dígitos: capitaliza normal
-    return tok[:1].upper() + tok[1:].lower()
-
-
-def titlecase_keep_format(s: str) -> str:
-    s = clean_spaces(s)
-    # separa por espacios, pero respeta símbolos + y /
-    parts = re.split(r"(\s+)", s)
+    parts = s.split(" ")
     out = []
-    for p in parts:
-        if p.isspace():
-            out.append(p)
-        else:
-            # descompone "Note-14" en subpartes manteniendo guiones
-            sub = re.split(r"(-)", p)
-            out_sub = []
-            for ss in sub:
-                if ss == "-":
-                    out_sub.append(ss)
-                else:
-                    out_sub.append(normalize_token(ss))
-            out.append("".join(out_sub))
-    return "".join(out).strip()
+    for w in parts:
+        # respeta separadores internos con guion
+        subs = w.split("-")
+        subs = [fix_token(x) for x in subs]
+        out.append("-".join(subs))
+    return " ".join(out)
 
 
-def parse_ram_storage(title: str):
-    """
-    Busca patrones:
-    - "8GB + 256GB"
-    - "12 GB + 512 GB"
-    - también TB (ej: 1TB)
-    Devuelve ("8 GB", "256 GB") o (None, None)
-    """
-    t = title or ""
-    m = re.search(r"(\d+)\s*(GB|TB)\s*\+\s*(\d+)\s*(GB|TB)", t, flags=re.I)
+def parse_ram_rom(title: str):
+    m = RE_RAM_ROM.search(title or "")
     if not m:
         return None, None
-
-    ram_n, ram_u, sto_n, sto_u = m.group(1), m.group(2).upper(), m.group(3), m.group(4).upper()
-    memoria = f"{ram_n} {ram_u}"
-    capacidad = f"{sto_n} {sto_u}"
-    return memoria, capacidad
+    ram_n, ram_u, rom_n, rom_u = m.group(1), m.group(2).upper(), m.group(3), m.group(4).upper()
+    return f"{int(ram_n)} {ram_u}", f"{int(rom_n)} {rom_u}"
 
 
 def clean_base_name(raw_title: str) -> str:
-    """
-    De "Xiaomi Redmi Note 14 8GB + 256GB móvil libre"
-    -> "Xiaomi Redmi Note 14"
-    """
     t = html.unescape(raw_title or "")
-    t = re.sub(r"\b(\d+)\s*(GB|TB)\s*\+\s*(\d+)\s*(GB|TB)\b", "", t, flags=re.I)
-    t = re.sub(r"\bm[oó]vil\s+libre\b", "", t, flags=re.I)
-    t = re.sub(r"\bsmartphone\b", "", t, flags=re.I)
-    t = re.sub(r"\btelefon[oó]\s+m[oó]vil\b", "", t, flags=re.I)
-    t = clean_spaces(t)
-    return titlecase_keep_format(t)
+    # quita "8GB + 256GB"
+    t = RE_RAM_ROM.sub("", t)
+    # quita textos típicos
+    t = re.sub(r"\bm[oó]vil\s+libre\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bsmartphone\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\btel[eé]fono\s+m[oó]vil\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+", " ", t).strip()
+    return titlecase_keep_alnum(t)
 
 
-def is_tablet_or_invalid(title: str) -> bool:
-    t = (title or "").upper()
-    if "TAB" in t or "IPAD" in t:
-        return True
-    return False
+def is_valid_mobile(raw_title: str) -> bool:
+    if RE_TABLET.search(raw_title or ""):
+        return False
+    ram, rom = parse_ram_rom(raw_title or "")
+    return bool(ram and rom)
 
 
-def parse_prices_from_card_text(card_text: str):
-    """
-    Extrae precios tipo:
-    - 229,90 €
-    - 1.599,90 €
-    Devuelve (precio_actual, precio_original) como strings numéricas sin símbolo.
-    """
-    if not card_text:
-        return None, None
-
-    euros = re.findall(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*€", card_text)
-    # Limpia duplicados manteniendo orden
-    seen = set()
-    vals = []
-    for e in euros:
-        if e not in seen:
-            seen.add(e)
-            vals.append(e)
-
-    if not vals:
-        return None, None
-
-    # Si hay 2 o más, normalmente actual < original
-    def euro_to_float(x: str) -> float:
-        return float(x.replace(".", "").replace(",", "."))
-
-    floats = [(v, euro_to_float(v)) for v in vals]
-    floats_sorted = sorted(floats, key=lambda x: x[1])
-
-    if len(floats_sorted) == 1:
-        return floats_sorted[0][0], None
-
-    precio_actual = floats_sorted[0][0]
-    precio_original = floats_sorted[-1][0]
-    # Si por lo que sea original == actual, lo dejamos como None
-    if precio_original == precio_actual:
-        precio_original = None
-    return precio_actual, precio_original
+def compute_version(nombre: str) -> str:
+    if re.search(r"\biphone\b", nombre or "", re.IGNORECASE):
+        return "IOS"
+    return "Versión Global"
 
 
+# ============================================================
+# ROBUST HTTP (10 intentos / 15s)
+# ============================================================
 def fetch_html(url: str) -> str:
-    """
-    Fetch robusto con reintentos (10) y pausa 15s.
-    """
     last_err = None
     for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
         try:
@@ -257,68 +181,102 @@ def fetch_html(url: str) -> str:
     raise last_err
 
 
-def scrape_plp(plp_url: str):
-    html_txt = fetch_html(plp_url)
+# ============================================================
+# SCRAPE
+# ============================================================
+def scrape_plp() -> list[dict]:
+    html_txt = fetch_html(PLP_URL)
     soup = BeautifulSoup(html_txt, "html.parser")
 
-    # ECI usa <li class="products_list-item"> <article class="product_preview ...">
-    cards = soup.select("li.products_list-item article.product_preview")
+    cards = soup.select("li.products_list-item article.product_preview[id]")
     if not cards:
-        # fallback: a veces no está el li pero sí el article
-        cards = soup.select("article.product_preview")
+        cards = soup.select("article.product_preview[id]")
 
     items = []
     for art in cards:
-        # id
-        pid = art.get("id") or ""
-        # title
-        a = art.select_one("a.product_preview-title")
-        title = ""
+        pid = (art.get("id") or "").strip()
+
+        a = art.select_one("h2 a.product_preview-title") or art.select_one("a.product_preview-title")
+        raw_title = ""
         href = ""
         if a:
-            title = a.get("title") or a.get_text(" ", strip=True)
+            raw_title = a.get("title") or a.get_text(" ", strip=True)
             href = a.get("href") or ""
-        if not title:
-            title = art.get("aria-label") or ""
 
-        title = clean_spaces(title)
+        if not raw_title:
+            raw_title = art.get("aria-label") or ""
 
-        # url detalle (también existe data-url en div.product_link)
+        raw_title = re.sub(r"\s+", " ", raw_title).strip()
+
+        # url detalle: data-url fallback
         if not href:
             divlink = art.select_one("[data-url]")
             if divlink:
                 href = divlink.get("data-url") or ""
-        if href and href.startswith("/"):
-            href = urljoin(BASE, href)
-        href = clean_spaces(href)
+        href = href.strip()
+        url_producto = urljoin(BASE_URL, href) if href else ""
 
         # imagen
         img = art.select_one("img.js_preview_image")
-        img_url = ""
-        if img:
-            img_url = img.get("src") or ""
+        img_url = img.get("src") if img else ""
         if not img_url:
-            # variante
             vimg = art.select_one("[data-variant-image-src]")
-            if vimg:
-                img_url = vimg.get("data-variant-image-src") or ""
-        img_url = clean_spaces(img_url)
-        img_url = image_to_600(img_url)
+            img_url = vimg.get("data-variant-image-src") if vimg else ""
+        img_url = image_to_600((img_url or "").strip())
 
-        # precios (si están en el HTML)
-        card_text = clean_spaces(art.get_text(" ", strip=True))
-        precio_actual, precio_original = parse_prices_from_card_text(card_text)
+        if not is_valid_mobile(raw_title):
+            continue
 
-        items.append({
-            "pid": pid,
-            "raw_title": title,
-            "href": href,
-            "img": img_url,
-            "precio_actual": precio_actual,
-            "precio_original": precio_original,
-        })
+        ram, rom = parse_ram_rom(raw_title)
+        nombre = clean_base_name(raw_title)
+
+        items.append(
+            {
+                "pid": pid,
+                "raw_title": raw_title,
+                "nombre": nombre,
+                "memoria": ram,
+                "capacidad": rom,
+                "url_producto": url_producto,
+                "img": img_url,
+            }
+        )
+
+        if MAX_PRODUCTS and len(items) >= MAX_PRODUCTS:
+            break
 
     return items
+
+
+# ============================================================
+# LOGS
+# ============================================================
+def log_producto(p: dict):
+    version = compute_version(p["nombre"])
+    codigo_descuento = "OFERTA: PROMO."
+
+    url_importada = p["url_producto"]
+    url_importada_sin_afiliado = strip_query(url_importada)
+    url_con_mi_afiliado = with_affiliate(url_importada_sin_afiliado, AFF_ECI)
+
+    print(f"Detectado {p['nombre']}")
+    print(f"1) Nombre: {p['nombre']}")
+    print(f"2) Memoria: {p['memoria']}")
+    print(f"3) Capacidad: {p['capacidad']}")
+    print(f"4) Versión: {version}")
+    print(f"5) Fuente: {FUENTE}")
+    print(f"6) Precio actual: N/D (PLP carga por JS)")
+    print(f"7) Precio original: N/D (PLP carga por JS)")
+    print(f"8) Código de descuento: {codigo_descuento}")
+    print(f"9) URL Imagen: {p['img'] if p['img'] else 'N/D'}")
+    print(f"10) Enlace Importado: {url_importada if url_importada else 'N/D'}")
+    print(f"11) Enlace Expandido: {url_importada if url_importada else 'N/D'}")
+    print(f"12) URL importada sin afiliado: {url_importada_sin_afiliado if url_importada_sin_afiliado else 'N/D'}")
+    print(f"13) URL sin acortar con mi afiliado: {url_con_mi_afiliado if url_con_mi_afiliado else 'N/D'}")
+    print(f"14) Enviado desde: {ENVIADO_DESDE}")
+    print(f"15) Importado_de: {IMPORTADO_DE}")
+    print(f"16) PID (control interno): {p['pid'] if p['pid'] else 'N/D'}")
+    print("-" * 60)
 
 
 def main():
@@ -327,99 +285,53 @@ def main():
     print("============================================================")
     print(f"SCRAPER_VERSION: {SCRAPER_VERSION}")
     print(f"PLP: {PLP_URL}")
-    print(f"Pausa entre requests: {REQUEST_PAUSE}s")
+    print(f"Pausa entre requests: {PAUSA_REQUESTS}s")
+    print(f"Timeout connect/read: {CONNECT_TIMEOUT}s / {READ_TIMEOUT}s")
+    print(f"Reintentos fetch: {MAX_FETCH_ATTEMPTS} (sleep {RETRY_SLEEP_SECONDS}s)")
     print(f"Afiliado ECI configurado: {'SI' if bool(AFF_ECI) else 'NO'}")
+    print(f"MAX_PRODUCTS: {MAX_PRODUCTS if MAX_PRODUCTS else 'SIN LÍMITE'}")
     print("============================================================")
 
-    urls_to_try = [PLP_URL] + [u for u in PLP_URL_FALLBACKS if u != PLP_URL]
+    summary_creados = []
+    summary_eliminados = []
+    summary_actualizados = []
+    summary_ignorados = []
 
-    last_error = None
-    items = None
-    used_url = None
+    try:
+        items = scrape_plp()
+    except Exception as e:
+        print(f"❌ ERROR al descargar/parsear PLP: {type(e).__name__}: {e}")
+        items = []
 
-    for u in urls_to_try:
-        try:
-            print(f"\n🌐 Intentando PLP: {u}")
-            items = scrape_plp(u)
-            used_url = u
-            if items:
-                break
-            print("⚠️  PLP descargada pero sin productos detectados.")
-        except Exception as e:
-            last_error = e
-            print(f"❌ Fallo PLP {u}: {type(e).__name__}: {e}")
-
-    if not items:
-        print("\n============================================================")
-        print("❌ No se pudo obtener ninguna PLP con productos.")
-        if last_error:
-            print(f"Último error: {type(last_error).__name__}: {last_error}")
-        print("============================================================")
-        return
-
-    print(f"\n✅ PLP OK: {used_url}")
-    print(f"📦 Productos detectados (brutos): {len(items)}")
+    print(f"📦 Productos móviles detectados (con RAM+ROM): {len(items)}")
     print("------------------------------------------------------------")
 
-    ok = 0
-    skipped_tablet = 0
-    skipped_no_memcap = 0
-
-    for idx, it in enumerate(items, 1):
-        raw_title = it["raw_title"]
-        if is_tablet_or_invalid(raw_title):
-            skipped_tablet += 1
-            continue
-
-        memoria, capacidad = parse_ram_storage(raw_title)
-        if not memoria or not capacidad:
-            skipped_no_memcap += 1
-            continue
-
-        nombre = clean_base_name(raw_title)
-
-        # Fuente / enviado / version
-        fuente = "El Corte Inglés"
-        enviado_desde = "España"
-
-        is_iphone = bool(re.search(r"\biphone\b", raw_title, flags=re.I))
-        if is_iphone:
-            version = "IOS"
-        else:
-            version = "Versión Global"
-
-        codigo_descuento = "OFERTA: PROMO."
-
-        # URL limpia + afiliado
-        url_importada_sin_afiliado = strip_query(it["href"])
-        url_con_mi_afiliado = with_affiliate(url_importada_sin_afiliado, AFF_ECI)
-
-        print(f"Detectado ({ok+1})")
-        print(f"1) Nombre: {nombre}")
-        print(f"2) Memoria: {memoria}")
-        print(f"3) Capacidad: {capacidad}")
-        print(f"4) Versión: {version}")
-        print(f"5) Fuente: {fuente}")
-        print(f"6) Precio actual: {it['precio_actual'] if it['precio_actual'] else 'N/D'}")
-        print(f"7) Precio original: {it['precio_original'] if it['precio_original'] else 'N/D'}")
-        print(f"8) Código de descuento: {codigo_descuento}")
-        print(f"9) Enviado desde: {enviado_desde}")
-        print(f"10) Importado_de: {used_url}")
-        print(f"11) URL Imagen: {it['img'] if it['img'] else 'N/D'}")
-        print(f"12) URL importada sin afiliado: {url_importada_sin_afiliado if url_importada_sin_afiliado else 'N/D'}")
-        print(f"13) URL sin acortar con mi afiliado: {url_con_mi_afiliado if url_con_mi_afiliado else 'N/D'}")
-        print("------------------------------------------------------------")
-
-        ok += 1
-        time.sleep(REQUEST_PAUSE)
+    for p in items:
+        log_producto(p)
+        summary_ignorados.append({"nombre": p["nombre"], "id": p["pid"] or "N/A"})
+        sleep_polite()
 
     print("\n============================================================")
-    print(f"📋 RESUMEN PREVIEW ({now_fmt()})")
+    print(f"📋 RESUMEN DE EJECUCIÓN ({now_fmt()})")
     print("============================================================")
-    print(f"a) Productos OK (con Memoria+Capacidad): {ok}")
-    print(f"b) Ignorados (TAB/IPAD): {skipped_tablet}")
-    print(f"c) Ignorados (sin Memoria/Capacidad): {skipped_no_memcap}")
-    print(f"d) Total cards brutas en PLP: {len(items)}")
+    print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}")
+    for item in summary_creados:
+        print(f"- {item['nombre']} (ID: {item['id']})")
+
+    print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}")
+    for item in summary_eliminados:
+        print(f"- {item['nombre']} (ID: {item['id']})")
+
+    print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}")
+    for item in summary_actualizados:
+        print(f"- {item['nombre']} (ID: {item['id']}): {', '.join(item['cambios'])}")
+
+    print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
+    for item in summary_ignorados[:20]:
+        print(f"- {item['nombre']} (ID: {item['id']})")
+    if len(summary_ignorados) > 20:
+        print(f"... ({len(summary_ignorados) - 20} más)")
+
     print("============================================================")
 
 
