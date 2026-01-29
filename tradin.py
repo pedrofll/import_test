@@ -32,7 +32,15 @@ else:
     URLS_PAGINAS = [
         f"{BASE_URL}/en/new",
         f"{BASE_URL}/en/new?page=2",
-        f"{BASE_URL}/en/deal"
+        f"{BASE_URL}/en/new?page=3",
+        f"{BASE_URL}/en/new?page=4",
+        f"{BASE_URL}/en/new?page=5",
+        f"{BASE_URL}/en/deal",
+        f"{BASE_URL}/en/deal?page=2",
+        f"{BASE_URL}/en/deal?page=3",
+        f"{BASE_URL}/en/deal?page=4",
+        f"{BASE_URL}/en/deal?page=5",
+        f"{BASE_URL}/en/eu-warehouse"
     ]
 
 # 3) Identificador de importación (oculto)
@@ -360,3 +368,4 @@ if __name__ == '__main__':
     remotos = obtener_datos_remotos()
     if remotos:
         sincronizar(remotos)
+
