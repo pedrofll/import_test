@@ -10,6 +10,9 @@ from datetime import datetime
 from urllib.parse import urljoin, urlparse, urlunparse, urlencode, parse_qsl
 
 import requests
+from requests.exceptions import ReadTimeout, ConnectTimeout, ConnectionError, RequestException
+Reason = Exception
+
 from bs4 import BeautifulSoup
 
 
@@ -21,40 +24,103 @@ BASE_URL = "https://www.elcorteingles.es"
 
 # ACF / negocio
 FUENTE = "El Corte Inglés"
-IMPORTADO_DE = "https://www.elcorteingles.es"  # si tu ACF es select, añade esta opción
+IMPORTADO_DE = "https://www.elcorteingles.es"
 ENVIADO_DESDE = "España"
 PAUSA_REQUESTS = float(os.getenv("PAUSA_REQUESTS", "0.8"))
 
-# Afiliado ECI (ponlo en env: ID_AFILIADO_ELCORTEINGLES)
-# Ejemplo: "utm_source=tuFuente&utm_medium=affiliate&id=XXXXX"
+# Afiliado ECI (env)
 ID_AFILIADO_ELCORTEINGLES = os.getenv("ID_AFILIADO_ELCORTEINGLES", "").strip()
 
-# Modo preview (no toca Woo)
-PREVIEW_ONLY = True
+# DEBUG/preview
+MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "0"))  # 0 = sin límite
+TIMEOUT_CONNECT = float(os.getenv("TIMEOUT_CONNECT", "12"))  # seconds
+TIMEOUT_READ = float(os.getenv("TIMEOUT_READ", "90"))        # seconds
+MAX_RETRIES_HTTP = int(os.getenv("MAX_RETRIES_HTTP", "6"))   # reintentos GET
 
 SESSION = requests.Session()
+
+# Headers “realistas” (mejoran la respuesta en algunos sitios)
 SESSION.headers.update(
     {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1",
+        "Referer": "https://www.elcorteingles.es/",
     }
 )
 
 # =========================
 # REGEX
 # =========================
-RE_RAM_ROM = re.compile(r"(\d{1,3})\s*GB\s*\+\s*(\d{2,4})\s*GB", re.IGNORECASE)  # "8GB + 256GB" / "12 GB + 512 GB"
+RE_RAM_ROM = re.compile(r"(\d{1,3})\s*GB\s*\+\s*(\d{2,4})\s*GB", re.IGNORECASE)
 RE_TABLET = re.compile(r"\b(TAB|IPAD)\b", re.IGNORECASE)
 RE_PRICE_NUM = re.compile(r"(\d+(?:[.,]\d+)?)")
 
 
 # =========================
-# HELPERS
+# HTTP robusto
 # =========================
+def backoff_sleep(attempt: int, base: float = 1.4, cap: float = 20.0):
+    # exponencial con jitter
+    t = min(cap, (base ** attempt)) + random.uniform(0.0, 0.8)
+    time.sleep(t)
+
+
+def http_get(url: str, max_retries: int = MAX_RETRIES_HTTP, allow_redirects: bool = True) -> requests.Response:
+    """
+    GET robusto:
+    - timeouts connect/read separados
+    - reintentos ante timeouts/errores y 429/5xx
+    """
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = SESSION.get(
+                url,
+                timeout=(TIMEOUT_CONNECT, TIMEOUT_READ),
+                allow_redirects=allow_redirects,
+            )
+
+            # Reintento si rate-limit o server error
+            if r.status_code in (429, 500, 502, 503, 504):
+                last_err = RuntimeError(f"HTTP {r.status_code} en {url}")
+                backoff_sleep(attempt)
+                continue
+
+            # 403 a veces es antibot: reintentar con pausa
+            if r.status_code == 403:
+                last_err = RuntimeError(f"HTTP 403 (posible antibot) en {url}")
+                backoff_sleep(attempt)
+                continue
+
+            r.raise_for_status()
+            return r
+
+        except (ReadTimeout, ConnectTimeout) as e:
+            last_err = e
+            backoff_sleep(attempt)
+        except (ConnectionError, RequestException) as e:
+            last_err = e
+            backoff_sleep(attempt)
+
+    raise RuntimeError(f"No se pudo descargar tras {max_retries} intentos: {url} | Último error: {last_err}")
+
+
 def sleep_polite(base=PAUSA_REQUESTS):
     time.sleep(base + random.uniform(0.05, 0.25))
 
 
+# =========================
+# HELPERS
+# =========================
 def normaliza_600x600(url_img: str) -> str:
     if not url_img:
         return url_img
@@ -67,16 +133,12 @@ def normaliza_600x600(url_img: str) -> str:
 
 
 def smart_title_case(s: str) -> str:
-    """
-    - Primera letra de cada palabra en mayúscula.
-    - Tokens con números+letras: letras en mayúsculas (g15 -> G15, 14t -> 14T, 5g -> 5G).
-    - Mantiene acrónimos ya en mayúscula.
-    """
     s = re.sub(r"\s+", " ", (s or "").strip())
 
     def fix_token(tok: str) -> str:
         if not tok:
             return tok
+        # tokens alfanuméricos: letras mayúsculas (g15 -> G15, 14t -> 14T, 5g -> 5G)
         if re.search(r"[A-Za-z]", tok) and re.search(r"\d", tok):
             return re.sub(r"[A-Za-z]", lambda m: m.group(0).upper(), tok)
         if tok.isupper():
@@ -103,11 +165,6 @@ def extrae_ram_rom(titulo: str):
 
 
 def es_movil_valido(titulo: str) -> bool:
-    """
-    Regla segura:
-    - Excluye TAB/IPAD.
-    - Exige RAM+ROM (si no hay, no es móvil para tu import).
-    """
     if RE_TABLET.search(titulo or ""):
         return False
     ram, rom = extrae_ram_rom(titulo or "")
@@ -136,16 +193,18 @@ def compute_version(nombre: str) -> str:
 
 def isgd_shorten(long_url: str, retries: int = 5) -> str:
     api = "https://is.gd/create.php"
+    last = None
     for i in range(1, retries + 1):
         try:
-            r = SESSION.get(api, params={"format": "simple", "url": long_url}, timeout=20)
+            r = SESSION.get(api, params={"format": "simple", "url": long_url}, timeout=(10, 30))
             r.raise_for_status()
             short = r.text.strip()
             if short.startswith("http"):
                 return short
-        except Exception:
-            pass
-        time.sleep(1.5 * i)
+        except Exception as e:
+            last = e
+        time.sleep(1.2 * i)
+    # fallback
     return long_url
 
 
@@ -153,8 +212,7 @@ def isgd_shorten(long_url: str, retries: int = 5) -> str:
 # SCRAPE
 # =========================
 def scrape_plp():
-    r = SESSION.get(PLP_URL, timeout=30)
-    r.raise_for_status()
+    r = http_get(PLP_URL)
     soup = BeautifulSoup(r.text, "html.parser")
 
     items = []
@@ -202,20 +260,21 @@ def scrape_plp():
             }
         )
 
+        if MAX_PRODUCTS and len(items) >= MAX_PRODUCTS:
+            break
+
     return items
 
 
 def scrape_pdp_prices(url_producto: str):
     """
-    Devuelve (precio_actual, precio_original) como strings sin símbolo.
-    - precio_actual: preferente JSON-LD offers.price
-    - precio_original: si no existe, None
+    Devuelve (precio_actual, precio_original, moneda)
+    - precio_actual: JSON-LD offers.price
+    - precio_original: heurística simple; si no, None
     """
-    r = SESSION.get(url_producto, timeout=30)
-    r.raise_for_status()
+    r = http_get(url_producto)
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # 1) JSON-LD
     precio_actual = None
     moneda = None
 
@@ -248,20 +307,16 @@ def scrape_pdp_prices(url_producto: str):
         if precio_actual:
             break
 
-    # 2) Precio original (heurística suave):
-    # Busca cualquier "precio anterior" / "antes" / etc. y extrae el número.
+    # Precio original (heurística ligera)
     precio_original = None
     texto = soup.get_text(" ", strip=True).lower()
     if "precio anterior" in texto or "antes" in texto:
-        # Intento: buscar un patrón cercano a "precio anterior"
-        mblock = re.search(r"(precio anterior.{0,120})", texto)
+        mblock = re.search(r"(precio anterior.{0,160})", texto)
         if mblock:
             mnum = RE_PRICE_NUM.search(mblock.group(1))
             if mnum:
                 precio_original = mnum.group(1).replace(",", ".")
-    # Si no conseguimos, None
 
-    # Normaliza a forma simple
     def norm(p):
         if p is None:
             return None
@@ -306,7 +361,10 @@ def main():
     print("============================================================")
     print(f"PLP: {PLP_URL}")
     print(f"Pausa entre requests: {PAUSA_REQUESTS}s")
+    print(f"Timeout connect/read: {TIMEOUT_CONNECT}s / {TIMEOUT_READ}s")
+    print(f"Reintentos HTTP: {MAX_RETRIES_HTTP}")
     print(f"Afiliado ECI configurado: {'SI' if bool(ID_AFILIADO_ELCORTEINGLES) else 'NO'}")
+    print(f"MAX_PRODUCTS: {MAX_PRODUCTS if MAX_PRODUCTS else 'SIN LÍMITE'}")
     print("============================================================")
 
     summary_creados = []
@@ -314,7 +372,14 @@ def main():
     summary_actualizados = []
     summary_ignorados = []
 
-    items = scrape_plp()
+    # PLP
+    try:
+        items = scrape_plp()
+    except Exception as e:
+        print(f"❌ ERROR al descargar/parsear PLP: {e}")
+        # Resumen vacío para que el workflow no “reviente” sin logs
+        items = []
+
     print(f"📦 Productos móviles detectados (con RAM+ROM): {len(items)}")
     print("------------------------------------------------------------")
 
@@ -324,9 +389,15 @@ def main():
     for it in items:
         sleep_polite()
 
-        precio_actual, precio_original, moneda = scrape_pdp_prices(it["url_producto"])
+        try:
+            precio_actual, precio_original, moneda = scrape_pdp_prices(it["url_producto"])
+        except Exception as e:
+            # seguimos con logs aunque la PDP falle
+            precio_actual, precio_original, moneda = None, None, "EUR"
+            print(f"⚠️ PDP falló ({it['pid']}): {e}")
+
         version = compute_version(it["titulo"])
-        codigo_descuento = "OFERTA: PROMO."  # si no hay cupón
+        codigo_descuento = "OFERTA: PROMO."
 
         url_sin_query = limpia_url_sin_query(it["url_producto"])
         url_con_afiliado = aplica_afiliado(url_sin_query, ID_AFILIADO_ELCORTEINGLES)
@@ -336,7 +407,6 @@ def main():
         if precio_actual is None:
             sin_precio += 1
 
-        # si no hay precio original, lo dejamos como actual en logs (tu práctica habitual)
         if precio_actual is not None and precio_original is None:
             precio_original = precio_actual
 
@@ -351,7 +421,7 @@ def main():
             codigo_descuento=codigo_descuento,
         )
 
-        # En preview, siempre "ignorados" (no tocamos Woo)
+        # Preview: todo ignorado
         summary_ignorados.append({"nombre": it["titulo"], "id": it["pid"] or "N/A"})
 
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
