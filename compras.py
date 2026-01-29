@@ -68,11 +68,8 @@ def _norm_import_id(v: str) -> str:
 
 ID_IMPORTACION_NORM = _norm_import_id(ID_IMPORTACION)
 ID_AFILIADO_ALIEXPRESS = os.environ.get("AFF_ALIEXPRESS", "")
-ID_AFILIADO_TRADINGSENZHEN = os.environ.get("AFF_TRADINGSENZHEN", "")
 ID_AFILIADO_MEDIAMARKT = os.environ.get("AFF_MEDIAMARKT", "")
-ID_AFILIADO_DHGATE = os.environ.get("AFF_DHGATE", "")
 ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
-ID_AFILIADO_PHONE_HOUSE = os.environ.get("AFF_PHONEHOUSE", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
 ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
 ID_AFILIADO_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "")
@@ -512,7 +509,15 @@ def obtener_datos_remotos():
                         url_importada_sin_afiliado = (
                             url_exp.split(".html")[0] + ".html" if ".html" in url_exp else url_exp.split("?")[0]
                         )
-                    elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House"]:
+                    elif fuente == "Fnac":
+                        # Mantener ?oref=...& y eliminar desde sv_ en adelante (incluyendo sv_)
+                        if "&sv_" in (url_exp or ""):
+                            url_importada_sin_afiliado = url_exp.split("&sv_")[0] + "&"
+                        elif "?sv_" in (url_exp or ""):
+                            url_importada_sin_afiliado = url_exp.split("?sv_")[0]
+                        else:
+                            url_importada_sin_afiliado = url_exp.split("?")[0]
+                    elif fuente in ["PcComponentes", "Amazon", "Phone House"]:
                         url_importada_sin_afiliado = url_exp.split("?")[0]
                     elif fuente_norm == "xiaomi store":
                         url_importada_sin_afiliado = url_exp.split("?")[0]
@@ -531,7 +536,12 @@ def obtener_datos_remotos():
                     elif fuente == "AliExpress Plaza" and ID_AFILIADO_ALIEXPRESS:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_ALIEXPRESS}"
                     elif fuente == "Fnac" and ID_AFILIADO_FNAC:
-                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
+                        aff = ID_AFILIADO_FNAC
+                        if url_importada_sin_afiliado.endswith("&") and aff.startswith("?"):
+                            aff = aff[1:]
+                        elif ("?" in url_importada_sin_afiliado) and aff.startswith("?") and (not url_importada_sin_afiliado.endswith("&")):
+                            aff = "&" + aff[1:]
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{aff}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
                     elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
@@ -681,7 +691,15 @@ def obtener_datos_remotos():
                         url_importada_sin_afiliado = (
                             url_exp.split(".html")[0] + ".html" if ".html" in url_exp else url_exp.split("?")[0]
                         )
-                    elif fuente in ["PcComponentes", "Fnac", "Amazon", "Phone House", "El Corte Inglés", "Joom"]:
+                    elif fuente == "Fnac":
+                        # Mantener ?oref=...& y eliminar desde sv_ en adelante (incluyendo sv_)
+                        if "&sv_" in (url_exp or ""):
+                            url_importada_sin_afiliado = url_exp.split("&sv_")[0] + "&"
+                        elif "?sv_" in (url_exp or ""):
+                            url_importada_sin_afiliado = url_exp.split("?sv_")[0]
+                        else:
+                            url_importada_sin_afiliado = url_exp.split("?")[0]
+                    elif fuente in ["PcComponentes", "Amazon", "Phone House", "El Corte Inglés", "Joom"]:
                         url_importada_sin_afiliado = url_exp.split("?")[0]
                     # Seguridad extra: Joom siempre sin query
                     if (fuente_norm == "joom") or ("joom.com/" in (url_exp or "")):
@@ -700,7 +718,12 @@ def obtener_datos_remotos():
                     elif fuente == "AliExpress Plaza" and ID_AFILIADO_ALIEXPRESS:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_ALIEXPRESS}"
                     elif fuente == "Fnac" and ID_AFILIADO_FNAC:
-                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_FNAC}"
+                        aff = ID_AFILIADO_FNAC
+                        if url_importada_sin_afiliado.endswith("&") and aff.startswith("?"):
+                            aff = aff[1:]
+                        elif ("?" in url_importada_sin_afiliado) and aff.startswith("?") and (not url_importada_sin_afiliado.endswith("&")):
+                            aff = "&" + aff[1:]
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{aff}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
                     elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
