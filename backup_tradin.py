@@ -259,7 +259,8 @@ def sincronizar(remotos):
                         "regular_price": str(r['precio_regular']),
                         "meta_data": [
                             {"key": "precio_actual", "value": str(r['precio_actual'])},
-                            {"key": "enviado_desde_tg", "value": envio_telegram}
+                            {"key": "enviado_desde_tg", "value": envio_telegram},
+                            {"key": "imagen_producto", "value": r['img']}
                         ]
                     })
 
@@ -268,6 +269,16 @@ def sincronizar(remotos):
                     summary_ignorados.append({"nombre": r['nombre'], "id": match['id']})
                     print("   ⏭️ IGNORADO: Ya está actualizado.")
 
+                    # Si el producto está al día pero no tiene la ACF "imagen_producto", la guardamos igualmente
+                    if r.get("img") and (not match.get("meta", {}).get("imagen_producto")):
+                        try:
+                            wcapi.put(f"products/{match['id']}", {
+                                "meta_data": [
+                                    {"key": "imagen_producto", "value": r["img"]},
+                                ]
+                            })
+                        except Exception as e:
+                            print(f"   ⚠️ No se pudo guardar ACF imagen_producto: {e}")
             elif r['en_stock']:
                 print("   🆕 CREANDO PRODUCTO NUEVO...")
                 id_p, id_h = resolver_jerarquia(r['nombre'], cache_categorias)
@@ -293,6 +304,7 @@ def sincronizar(remotos):
                         {"key": "codigo_de_descuento", "value": "OFERTA PROMO"},
                         {"key": "enviado_desde", "value": r['enviado_desde']},
                         {"key": "enviado_desde_tg", "value": envio_telegram},
+                        {"key": "imagen_producto", "value": r['img']},
                         {"key": "enlace_de_compra_importado", "value": r['url_imp']},
                         {"key": "url_sin_acortar_con_mi_afiliado", "value": url_aff},
                         {"key": "url_oferta", "value": url_final}
