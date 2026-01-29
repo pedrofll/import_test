@@ -123,6 +123,7 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
 # --- FASE 1: SCRAPING ---
 def obtener_datos_remotos():
     total_productos = []
+    seen_urls = set()  # evita duplicados entre /new, /deal, /eu-warehouse...
     hoy = datetime.now().strftime("%d/%m/%Y")
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
 
@@ -139,9 +140,18 @@ def obtener_datos_remotos():
                 if not link_tag or " - " not in link_tag.text:
                     continue
 
-                url_imp = link_tag['href']
+                url_imp = (link_tag.get('href') or "").strip().rstrip('/')
+                if not url_imp:
+                    continue
+
+                # Dedupe por URL del producto (clave más estable)
+                if url_imp in seen_urls:
+                    continue
+                seen_urls.add(url_imp)
+
                 nombre = link_tag.text.split(" - ")[0].strip()
 
+                # Filtrar tablets / iPad / etc.
                 if any(k in nombre.upper() for k in ["TAB", "IPAD", "PAD"]):
                     continue
 
@@ -183,7 +193,7 @@ def obtener_datos_remotos():
                     "precio_actual": p_act,
                     "precio_regular": p_reg,
                     "img": img,
-                    "url_imp": url_imp,
+                    "url_imp": url_imp,  # ya normalizada sin /
                     "version": obtener_version(nombre),
                     "enviado_desde": enviado_desde,
                     "fecha": hoy,
@@ -201,7 +211,11 @@ def obtener_datos_remotos():
 def sincronizar(remotos):
     print(f"--- FASE 2: SINCRONIZANDO ---")
     cache_categorias = obtener_todas_las_categorias()
-    locales = []
+
+    # Construimos un índice por URL (normalizada) para:
+    # - acelerar la búsqueda
+    # - detectar dentro de la misma ejecución productos recién creados
+    locales_by_url = {}
     page = 1
 
     while True:
@@ -212,11 +226,17 @@ def sincronizar(remotos):
         for p in res:
             meta = {m['key']: str(m['value']) for m in p.get('meta_data', [])}
             if "tradingshenzhen.com" in meta.get('importado_de', '').lower():
-                locales.append({"id": p['id'], "nombre": p['name'], "meta": meta})
+                url_local = meta.get('enlace_de_compra_importado', '').strip().rstrip('/')
+                if url_local:
+                    # si hubiera duplicados históricos, el último sobrescribe (nos da igual para el match)
+                    locales_by_url[url_local] = {"id": p['id'], "nombre": p['name'], "meta": meta}
 
         if len(res) < 100:
             break
         page += 1
+
+    # Sets para evitar duplicados en resumen por ID (por seguridad)
+    creados_ids, eliminados_ids, actualizados_ids, ignorados_ids = set(), set(), set(), set()
 
     for r in remotos:
         try:
@@ -234,22 +254,31 @@ def sincronizar(remotos):
             print(f"10) Enlace Compra:  {r['url_imp']}")
 
             url_r = r['url_imp'].strip().rstrip('/')
-            match = next((l for l in locales if l['meta'].get('enlace_de_compra_importado', '').strip().rstrip('/') == url_r), None)
+            match = locales_by_url.get(url_r)
 
-            url_aff = f"{r['url_imp']}{ID_AFILIADO_TRADINGSENZHEN}"
+            url_aff = f"{url_r}{ID_AFILIADO_TRADINGSENZHEN}"
             url_final = acortar_url(url_aff)
 
             flag_emoji = "🇪🇺 " if r['enviado_desde'] == "Europa" else "🇨🇳 "
             envio_telegram = f"{flag_emoji}{r['enviado_desde']}"
 
             if match:
+                # Si está sin stock, lo eliminamos (tu lógica actual)
                 if not r['en_stock']:
                     wcapi.delete(f"products/{match['id']}", params={"force": True})
-                    summary_eliminados.append({"nombre": r['nombre'], "id": match['id'], "razon": "Sin Stock"})
+                    locales_by_url.pop(url_r, None)
+                    if match['id'] not in eliminados_ids:
+                        summary_eliminados.append({"nombre": r['nombre'], "id": match['id'], "razon": "Sin Stock"})
+                        eliminados_ids.add(match['id'])
                     print("   ❌ ELIMINADO de la web por falta de stock.")
                     continue
 
-                p_acf = int(float(match['meta'].get('precio_actual', 0)))
+                # Comparación de precio vs ACF precio_actual
+                try:
+                    p_acf = int(float(match['meta'].get('precio_actual', 0)))
+                except:
+                    p_acf = 0
+
                 if r['precio_actual'] != p_acf:
                     cambio_str = f"{p_acf}€ -> {r['precio_actual']}€"
                     print(f"   🔄 ACTUALIZANDO: {cambio_str}")
@@ -263,9 +292,17 @@ def sincronizar(remotos):
                         ]
                     })
 
-                    summary_actualizados.append({"nombre": r['nombre'], "id": match['id'], "cambio": cambio_str})
+                    # actualiza caché local para el resto de la ejecución
+                    match['meta']["precio_actual"] = str(r['precio_actual'])
+                    match['meta']["enviado_desde_tg"] = envio_telegram
+
+                    if match['id'] not in actualizados_ids:
+                        summary_actualizados.append({"nombre": r['nombre'], "id": match['id'], "cambio": cambio_str})
+                        actualizados_ids.add(match['id'])
                 else:
-                    summary_ignorados.append({"nombre": r['nombre'], "id": match['id']})
+                    if match['id'] not in ignorados_ids:
+                        summary_ignorados.append({"nombre": r['nombre'], "id": match['id']})
+                        ignorados_ids.add(match['id'])
                     print("   ⏭️ IGNORADO: Ya está actualizado.")
 
             elif r['en_stock']:
@@ -293,7 +330,7 @@ def sincronizar(remotos):
                         {"key": "codigo_de_descuento", "value": "OFERTA PROMO"},
                         {"key": "enviado_desde", "value": r['enviado_desde']},
                         {"key": "enviado_desde_tg", "value": envio_telegram},
-                        {"key": "enlace_de_compra_importado", "value": r['url_imp']},
+                        {"key": "enlace_de_compra_importado", "value": url_r},
                         {"key": "url_sin_acortar_con_mi_afiliado", "value": url_aff},
                         {"key": "url_oferta", "value": url_final}
                     ]
@@ -306,28 +343,46 @@ def sincronizar(remotos):
                 while intentos < max_intentos and not creado:
                     intentos += 1
                     try:
-                        res = wcapi.post("products", data)
-                        if res.status_code in [200, 201]:
+                        res_post = wcapi.post("products", data)
+                        if res_post.status_code in [200, 201]:
                             creado = True
-                            prod_res = res.json()
-                            summary_creados.append({"nombre": r['nombre'], "id": prod_res.get('id')})
+                            prod_res = res_post.json()
+                            pid = prod_res.get('id')
+
+                            # Meterlo al índice para que el resto de la ejecución lo detecte como existente
+                            locales_by_url[url_r] = {
+                                "id": pid,
+                                "nombre": r['nombre'],
+                                "meta": {
+                                    "precio_actual": str(r['precio_actual']),
+                                    "enlace_de_compra_importado": url_r,
+                                    "importado_de": ID_IMPORTACION
+                                }
+                            }
+
+                            if pid and pid not in creados_ids:
+                                summary_creados.append({"nombre": r['nombre'], "id": pid})
+                                creados_ids.add(pid)
 
                             url_short = acortar_url(prod_res.get('permalink'))
-                            if url_short:
-                                wcapi.put(f"products/{prod_res.get('id')}", {
+                            if url_short and pid:
+                                wcapi.put(f"products/{pid}", {
                                     "meta_data": [{"key": "url_post_acortada", "value": url_short}]
                                 })
 
-                            print(f"   ✅ CREADO -> ID: {prod_res.get('id')}")
+                            print(f"   ✅ CREADO -> ID: {pid}")
+                        else:
+                            # Reintento controlado
+                            time.sleep(15)
                     except:
-                        time.sleep(60)
+                        time.sleep(15)
 
             else:
                 summary_sin_stock_nuevos.append(r['nombre'])
 
         except:
-            print(f"   ❌ ERROR en {r['nombre']}")
-            summary_fallidos.append(r['nombre'])
+            print(f"   ❌ ERROR en {r.get('nombre', 'UNKNOWN')}")
+            summary_fallidos.append(r.get('nombre', 'UNKNOWN'))
 
     print("\n" + "="*60)
     print(f"📋 RESUMEN DE EJECUCIÓN ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
