@@ -1,4 +1,4 @@
-name: Import El Corte Ingles
+name: Import El Corte
 
 on:
   schedule:
