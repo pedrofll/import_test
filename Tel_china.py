@@ -6,7 +6,6 @@ import requests
 import urllib.parse
 import time
 import math
-import hashlib
 from bs4 import BeautifulSoup
 from datetime import datetime
 from woocommerce import API
@@ -32,12 +31,55 @@ AFF_POWERPLANET = os.getenv("AFF_POWERPLANET", "").strip()
 AFF_GSHOPPER = os.getenv("AFF_GSHOPPER", "").strip()
 AFF_TRADINGSENZHEN = os.getenv("AFF_TRADINGSENZHEN", "").strip()
 
+# --- PARAMETROS (fallback) ---
+# Si por cualquier motivo el ENV no está disponible o está mal configurado,
+# leemos los IDs desde el fichero "Parametros de afiliado.txt" (sin hardcodear números en el código).
+PARAMETROS_AFILIADO_PATH = os.getenv("PARAMETROS_AFILIADO_PATH", "Parametros de afiliado.txt")
+
+
+def _leer_parametro_afiliado(nombre_var: str) -> str:
+    try:
+        with open(PARAMETROS_AFILIADO_PATH, "r", encoding="utf-8") as f:
+            txt = f.read()
+        # Ej: ID_AFILIADO_TRADINGSENZHEN = "?affp=176940"
+        m = re.search(rf"^\s*{re.escape(nombre_var)}\s*=\s*([\'\"])(.*?)\1\s*$", txt, flags=re.M)
+        return (m.group(2) if m else "").strip()
+    except Exception:
+        return ""
+
+
+ID_AFILIADO_TRADINGSENZHEN = _leer_parametro_afiliado("ID_AFILIADO_TRADINGSENZHEN")
+
+
+def _extraer_affp(url: str) -> str:
+    try:
+        if not url:
+            return ""
+        u = urllib.parse.urlparse(str(url))
+        qs = urllib.parse.parse_qs(u.query)
+        v = qs.get("affp", [""])[0]
+        return str(v).strip()
+    except Exception:
+        return ""
+
+
+def _extraer_affp_id_desde_query(q: str) -> str:
+    q = (q or "").strip()
+    if not q:
+        return ""
+    # admite: '176940' | 'affp=176940' | '?affp=176940' | '&affp=176940'
+    q2 = q.lstrip('?&').strip()
+    if re.fullmatch(r"\d+", q2):
+        return q2
+    m = re.search(r"(?:^|&)affp=(\d+)", q2, flags=re.I)
+    return m.group(1) if m else ""
+
+
 summary_creados = []
 summary_eliminados = []
 summary_ignorados = []
 hoy_dt = datetime.now()
 hoy_fmt = hoy_dt.strftime("%d/%m/%Y %H:%M")
-
 
 # ============================================================
 #   LOGS A FICHERO (print -> consola + /wp-content/importador-log.txt)
@@ -59,16 +101,17 @@ def _append_log(s: str) -> None:
         pass
 
 
-
 def _url_fingerprint(u: str) -> str:
     """Devuelve una huella corta para identificar la fuente sin revelar la URL."""
     try:
         s = (u or "").strip()
         if not s:
             return ""
+        import hashlib
         return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:10]
     except Exception:
         return ""
+
 
 def _safe_filename_from_url(u: str) -> str:
     """Devuelve solo el nombre de fichero (último segmento) sin dominio ni query."""
@@ -80,6 +123,8 @@ def _safe_filename_from_url(u: str) -> str:
         return path.split("/")[-1] if path else ""
     except Exception:
         return ""
+
+
 def print(*args, sep=" ", end="\n", file=None, flush=False):
     # consola
     import builtins as _b
@@ -98,6 +143,8 @@ def log_bloque_inicio():
     print("\n" + "=" * 80)
     print(f"RUN: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
+    print(f"AFF_TRADINGSENZHEN (ENV) configurado: {'SI' if bool(AFF_TRADINGSENZHEN) else 'NO'}")
+    print(f"ID_AFILIADO_TRADINGSENZHEN (FILE) disponible: {'SI' if bool(ID_AFILIADO_TRADINGSENZHEN) else 'NO'}")
 
 
 def acortar_url(url_larga: str) -> str:
@@ -213,7 +260,9 @@ def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
     if f == "gshopper":
         return unir_afiliado(url_base, AFF_GSHOPPER)
     if f == "tradingshenzhen":
-        return unir_afiliado(url_base, AFF_TRADINGSENZHEN)
+        # TradingShenzhen: preferimos ENV; si no está, usamos el fichero de parámetros.
+        aff = AFF_TRADINGSENZHEN or ID_AFILIADO_TRADINGSENZHEN
+        return unir_afiliado(url_base, aff)
     return url_base
 
 
@@ -248,17 +297,95 @@ def obtener_o_crear_categoria_con_imagen(nombre_cat, parent_id=0):
 
 
 def extraer_datos(texto):
+    """
+    Extrae nombre + specs desde el texto del mensaje Telegram.
+
+    FIX (2026-01-30):
+    - Telegram a veces "parte" el nombre en varias líneas (p.ej. "Xiaomi 17" + "PRO" + "MAX" o "Realme GT" + "7T").
+    - Antes sólo se cogía la primera línea útil -> nombres truncados.
+    - Ahora se concatenan líneas consecutivas que parecen parte del nombre hasta encontrar líneas de metadatos
+      (Precio, Cupón, Link, RAM/ROM, Version, etc).
+    """
     t_clean = texto.replace("**", "").replace("`", "").strip()
-    lineas = [l.strip() for l in t_clean.split("\n") if l.strip()]
-    if not lineas:
+    lineas_raw = [l for l in t_clean.split("\n") if l and l.strip()]
+    if not lineas_raw:
         return None
 
-    nombre = ""
-    for linea in lineas:
-        cand = re.sub(r"^[^\w]+", "", linea).strip()
-        if cand:
-            nombre = cand
+    def _clean_line(l: str) -> str:
+        # Elimina emojis/puntuación al inicio y normaliza espacios
+        c = re.sub(r"^[^\w]+", "", (l or "")).strip()
+        c = re.sub(r"\s+", " ", c)
+        return c.strip()
+
+    def _es_meta_line(c: str) -> bool:
+        if not c:
+            return True
+        low = c.lower().strip()
+
+        # URLs / links
+        if "http://" in low or "https://" in low:
+            return True
+
+        # Línea con precio
+        if "€" in c:
+            return True
+
+        # Claves típicas de metadatos
+        if re.match(r"^(precio|cup[oó]n|c[oó]digo|cod\.?\s*promo|link|ram|rom|versi[oó]n|cn\s*version|eu\s*version|global\s*version|env[ií]o|enviado|visita|s[ií]guenos)\b", low, flags=re.I):
+            return True
+
+        # Si parece un bloque de specs (contiene 'RAM:' / 'ROM:' / '|' o 'GB' con separadores)
+        if re.search(r"\b(ram|rom)\b", c, flags=re.I):
+            return True
+        if ("|" in c or "/" in c) and re.search(r"\b\d+\s*gb\b", c, flags=re.I):
+            return True
+
+        return False
+
+    # 1) Buscar el inicio real del nombre (primera línea "no meta" con letras)
+    start_idx = None
+    for i, l in enumerate(lineas_raw):
+        c = _clean_line(l)
+        if not c:
+            continue
+        if _es_meta_line(c):
+            continue
+        # debe tener letras para ser nombre (evita líneas raras)
+        if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", c):
+            start_idx = i
             break
+
+    if start_idx is None:
+        return None
+
+    # 2) Construir nombre concatenando líneas siguientes que parezcan continuación del nombre
+    nombre_parts = []
+    first = _clean_line(lineas_raw[start_idx])
+    if not first:
+        return None
+    nombre_parts.append(first)
+
+    # Permitimos varias líneas por si Telegram parte el nombre (PRO / MAX / 7T, etc)
+    for j in range(start_idx + 1, len(lineas_raw)):
+        c = _clean_line(lineas_raw[j])
+        if not c:
+            continue
+        if _es_meta_line(c):
+            break
+
+        # Cortes de seguridad: si empieza a parecer "lista de specs" o valores sueltos típicos
+        if re.match(r"^\d+([.,]\d+)?\s*€\s*$", c):
+            break
+        if re.match(r"^(ram|rom)\b", c, flags=re.I):
+            break
+
+        nombre_parts.append(c)
+
+        # Evitar capturar demasiadas líneas por error
+        if len(nombre_parts) >= 4:
+            break
+
+    nombre = re.sub(r"\s+", " ", " ".join(nombre_parts)).strip()
     if not nombre:
         return None
 
@@ -279,7 +406,6 @@ def extraer_datos(texto):
     except Exception:
         pass
 
-
     # RAM / ROM
     gigas = re.findall(r"(\d+)\s*GB", t_clean, re.I)
     memoria = f"{gigas[0]} GB" if len(gigas) >= 1 else "N/A"
@@ -293,7 +419,10 @@ def extraer_datos(texto):
     precio_actual = 0
     m_p = re.search(r"(\d+[.,]?\d*)\s*€", t_clean)
     if m_p:
-        precio_actual = int(round(float(m_p.group(1).replace(",", "."))))
+        try:
+            precio_actual = int(round(float(m_p.group(1).replace(",", "."))))
+        except Exception:
+            precio_actual = 0
 
     # cupón
     codigo_de_descuento = "OFERTA: PROMO."
@@ -386,37 +515,16 @@ async def main():
     log_bloque_inicio()
 
     # Fuente de datos (CONFIDENCIAL): se obtiene desde variable de entorno (GitHub Secret).
-
-
     url_canal = os.getenv("TEL_SOURCE_URL", "").strip()
-
-
     if not url_canal:
-
-
         print("❌ Fuente no configurada (TEL_SOURCE_URL).")
-
-
         return
-
-
     print(f"📥 ORIGEN DATOS: Telegram (web) | TEL_SOURCE_URL: SI | src_hash={_url_fingerprint(url_canal)}")
-
-
     headers = {"User-Agent": "Mozilla/5.0"}
-
-
     response = requests.get(url_canal, headers=headers, timeout=20)
     soup = BeautifulSoup(response.text, "html.parser")
     mensajes = soup.find_all("div", class_="tgme_widget_message")
     print(f"Mensajes Telegram detectados: {len(mensajes)}")
-    if len(mensajes) == 0:
-        # Señal clara de que la fuente NO es el HTML de Telegram (o está bloqueado/cambia markup)
-        titulo = (soup.title.string.strip() if soup.title and soup.title.string else "")
-        print("⚠️ AVISO: No se detectan bloques tgme_widget_message. La fuente puede NO ser Telegram Web o el HTML ha cambiado/bloqueado.")
-        if titulo:
-            th = hashlib.sha256(titulo.encode("utf-8", errors="ignore")).hexdigest()[:10]
-            print(f"   ℹ️ Title_hash={th} (no se muestra el título por confidencialidad)")
 
     for msg in mensajes:
         texto_elem = msg.find("div", class_="tgme_widget_message_text")
@@ -462,7 +570,18 @@ async def main():
         url_importada_sin_afiliado = limpiar_url_segun_fuente(url_oferta_sin_acortar)
 
         # construir URL con TU afiliado (completa)
-        url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
+        # TradingShenzhen: si el ENV coincide con el affp que trae el canal, usamos el fallback del fichero de parámetros.
+        if (fuente or "").strip().lower() == "tradingshenzhen":
+            affp_canal = _extraer_affp(url_oferta_sin_acortar)
+            affp_env = _extraer_affp_id_desde_query(AFF_TRADINGSENZHEN)
+            affp_file = _extraer_affp_id_desde_query(ID_AFILIADO_TRADINGSENZHEN)
+            if affp_canal and affp_env and (affp_env == affp_canal) and affp_file and (affp_file != affp_canal):
+                # Evita reutilizar el affp del canal si el secret está mal configurado
+                url_sin_acortar_con_mi_afiliado = unir_afiliado(url_importada_sin_afiliado, ID_AFILIADO_TRADINGSENZHEN)
+            else:
+                url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
+        else:
+            url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
         url_sin_acortar_con_mi_afiliado = asegurar_url_no_truncada(url_sin_acortar_con_mi_afiliado, fuente)
 
         # acortar para 'url_oferta'
@@ -520,7 +639,6 @@ async def main():
                 {"key": "enlace_de_compra_importado", "value": enlace_de_compra_importado},
                 {"key": "url_oferta_sin_acortar", "value": url_oferta_sin_acortar},
                 {"key": "url_importada_sin_afiliado", "value": url_importada_sin_afiliado},
-                # ✅ AQUÍ va siempre la URL completa con tu afiliado (sin '...')
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": url_sin_acortar_con_mi_afiliado},
                 {"key": "url_oferta", "value": url_oferta},
                 {"key": "enviado_desde", "value": enviado_desde},
