@@ -2,7 +2,7 @@ name: Import Tel_china
 
 on:
   schedule:
-    - cron: '00 10,16,22 * * *'
+    - cron: '00 10,16,21 * * *'
   workflow_dispatch:
   
   # --- SOLUCIÓN AL ERROR 403 ---
