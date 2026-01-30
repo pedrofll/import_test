@@ -413,7 +413,11 @@ async def gestionar_obsoletos():
 async def main():
     log_bloque_inicio()
 
-    url_canal = "https://t.me/s/Chinabay_deals"
+    # Fuente de datos (CONFIDENCIAL): se obtiene desde variable de entorno.
+    url_canal = os.getenv("TEL_SOURCE_URL", "").strip()
+    if not url_canal:
+        print("❌ Fuente no configurada.")
+        return
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url_canal, headers=headers, timeout=20)
     soup = BeautifulSoup(response.text, "html.parser")
