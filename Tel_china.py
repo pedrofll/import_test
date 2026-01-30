@@ -31,6 +31,46 @@ AFF_POWERPLANET = os.getenv("AFF_POWERPLANET", "").strip()
 AFF_GSHOPPER = os.getenv("AFF_GSHOPPER", "").strip()
 AFF_TRADINGSENZHEN = os.getenv("AFF_TRADINGSENZHEN", "").strip()
 
+# --- PARAMETROS (fallback) ---
+# Si por cualquier motivo el ENV no está disponible o está mal configurado,
+# leemos los IDs desde el fichero "Parametros de afiliado.txt" (sin hardcodear números en el código).
+PARAMETROS_AFILIADO_PATH = os.getenv("PARAMETROS_AFILIADO_PATH", "Parametros de afiliado.txt")
+
+def _leer_parametro_afiliado(nombre_var: str) -> str:
+    try:
+        with open(PARAMETROS_AFILIADO_PATH, "r", encoding="utf-8") as f:
+            txt = f.read()
+        # Ej: ID_AFILIADO_TRADINGSENZHEN = "?affp=176940"
+        m = re.search(rf"^\s*{re.escape(nombre_var)}\s*=\s*([\'\"])(.*?)\1\s*$", txt, flags=re.M)
+        return (m.group(2) if m else "").strip()
+    except Exception:
+        return ""
+
+ID_AFILIADO_TRADINGSENZHEN = _leer_parametro_afiliado("ID_AFILIADO_TRADINGSENZHEN")
+
+def _extraer_affp(url: str) -> str:
+    try:
+        if not url:
+            return ""
+        u = urllib.parse.urlparse(str(url))
+        qs = urllib.parse.parse_qs(u.query)
+        v = qs.get("affp", [""])[0]
+        return str(v).strip()
+    except Exception:
+        return ""
+
+def _extraer_affp_id_desde_query(q: str) -> str:
+    q = (q or "").strip()
+    if not q:
+        return ""
+    # admite: '176940' | 'affp=176940' | '?affp=176940' | '&affp=176940'
+    q2 = q.lstrip('?&').strip()
+    if re.fullmatch(r"\d+", q2):
+        return q2
+    m = re.search(r"(?:^|&)affp=(\d+)", q2, flags=re.I)
+    return m.group(1) if m else ""
+
+
 summary_creados = []
 summary_eliminados = []
 summary_ignorados = []
@@ -76,7 +116,8 @@ def log_bloque_inicio():
     print("\n" + "=" * 80)
     print(f"RUN: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
-    print(f"AFF_TRADINGSENZHEN configurado: {'SI' if bool(AFF_TRADINGSENZHEN) else 'NO'}")
+    print(f"AFF_TRADINGSENZHEN (ENV) configurado: {'SI' if bool(AFF_TRADINGSENZHEN) else 'NO'}")
+    print(f"ID_AFILIADO_TRADINGSENZHEN (FILE) disponible: {'SI' if bool(ID_AFILIADO_TRADINGSENZHEN) else 'NO'}")
 
 
 def acortar_url(url_larga: str) -> str:
@@ -175,61 +216,6 @@ def unir_afiliado(url_base: str, aff: str) -> str:
     return base + ("&" + a if tiene_q else "?" + a)
 
 
-
-def _extraer_affp_id(aff: str) -> str:
-    """Extrae el ID numérico de TradingShenzhen desde la variable de entorno.
-
-    Acepta formatos:
-      - '<ID>'
-      - 'affp=<ID>'
-      - '?affp=<ID>' / '&affp=<ID>'
-    Devuelve '' si no hay ID.
-    """
-    a = (aff or "").strip()
-    if not a:
-        return ""
-    # Si es URL completa, intentamos leer query igualmente
-    try:
-        if a.lower().startswith("http"):
-            u = urllib.parse.urlparse(a)
-            qs = urllib.parse.parse_qs(u.query)
-            if "affp" in qs and qs["affp"]:
-                return str(qs["affp"][0]).strip()
-            return ""
-    except Exception:
-        pass
-
-    a = a.lstrip("?&").strip()
-    if re.fullmatch(r"\d+", a):
-        return a
-    m = re.search(r"(?:^|&)affp=(\d+)", a, re.I)
-    return m.group(1) if m else ""
-
-
-def aplicar_afiliado_tradingshenzhen(url_base: str, aff_env: str) -> str:
-    """TradingShenzhen: fuerza SIEMPRE tu affp, sustituyendo el que venga en el enlace.
-
-    - Reemplaza/inyecta 'affp' con el valor de entorno (AFF_TRADINGSENZHEN).
-    - Si AFF_TRADINGSENZHEN no está configurado o no contiene un ID válido, devuelve la URL sin tocar.
-    """
-    if not url_base:
-        return ""
-    aff_id = _extraer_affp_id(aff_env)
-    if not aff_id:
-        return url_base
-
-    try:
-        u = urllib.parse.urlparse(url_base.replace("&amp;", "&"))
-        qs = urllib.parse.parse_qs(u.query, keep_blank_values=True)
-        qs["affp"] = [aff_id]  # override duro
-        new_q = urllib.parse.urlencode({k: v[0] for k, v in qs.items()}, doseq=False)
-        return urllib.parse.urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
-    except Exception:
-        # fallback simple: quitar query y añadir affp
-        base = url_base.split("?")[0]
-        return f"{base}?affp={aff_id}"
-
-
 def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
     f = (fuente or "").strip().lower()
     if f == "amazon":
@@ -247,7 +233,9 @@ def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
     if f == "gshopper":
         return unir_afiliado(url_base, AFF_GSHOPPER)
     if f == "tradingshenzhen":
-        return aplicar_afiliado_tradingshenzhen(url_base, AFF_TRADINGSENZHEN)
+        # TradingShenzhen: preferimos ENV; si no está, usamos el fichero de parámetros.
+        aff = AFF_TRADINGSENZHEN or ID_AFILIADO_TRADINGSENZHEN
+        return unir_afiliado(url_base, aff)
     return url_base
 
 
@@ -474,8 +462,19 @@ async def main():
         # limpiar afiliado original y reconstruir canonical si aplica
         url_importada_sin_afiliado = limpiar_url_segun_fuente(url_oferta_sin_acortar)
 
-        # construir URL con TU afiliado (si aplica y está configurado)
-        url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
+        # construir URL con TU afiliado (completa)
+        # TradingShenzhen: si el ENV coincide con el affp que trae el canal, usamos el fallback del fichero de parámetros.
+        if (fuente or "").strip().lower() == "tradingshenzhen":
+            affp_canal = _extraer_affp(url_oferta_sin_acortar)
+            affp_env = _extraer_affp_id_desde_query(AFF_TRADINGSENZHEN)
+            affp_file = _extraer_affp_id_desde_query(ID_AFILIADO_TRADINGSENZHEN)
+            if affp_canal and affp_env and (affp_env == affp_canal) and affp_file and (affp_file != affp_canal):
+                # Evita reutilizar el affp del canal si el secret está mal configurado
+                url_sin_acortar_con_mi_afiliado = unir_afiliado(url_importada_sin_afiliado, ID_AFILIADO_TRADINGSENZHEN)
+            else:
+                url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
+        else:
+            url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
         url_sin_acortar_con_mi_afiliado = asegurar_url_no_truncada(url_sin_acortar_con_mi_afiliado, fuente)
 
         # acortar para 'url_oferta'
