@@ -76,6 +76,7 @@ def log_bloque_inicio():
     print("\n" + "=" * 80)
     print(f"RUN: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
+    print(f"AFF_TRADINGSENZHEN configurado: {'SI' if bool(AFF_TRADINGSENZHEN) else 'NO'}")
 
 
 def acortar_url(url_larga: str) -> str:
@@ -174,33 +175,59 @@ def unir_afiliado(url_base: str, aff: str) -> str:
     return base + ("&" + a if tiene_q else "?" + a)
 
 
-def normalizar_aff_tradingshenzhen(aff: str) -> str:
-    """Normaliza el valor de AFF_TRADINGSENZHEN.
 
-    Acepta:
-      - "affp=57906" (query completo)
-      - "57906" (solo ID)
-      - "?affp=57906" / "&affp=57906"
-      - (cualquier query adicional que ya venga formado)
-    Devuelve el query SIN prefijo '?'/'&' (lo gestiona unir_afiliado).
+def _extraer_affp_id(aff: str) -> str:
+    """Extrae el ID numérico de TradingShenzhen desde la variable de entorno.
+
+    Acepta formatos:
+      - '<ID>'
+      - 'affp=<ID>'
+      - '?affp=<ID>' / '&affp=<ID>'
+    Devuelve '' si no hay ID.
     """
     a = (aff or "").strip()
     if not a:
         return ""
-    if a.lower().startswith("http"):
-        return a
+    # Si es URL completa, intentamos leer query igualmente
+    try:
+        if a.lower().startswith("http"):
+            u = urllib.parse.urlparse(a)
+            qs = urllib.parse.parse_qs(u.query)
+            if "affp" in qs and qs["affp"]:
+                return str(qs["affp"][0]).strip()
+            return ""
+    except Exception:
+        pass
+
     a = a.lstrip("?&").strip()
-    if not a:
-        return ""
-    # si pasan solo el ID numérico
     if re.fullmatch(r"\d+", a):
-        return f"affp={a}"
-    # si ya viene con affp=
-    m = re.search(r"affp=(\d+)", a, re.I)
-    if m:
-        # preserva el resto de parámetros si existieran
-        return re.sub(r"affp=\d+", f"affp={m.group(1)}", a, flags=re.I)
-    return a
+        return a
+    m = re.search(r"(?:^|&)affp=(\d+)", a, re.I)
+    return m.group(1) if m else ""
+
+
+def aplicar_afiliado_tradingshenzhen(url_base: str, aff_env: str) -> str:
+    """TradingShenzhen: fuerza SIEMPRE tu affp, sustituyendo el que venga en el enlace.
+
+    - Reemplaza/inyecta 'affp' con el valor de entorno (AFF_TRADINGSENZHEN).
+    - Si AFF_TRADINGSENZHEN no está configurado o no contiene un ID válido, devuelve la URL sin tocar.
+    """
+    if not url_base:
+        return ""
+    aff_id = _extraer_affp_id(aff_env)
+    if not aff_id:
+        return url_base
+
+    try:
+        u = urllib.parse.urlparse(url_base.replace("&amp;", "&"))
+        qs = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+        qs["affp"] = [aff_id]  # override duro
+        new_q = urllib.parse.urlencode({k: v[0] for k, v in qs.items()}, doseq=False)
+        return urllib.parse.urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
+    except Exception:
+        # fallback simple: quitar query y añadir affp
+        base = url_base.split("?")[0]
+        return f"{base}?affp={aff_id}"
 
 
 def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
@@ -220,7 +247,7 @@ def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
     if f == "gshopper":
         return unir_afiliado(url_base, AFF_GSHOPPER)
     if f == "tradingshenzhen":
-        return unir_afiliado(url_base, normalizar_aff_tradingshenzhen(AFF_TRADINGSENZHEN))
+        return aplicar_afiliado_tradingshenzhen(url_base, AFF_TRADINGSENZHEN)
     return url_base
 
 
@@ -439,20 +466,17 @@ async def main():
         enlace_de_compra_importado = links[0]
 
         # expandir (redirige a la URL final)
-        url_expandida_original = expandir_url(enlace_de_compra_importado)
+        url_oferta_sin_acortar = expandir_url(enlace_de_compra_importado)
 
         # fuente por dominio
-        fuente = detectar_fuente_por_url(url_expandida_original)
+        fuente = detectar_fuente_por_url(url_oferta_sin_acortar)
 
         # limpiar afiliado original y reconstruir canonical si aplica
-        url_importada_sin_afiliado = limpiar_url_segun_fuente(url_expandida_original)
+        url_importada_sin_afiliado = limpiar_url_segun_fuente(url_oferta_sin_acortar)
 
-        # construir URL con TU afiliado (completa)
+        # construir URL con TU afiliado (si aplica y está configurado)
         url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
         url_sin_acortar_con_mi_afiliado = asegurar_url_no_truncada(url_sin_acortar_con_mi_afiliado, fuente)
-
-        # ✅ Para evitar que se use el afiliado original en Woo/ACF, guardamos como 'expandida' la URL ya afiliada.
-        url_oferta_sin_acortar = url_sin_acortar_con_mi_afiliado
 
         # acortar para 'url_oferta'
         url_oferta = acortar_url(url_sin_acortar_con_mi_afiliado) if url_sin_acortar_con_mi_afiliado else ""
@@ -477,8 +501,7 @@ async def main():
         print(f"8) Código de descuento: {codigo_de_descuento}")
         print(f"10) URL Imagen: {imagen_subcategoria}")
         print(f"11) Enlace Importado: {enlace_de_compra_importado}")
-        print(f"12) Enlace Expandido: {url_expandida_original}")
-        print(f"12b) Enlace Expandido con mi afiliado: {url_oferta_sin_acortar}")
+        print(f"12) Enlace Expandido: {url_oferta_sin_acortar}")
         print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
         print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
         print(f"15) URL acortada con mi afiliado: {url_oferta}")
@@ -508,7 +531,6 @@ async def main():
                 {"key": "enlace_de_compra_importado", "value": enlace_de_compra_importado},
                 {"key": "url_oferta_sin_acortar", "value": url_oferta_sin_acortar},
                 {"key": "url_importada_sin_afiliado", "value": url_importada_sin_afiliado},
-                # ✅ AQUÍ va siempre la URL completa con tu afiliado (sin '...')
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": url_sin_acortar_con_mi_afiliado},
                 {"key": "url_oferta", "value": url_oferta},
                 {"key": "enviado_desde", "value": enviado_desde},
