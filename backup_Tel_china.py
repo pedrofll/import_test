@@ -6,6 +6,7 @@ import requests
 import urllib.parse
 import time
 import math
+import hashlib
 from bs4 import BeautifulSoup
 from datetime import datetime
 from woocommerce import API
@@ -34,6 +35,7 @@ AFF_TRADINGSENZHEN = os.getenv("AFF_TRADINGSENZHEN", "").strip()
 summary_creados = []
 summary_eliminados = []
 summary_ignorados = []
+summary_actualizados = []  # lista de dicts: {nombre,id,cambios}
 hoy_dt = datetime.now()
 hoy_fmt = hoy_dt.strftime("%d/%m/%Y %H:%M")
 
@@ -58,6 +60,27 @@ def _append_log(s: str) -> None:
         pass
 
 
+
+def _url_fingerprint(u: str) -> str:
+    """Devuelve una huella corta para identificar la fuente sin revelar la URL."""
+    try:
+        s = (u or "").strip()
+        if not s:
+            return ""
+        return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    except Exception:
+        return ""
+
+def _safe_filename_from_url(u: str) -> str:
+    """Devuelve solo el nombre de fichero (último segmento) sin dominio ni query."""
+    try:
+        if not u:
+            return ""
+        p = urllib.parse.urlparse(u)
+        path = (p.path or "").strip("/")
+        return path.split("/")[-1] if path else ""
+    except Exception:
+        return ""
 def print(*args, sep=" ", end="\n", file=None, flush=False):
     # consola
     import builtins as _b
@@ -191,7 +214,18 @@ def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
     if f == "gshopper":
         return unir_afiliado(url_base, AFF_GSHOPPER)
     if f == "tradingshenzhen":
-        return unir_afiliado(url_base, AFF_TRADINGSENZHEN)
+        base = (url_base or "").split("?")[0]
+        aff = (AFF_TRADINGSENZHEN or "").strip()
+        # Permite configurar sólo el ID (p.ej. "176940") o el fragmento completo ("affp=176940")
+        if aff and not aff.lower().startswith("http"):
+            if "affp=" not in aff.lower():
+                # si es sólo un token/ID, lo interpretamos como affp=<ID>
+                if re.fullmatch(r"[A-Za-z0-9_-]+", aff):
+                    aff = f"affp={aff}"
+            # asegura que se concatena como query
+            if not aff.startswith("?") and not aff.startswith("&"):
+                aff = "?" + aff
+        return unir_afiliado(base, aff)
     return url_base
 
 
@@ -232,13 +266,41 @@ def extraer_datos(texto):
         return None
 
     nombre = ""
+    # Nombre del producto: puede venir partido en varias líneas (p.ej. "Xiaomi 17" + "PRO MAX")
+    def _es_parte_de_nombre(s: str) -> bool:
+        if not s:
+            return False
+        s_str = s.strip()
+        low = s_str.lower()
+        if "http" in low or "www." in low:
+            return False
+        # En Telegram, los campos suelen venir como "Precio:", "Cupón:", "Link:", etc.
+        if ":" in s_str:
+            return False
+        if re.search(r"\b\d+[\.,]?\d*\s*€\b", s_str):
+            return False
+        for k in ("precio", "cup", "cupón", "cupon", "link", "ram", "rom", "cn version", "eu version", "visita", "síguenos", "siguenos", "follow"):
+            if low.startswith(k):
+                return False
+        # Línea vacía/solo símbolos
+        if re.match(r"^[\W_]+$", s_str):
+            return False
+        return True
+
+    partes_nombre = []
     for linea in lineas:
+        # Limpia bullets/emojis al inicio, pero conserva el resto tal cual
         cand = re.sub(r"^[^\w]+", "", linea).strip()
-        if cand:
-            nombre = cand
+        if _es_parte_de_nombre(cand):
+            partes_nombre.append(cand)
+        elif partes_nombre:
+            # ya tenemos nombre y hemos encontrado el siguiente bloque de info
             break
+
+    nombre = " ".join(partes_nombre).strip()
     if not nombre:
         return None
+
 
     # descartar tablets
     if any(x in nombre.upper() for x in ["PAD", "IPAD", "TAB"]):
@@ -363,11 +425,38 @@ async def gestionar_obsoletos():
 async def main():
     log_bloque_inicio()
 
-    url_canal = "https://t.me/s/Chinabay_deals"
+    # Fuente de datos (CONFIDENCIAL): se obtiene desde variable de entorno (GitHub Secret).
+
+
+    url_canal = os.getenv("TEL_SOURCE_URL", "").strip()
+
+
+    if not url_canal:
+
+
+        print("❌ Fuente no configurada (TEL_SOURCE_URL).")
+
+
+        return
+
+
+    print(f"📥 ORIGEN DATOS: Telegram (web) | TEL_SOURCE_URL: SI | src_hash={_url_fingerprint(url_canal)}")
+
+
     headers = {"User-Agent": "Mozilla/5.0"}
+
+
     response = requests.get(url_canal, headers=headers, timeout=20)
     soup = BeautifulSoup(response.text, "html.parser")
     mensajes = soup.find_all("div", class_="tgme_widget_message")
+    print(f"Mensajes Telegram detectados: {len(mensajes)}")
+    if len(mensajes) == 0:
+        # Señal clara de que la fuente NO es el HTML de Telegram (o está bloqueado/cambia markup)
+        titulo = (soup.title.string.strip() if soup.title and soup.title.string else "")
+        print("⚠️ AVISO: No se detectan bloques tgme_widget_message. La fuente puede NO ser Telegram Web o el HTML ha cambiado/bloqueado.")
+        if titulo:
+            th = hashlib.sha256(titulo.encode("utf-8", errors="ignore")).hexdigest()[:10]
+            print(f"   ℹ️ Title_hash={th} (no se muestra el título por confidencialidad)")
 
     for msg in mensajes:
         texto_elem = msg.find("div", class_="tgme_widget_message_text")
@@ -437,7 +526,9 @@ async def main():
         print(f"6) Precio actual: {precio_actual}")
         print(f"7) Precio original: {precio_original}")
         print(f"8) Código de descuento: {codigo_de_descuento}")
-        print(f"10) URL Imagen: {imagen_subcategoria}")
+        print(f"10) Imagen (subcategoría Woo): {'SI' if imagen_subcategoria else 'NO'}")
+        if imagen_subcategoria:
+            print(f"10b) Imagen fichero: {_safe_filename_from_url(imagen_subcategoria)}")
         print(f"11) Enlace Importado: {enlace_de_compra_importado}")
         print(f"12) Enlace Expandido: {url_oferta_sin_acortar}")
         print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
@@ -505,17 +596,41 @@ async def main():
 
     await gestionar_obsoletos()
 
+
     # --- RESUMEN FINAL ---
-    resumen_txt = f"\n📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})\n"
-    resumen_txt += f"a) CREADOS: {len(summary_creados)}\n"
-    resumen_txt += f"b) ELIMINADOS: {len(summary_eliminados)}\n"
-    resumen_txt += f"c) IGNORADOS: {len(summary_ignorados)}\n"
+    hoy_fmt2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    lineas_resumen = []
+    lineas_resumen.append("\n============================================================")
+    lineas_resumen.append(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt2})")
+    lineas_resumen.append("============================================================")
+
+    lineas_resumen.append(f"\na) ARTICULOS CREADOS: {len(summary_creados)}")
+    for item in summary_creados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}")
+    for item in summary_eliminados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}")
+    for item in summary_actualizados:
+        cambios = item.get('cambios') or []
+        cambios_txt = ", ".join(cambios) if isinstance(cambios, list) else str(cambios)
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']}): {cambios_txt}".rstrip(": "))
+
+    lineas_resumen.append(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
+    for item in summary_ignorados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append("============================================================")
+    resumen_txt = "\n".join(lineas_resumen)
     print(resumen_txt)
+
     try:
-        enviar_email(f"Reporte {hoy_fmt}", resumen_txt)
+        enviar_email(f"Reporte {hoy_fmt2}", resumen_txt)
     except Exception:
         pass
-
 
 if __name__ == "__main__":
     asyncio.run(main())
