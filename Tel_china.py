@@ -6,6 +6,7 @@ import requests
 import urllib.parse
 import time
 import math
+import hashlib
 from bs4 import BeautifulSoup
 from datetime import datetime
 from woocommerce import API
@@ -31,49 +32,10 @@ AFF_POWERPLANET = os.getenv("AFF_POWERPLANET", "").strip()
 AFF_GSHOPPER = os.getenv("AFF_GSHOPPER", "").strip()
 AFF_TRADINGSENZHEN = os.getenv("AFF_TRADINGSENZHEN", "").strip()
 
-# --- PARAMETROS (fallback) ---
-# Si por cualquier motivo el ENV no está disponible o está mal configurado,
-# leemos los IDs desde el fichero "Parametros de afiliado.txt" (sin hardcodear números en el código).
-PARAMETROS_AFILIADO_PATH = os.getenv("PARAMETROS_AFILIADO_PATH", "Parametros de afiliado.txt")
-
-def _leer_parametro_afiliado(nombre_var: str) -> str:
-    try:
-        with open(PARAMETROS_AFILIADO_PATH, "r", encoding="utf-8") as f:
-            txt = f.read()
-        # Ej: ID_AFILIADO_TRADINGSENZHEN = "?affp=176940"
-        m = re.search(rf"^\s*{re.escape(nombre_var)}\s*=\s*([\'\"])(.*?)\1\s*$", txt, flags=re.M)
-        return (m.group(2) if m else "").strip()
-    except Exception:
-        return ""
-
-ID_AFILIADO_TRADINGSENZHEN = _leer_parametro_afiliado("ID_AFILIADO_TRADINGSENZHEN")
-
-def _extraer_affp(url: str) -> str:
-    try:
-        if not url:
-            return ""
-        u = urllib.parse.urlparse(str(url))
-        qs = urllib.parse.parse_qs(u.query)
-        v = qs.get("affp", [""])[0]
-        return str(v).strip()
-    except Exception:
-        return ""
-
-def _extraer_affp_id_desde_query(q: str) -> str:
-    q = (q or "").strip()
-    if not q:
-        return ""
-    # admite: '176940' | 'affp=176940' | '?affp=176940' | '&affp=176940'
-    q2 = q.lstrip('?&').strip()
-    if re.fullmatch(r"\d+", q2):
-        return q2
-    m = re.search(r"(?:^|&)affp=(\d+)", q2, flags=re.I)
-    return m.group(1) if m else ""
-
-
 summary_creados = []
 summary_eliminados = []
 summary_ignorados = []
+summary_actualizados = []  # lista de dicts: {nombre,id,cambios}
 hoy_dt = datetime.now()
 hoy_fmt = hoy_dt.strftime("%d/%m/%Y %H:%M")
 
@@ -98,6 +60,27 @@ def _append_log(s: str) -> None:
         pass
 
 
+
+def _url_fingerprint(u: str) -> str:
+    """Devuelve una huella corta para identificar la fuente sin revelar la URL."""
+    try:
+        s = (u or "").strip()
+        if not s:
+            return ""
+        return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    except Exception:
+        return ""
+
+def _safe_filename_from_url(u: str) -> str:
+    """Devuelve solo el nombre de fichero (último segmento) sin dominio ni query."""
+    try:
+        if not u:
+            return ""
+        p = urllib.parse.urlparse(u)
+        path = (p.path or "").strip("/")
+        return path.split("/")[-1] if path else ""
+    except Exception:
+        return ""
 def print(*args, sep=" ", end="\n", file=None, flush=False):
     # consola
     import builtins as _b
@@ -116,8 +99,6 @@ def log_bloque_inicio():
     print("\n" + "=" * 80)
     print(f"RUN: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
-    print(f"AFF_TRADINGSENZHEN (ENV) configurado: {'SI' if bool(AFF_TRADINGSENZHEN) else 'NO'}")
-    print(f"ID_AFILIADO_TRADINGSENZHEN (FILE) disponible: {'SI' if bool(ID_AFILIADO_TRADINGSENZHEN) else 'NO'}")
 
 
 def acortar_url(url_larga: str) -> str:
@@ -233,9 +214,18 @@ def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
     if f == "gshopper":
         return unir_afiliado(url_base, AFF_GSHOPPER)
     if f == "tradingshenzhen":
-        # TradingShenzhen: preferimos ENV; si no está, usamos el fichero de parámetros.
-        aff = AFF_TRADINGSENZHEN or ID_AFILIADO_TRADINGSENZHEN
-        return unir_afiliado(url_base, aff)
+        base = (url_base or "").split("?")[0]
+        aff = (AFF_TRADINGSENZHEN or "").strip()
+        # Permite configurar sólo el ID (p.ej. "176940") o el fragmento completo ("affp=176940")
+        if aff and not aff.lower().startswith("http"):
+            if "affp=" not in aff.lower():
+                # si es sólo un token/ID, lo interpretamos como affp=<ID>
+                if re.fullmatch(r"[A-Za-z0-9_-]+", aff):
+                    aff = f"affp={aff}"
+            # asegura que se concatena como query
+            if not aff.startswith("?") and not aff.startswith("&"):
+                aff = "?" + aff
+        return unir_afiliado(base, aff)
     return url_base
 
 
@@ -276,20 +266,41 @@ def extraer_datos(texto):
         return None
 
     nombre = ""
+    # Nombre del producto: puede venir partido en varias líneas (p.ej. "Xiaomi 17" + "PRO MAX")
+    def _es_parte_de_nombre(s: str) -> bool:
+        if not s:
+            return False
+        s_str = s.strip()
+        low = s_str.lower()
+        if "http" in low or "www." in low:
+            return False
+        # En Telegram, los campos suelen venir como "Precio:", "Cupón:", "Link:", etc.
+        if ":" in s_str:
+            return False
+        if re.search(r"\b\d+[\.,]?\d*\s*€\b", s_str):
+            return False
+        for k in ("precio", "cup", "cupón", "cupon", "link", "ram", "rom", "cn version", "eu version", "visita", "síguenos", "siguenos", "follow"):
+            if low.startswith(k):
+                return False
+        # Línea vacía/solo símbolos
+        if re.match(r"^[\W_]+$", s_str):
+            return False
+        return True
+
+    partes_nombre = []
     for linea in lineas:
+        # Limpia bullets/emojis al inicio, pero conserva el resto tal cual
         cand = re.sub(r"^[^\w]+", "", linea).strip()
-        if cand:
-            nombre = cand
+        if _es_parte_de_nombre(cand):
+            partes_nombre.append(cand)
+        elif partes_nombre:
+            # ya tenemos nombre y hemos encontrado el siguiente bloque de info
             break
+
+    nombre = " ".join(partes_nombre).strip()
     if not nombre:
         return None
 
-    # ✅ Telegram a veces parte el nombre en varias líneas (p.ej. "Xiaomi 17" + "PRO MAX").
-    # Si la segunda línea parece un sufijo típico del modelo, la concatenamos.
-    if len(lineas) >= 2 and nombre:
-        l2 = re.sub(r"^[^\w]+", "", lineas[1]).strip()
-        if re.fullmatch(r"(PRO(\s+MAX)?|MAX|ULTRA|PLUS|\+|EDGE|LITE|SE|FE|RSR)", l2, re.I):
-            nombre = f"{nombre} {l2}".replace("  ", " ").strip()
 
     # descartar tablets
     if any(x in nombre.upper() for x in ["PAD", "IPAD", "TAB"]):
@@ -307,6 +318,7 @@ def extraer_datos(texto):
                 nombre = "Vivo " + " ".join(_parts)
     except Exception:
         pass
+
 
     # RAM / ROM
     gigas = re.findall(r"(\d+)\s*GB", t_clean, re.I)
@@ -413,11 +425,38 @@ async def gestionar_obsoletos():
 async def main():
     log_bloque_inicio()
 
-    url_canal = "https://t.me/s/Chinabay_deals"
+    # Fuente de datos (CONFIDENCIAL): se obtiene desde variable de entorno (GitHub Secret).
+
+
+    url_canal = os.getenv("TEL_SOURCE_URL", "").strip()
+
+
+    if not url_canal:
+
+
+        print("❌ Fuente no configurada (TEL_SOURCE_URL).")
+
+
+        return
+
+
+    print(f"📥 ORIGEN DATOS: Telegram (web) | TEL_SOURCE_URL: SI | src_hash={_url_fingerprint(url_canal)}")
+
+
     headers = {"User-Agent": "Mozilla/5.0"}
+
+
     response = requests.get(url_canal, headers=headers, timeout=20)
     soup = BeautifulSoup(response.text, "html.parser")
     mensajes = soup.find_all("div", class_="tgme_widget_message")
+    print(f"Mensajes Telegram detectados: {len(mensajes)}")
+    if len(mensajes) == 0:
+        # Señal clara de que la fuente NO es el HTML de Telegram (o está bloqueado/cambia markup)
+        titulo = (soup.title.string.strip() if soup.title and soup.title.string else "")
+        print("⚠️ AVISO: No se detectan bloques tgme_widget_message. La fuente puede NO ser Telegram Web o el HTML ha cambiado/bloqueado.")
+        if titulo:
+            th = hashlib.sha256(titulo.encode("utf-8", errors="ignore")).hexdigest()[:10]
+            print(f"   ℹ️ Title_hash={th} (no se muestra el título por confidencialidad)")
 
     for msg in mensajes:
         texto_elem = msg.find("div", class_="tgme_widget_message_text")
@@ -463,18 +502,7 @@ async def main():
         url_importada_sin_afiliado = limpiar_url_segun_fuente(url_oferta_sin_acortar)
 
         # construir URL con TU afiliado (completa)
-        # TradingShenzhen: si el ENV coincide con el affp que trae el canal, usamos el fallback del fichero de parámetros.
-        if (fuente or "").strip().lower() == "tradingshenzhen":
-            affp_canal = _extraer_affp(url_oferta_sin_acortar)
-            affp_env = _extraer_affp_id_desde_query(AFF_TRADINGSENZHEN)
-            affp_file = _extraer_affp_id_desde_query(ID_AFILIADO_TRADINGSENZHEN)
-            if affp_canal and affp_env and (affp_env == affp_canal) and affp_file and (affp_file != affp_canal):
-                # Evita reutilizar el affp del canal si el secret está mal configurado
-                url_sin_acortar_con_mi_afiliado = unir_afiliado(url_importada_sin_afiliado, ID_AFILIADO_TRADINGSENZHEN)
-            else:
-                url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
-        else:
-            url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
+        url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
         url_sin_acortar_con_mi_afiliado = asegurar_url_no_truncada(url_sin_acortar_con_mi_afiliado, fuente)
 
         # acortar para 'url_oferta'
@@ -498,7 +526,9 @@ async def main():
         print(f"6) Precio actual: {precio_actual}")
         print(f"7) Precio original: {precio_original}")
         print(f"8) Código de descuento: {codigo_de_descuento}")
-        print(f"10) URL Imagen: {imagen_subcategoria}")
+        print(f"10) Imagen (subcategoría Woo): {'SI' if imagen_subcategoria else 'NO'}")
+        if imagen_subcategoria:
+            print(f"10b) Imagen fichero: {_safe_filename_from_url(imagen_subcategoria)}")
         print(f"11) Enlace Importado: {enlace_de_compra_importado}")
         print(f"12) Enlace Expandido: {url_oferta_sin_acortar}")
         print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
@@ -530,6 +560,7 @@ async def main():
                 {"key": "enlace_de_compra_importado", "value": enlace_de_compra_importado},
                 {"key": "url_oferta_sin_acortar", "value": url_oferta_sin_acortar},
                 {"key": "url_importada_sin_afiliado", "value": url_importada_sin_afiliado},
+                # ✅ AQUÍ va siempre la URL completa con tu afiliado (sin '...')
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": url_sin_acortar_con_mi_afiliado},
                 {"key": "url_oferta", "value": url_oferta},
                 {"key": "enviado_desde", "value": enviado_desde},
@@ -565,17 +596,41 @@ async def main():
 
     await gestionar_obsoletos()
 
+
     # --- RESUMEN FINAL ---
-    resumen_txt = f"\n📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})\n"
-    resumen_txt += f"a) CREADOS: {len(summary_creados)}\n"
-    resumen_txt += f"b) ELIMINADOS: {len(summary_eliminados)}\n"
-    resumen_txt += f"c) IGNORADOS: {len(summary_ignorados)}\n"
+    hoy_fmt2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    lineas_resumen = []
+    lineas_resumen.append("\n============================================================")
+    lineas_resumen.append(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt2})")
+    lineas_resumen.append("============================================================")
+
+    lineas_resumen.append(f"\na) ARTICULOS CREADOS: {len(summary_creados)}")
+    for item in summary_creados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}")
+    for item in summary_eliminados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}")
+    for item in summary_actualizados:
+        cambios = item.get('cambios') or []
+        cambios_txt = ", ".join(cambios) if isinstance(cambios, list) else str(cambios)
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']}): {cambios_txt}".rstrip(": "))
+
+    lineas_resumen.append(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
+    for item in summary_ignorados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append("============================================================")
+    resumen_txt = "\n".join(lineas_resumen)
     print(resumen_txt)
+
     try:
-        enviar_email(f"Reporte {hoy_fmt}", resumen_txt)
+        enviar_email(f"Reporte {hoy_fmt2}", resumen_txt)
     except Exception:
         pass
-
 
 if __name__ == "__main__":
     asyncio.run(main())
