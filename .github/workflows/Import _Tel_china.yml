@@ -36,6 +36,7 @@ jobs:
         WP_URL: ${{ secrets.WP_URL }}
         WP_KEY: ${{ secrets.WP_KEY }}
         WP_SECRET: ${{ secrets.WP_SECRET }}
+        TEL_SOURCE_URL: ${{ secrets.TEL_SOURCE_URL }}
         AFF_ALIEXPRESS: ${{ secrets.AFF_ALIEXPRESS }}
         AFF_MEDIAMARKT: ${{ secrets.AFF_MEDIAMARKT }}
         AFF_AMAZON: ${{ secrets.AFF_AMAZON }}
