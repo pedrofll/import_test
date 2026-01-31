@@ -1,34 +1,37 @@
 name: Import PowerPlanet (Woo + ACF)
 
 on:
-  workflow_dispatch:
   schedule:
-    # 16:00 Europe/Madrid (GitHub cron va en UTC)
-    - cron: "0 14 * * *"
+    - cron: "00 12 * * *"   # 18:00 España = 17:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
 
 concurrency:
-  group: import-powerplanet
-  cancel-in-progress: false
+  group: "scraper-powerplanet"
+  cancel-in-progress: true
 
 jobs:
-  import_powerplanet:
+  ejecutar-scraper:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Descargar código
+        uses: actions/checkout@v3
         with:
-          python-version: "3.11"
+          fetch-depth: 0
 
-      - name: Install dependencies
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Instalar librerías
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pillow
-
+          pip install requests beautifulsoup4 woocommerce lxml
       - name: Run PowerPlanet importer
         env:
           WP_URL: ${{ secrets.WP_URL }}
