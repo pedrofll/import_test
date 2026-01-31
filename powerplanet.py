@@ -64,10 +64,10 @@ BASE_URL = "https://www.powerplanetonline.com"
 LIST_URL = f"{BASE_URL}/es/moviles-mas-vendidos"
 
 FUENTE_RAW = "powerplanetonline"          # log interno
-FUENTE_ACF = "Powerplanetonline"         # ACF "fuente"
-IMPORTADO_DE = BASE_URL                  # ACF "importado_de"
+FUENTE_ACF = "powerplanetonline"     # ACF "fuente"
+IMPORTADO_DE = LIST_URL                  # ACF "importado_de"
 ENVIO = "España"                         # ACF "enviado_desde"
-CUPON_DEFAULT = "OFERTA: PROMO."         # ACF "codigo_de_descuento"
+CUPON_DEFAULT = "OFERTA PROMO"          # ACF "codigo_de_descuento"
 
 TAG_IMPORT = "__importado_de_powerplanetonline"  # tag interno para obsoletos
 
@@ -195,13 +195,23 @@ def extract_ram_rom_from_name(name: str) -> Tuple[str, str]:
     return "", ""
 
 
+
 def strip_variant_from_name(name: str) -> str:
-    # Quita RAM/ROM y color final.
+    """Normaliza el título para quedarnos SOLO con el modelo (sin RAM/ROM ni colores/estado)."""
     if not name:
         return name
 
     s = re.sub(r"\s+", " ", name.strip())
 
+    # Quitar sufijos típicos de reacondicionados/estado tras guiones
+    s = re.sub(
+        r"\s*[-–|]\s*(?:renovad[oa]|reacondicionad[oa]|refurbished|estado|stock)\b.*$",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # Quitar RAM/ROM
     s = re.sub(
         r"\s*\b\d+\s*(?:GB|TB)\s*[/\+\-\| ]\s*\d+\s*(?:GB|TB)\b\s*",
         " ",
@@ -211,17 +221,40 @@ def strip_variant_from_name(name: str) -> str:
     s = re.sub(r"\s*\b\d+\s*b\s*\d+\s*(?:gb|tb)\b\s*", " ", s, flags=re.IGNORECASE)
     s = re.sub(r"\s+", " ", s).strip()
 
-    colors = {
-        "negro", "blanco", "azul", "rojo", "verde", "amarillo", "morado", "violeta",
-        "gris", "plata", "dorado", "oro", "rosa", "naranja", "cian", "turquesa",
-        "beige", "crema", "grafito", "lavanda", "marfil", "champan", "neblina",
-        "midnight", "starlight", "titanio", "titanium", "marron",
-    }
-    parts = s.split(" ")
-    if parts and normalize_text(parts[-1]) in colors:
-        s = " ".join(parts[:-1]).strip()
+    # Recortar si aparece un marcador de estado en medio
+    low_s = " " + normalize_text(s) + " "
+    for mk in [" renovado", " reacondicionado", " refurbished", " estado "]:
+        if mk in low_s:
+            idx = low_s.find(mk)
+            s = s[: max(0, idx - 1)].strip()
+            break
 
+    descriptors = {
+        # colores/tonos
+        "negro","blanco","azul","rojo","verde","amarillo","morado","violeta","gris","plata","dorado","oro","rosa","naranja","cian","turquesa",
+        "beige","crema","grafito","lavanda","marfil","champan","neblina","midnight","starlight","titanio","titanium","marron","marrón",
+        # acabados/variantes
+        "transparente","transparent","subzero","sub-zero","ice","snow","glacier","sky","ocean","forest","sand","stone",
+        "rugged","rugg","rug",
+        "edition","limited","special",
+        # estados
+        "renovado","renovada","reacondicionado","reacondicionada","refurbished","excelente","muy","bueno","estado",
+    }
+
+    parts = s.split(" ")
+
+    def norm_tok(t: str) -> str:
+        return normalize_text(t.strip(" ,.;:()[]{}"))
+
+    while parts and norm_tok(parts[-1]) in descriptors:
+        parts.pop()
+
+    while parts and parts[-1] in {"-", "–", "|"}:
+        parts.pop()
+
+    s = " ".join(parts).strip()
     return re.sub(r"\s+", " ", s).strip()
+
 
 
 def compute_version(clean_name: str) -> str:
@@ -285,19 +318,61 @@ def fetch_html(sess: requests.Session, url: str, timeout: int = 25, retries: int
 # =========================
 # SCRAPING
 # =========================
+
+def _looks_like_product_anchor(a: BeautifulSoup) -> bool:
+    """Filtra SOLO links de producto dentro del listado.
+    Regla principal: el texto del link (o alt/title/aria) debe contener RAM/ROM (ej: 8GB/256GB o 24GB/1TB).
+    """
+    txt = a.get_text(" ", strip=True) or (a.get("title") or "") or (a.get("aria-label") or "")
+    if not txt:
+        img = a.find("img")
+        if img and img.get("alt"):
+            txt = img.get("alt") or ""
+    txt = re.sub(r"\s+", " ", (txt or "")).strip()
+    if not txt:
+        return False
+
+    ram, rom = extract_ram_rom_from_name(txt)
+    if not (ram and rom):
+        return False
+
+    low = normalize_text(txt)
+    if "tab" in low or "ipad" in low or "tablet" in low:
+        return False
+    if "watch" in low or "smartwatch" in low:
+        return False
+    # Tablets suelen traer pulgadas y/o WiFi
+    if ("wifi" in low) and (("''" in txt) or ('"' in txt) or re.search(r"\b\d{1,2}(?:[\.,]\d)?\s*(?:inch|in)\b", low)):
+        return False
+
+    return True
+
+
 def extract_listing_product_urls(list_html: str) -> List[str]:
+    """IMPORTANTE: NO salir del listado /es/moviles-mas-vendidos.
+    Extrae únicamente URLs de producto detectadas dentro de ese HTML.
+    """
     soup = BeautifulSoup(list_html, "html.parser")
 
     urls: List[str] = []
-    for a in soup.select("a[href^='/es/']"):
-        href = a.get("href", "")
-        if not href:
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href.startswith("/es/"):
+            continue
+
+        # Evitar categorías/menús típicos (por seguridad extra)
+        if href.startswith("/es/moviles-") or href.startswith("/es/smartphones") or href.startswith("/es/telefonos-moviles"):
             continue
         if "moviles-mas-vendidos" in href:
             continue
-        if href.count("/") < 2:
+        if "#" in href:
             continue
-        urls.append(urljoin(BASE_URL, href))
+
+        if not _looks_like_product_anchor(a):
+            continue
+
+        full = urljoin(BASE_URL, href.split("?")[0])
+        urls.append(full)
 
     # dedupe manteniendo orden
     seen = set()
@@ -308,6 +383,7 @@ def extract_listing_product_urls(list_html: str) -> List[str]:
         seen.add(u)
         out.append(u)
     return out
+
 
 
 def parse_product_data_json(soup: BeautifulSoup) -> Optional[dict]:
