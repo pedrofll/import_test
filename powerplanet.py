@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import html
 import json
 import re
 import time
@@ -31,19 +32,17 @@ class Offer:
 
     price_eur: Optional[float] = None
     pvr_eur: Optional[float] = None
-    discount_pct: Optional[int] = None
 
+    discount_pct: Optional[int] = None
     reviews_count: Optional[int] = None
     rating: Optional[float] = None
 
     brand: Optional[str] = None
     ref: Optional[str] = None
-    capacity: Optional[str] = None
-    color: Optional[str] = None
+    capacity: Optional[str] = None  # ej "8GB/256GB"
 
     category_path: Optional[str] = None
     image_large: Optional[str] = None
-    image_small: Optional[str] = None
     product_id: Optional[int] = None
 
     scraped_at: str = ""
@@ -69,10 +68,8 @@ def smart_title_token(token: str) -> str:
         return token
 
     raw = token.strip()
+    parts = re.split(r"(-)", raw)  # preserva guiones
 
-    # Preservar separadores internos (muy típico: "Pro+", etc.)
-    # Trabajamos por sub-tokens separando por '-' pero manteniendo el separador.
-    parts = re.split(r"(-)", raw)
     out_parts = []
     for p in parts:
         if p == "-":
@@ -80,8 +77,6 @@ def smart_title_token(token: str) -> str:
             continue
 
         low = p.lower()
-
-        # Excepciones frecuentes
         if low == "iphone":
             out_parts.append("iPhone")
             continue
@@ -98,17 +93,14 @@ def smart_title_token(token: str) -> str:
         if has_digit and has_alpha:
             out_parts.append("".join(ch.upper() if ch.isalpha() else ch for ch in p))
         else:
-            # Title case normal
             out_parts.append(p[:1].upper() + p[1:].lower())
 
     return "".join(out_parts)
 
 
 def format_product_title(name: str) -> str:
-    # Normaliza espacios y capitaliza tokens
     name = re.sub(r"\s+", " ", name.strip())
-    tokens = name.split(" ")
-    return " ".join(smart_title_token(t) for t in tokens)
+    return " ".join(smart_title_token(t) for t in name.split(" "))
 
 
 def safe_float(v) -> Optional[float]:
@@ -150,17 +142,6 @@ def parse_int_from(s: str, pattern: str) -> Optional[int]:
         return None
     try:
         return int(m.group(1))
-    except ValueError:
-        return None
-
-
-def parse_float_from(s: str, pattern: str) -> Optional[float]:
-    m = re.search(pattern, s, flags=re.IGNORECASE)
-    if not m:
-        return None
-    val = m.group(1).strip().replace(",", ".")
-    try:
-        return float(val)
     except ValueError:
         return None
 
@@ -209,7 +190,7 @@ def strip_variant_from_name(name: str) -> str:
     )
     s = re.sub(r"\s+", " ", s).strip()
 
-    # Quitar color final (si coincide con lista típica)
+    # Quitar color final
     colors = {
         "negro", "blanco", "azul", "rojo", "verde", "amarillo", "morado", "violeta",
         "gris", "plata", "dorado", "oro", "rosa", "naranja", "cian", "turquesa",
@@ -224,11 +205,7 @@ def strip_variant_from_name(name: str) -> str:
 
 
 def compute_version(clean_name: str) -> str:
-    """
-    Reglas de tu proyecto:
-      - iPhone => IOS
-      - PowerPlanet (tienda España) y no iPhone => Global (según tu petición)
-    """
+    # PowerPlanet es tienda España: Global (salvo iPhone => IOS)
     n = normalize_text(clean_name)
     if "iphone" in n:
         return "IOS"
@@ -257,7 +234,6 @@ def shorten_isgd(sess: requests.Session, url: str, timeout: int = 15, retries: i
     Acorta con is.gd (format=simple). Si falla, devuelve la URL larga.
     """
     endpoint = "https://is.gd/create.php"
-    last_err = None
     for attempt in range(1, retries + 1):
         try:
             r = sess.get(endpoint, params={"format": "simple", "url": url}, timeout=timeout)
@@ -265,10 +241,8 @@ def shorten_isgd(sess: requests.Session, url: str, timeout: int = 15, retries: i
             short = (r.text or "").strip()
             if short.startswith("http"):
                 return short
-        except Exception as e:
-            last_err = e
+        except Exception:
             time.sleep(1.2 * attempt)
-    # fallback
     return url
 
 
@@ -308,7 +282,6 @@ def extract_listing_candidates(list_html: str) -> List[Offer]:
     soup = BeautifulSoup(list_html, "html.parser")
     offers: Dict[str, Offer] = {}
 
-    # Heurística: encontrar bloques que contengan "PVR" y extraer nombre/URL/precios
     pvr_nodes = soup.find_all(string=re.compile(r"\bPVR\b", re.IGNORECASE))
     for node in pvr_nodes:
         container = node.parent
@@ -332,8 +305,7 @@ def extract_listing_candidates(list_html: str) -> List[Offer]:
                 and len(a.get_text(" ", strip=True)) >= 6
             ]
             if prod_anchors:
-                a_best = max(prod_anchors, key=lambda a: len(a.get_text(" ", strip=True)))
-                chosen = a_best
+                chosen = max(prod_anchors, key=lambda a: len(a.get_text(" ", strip=True)))
                 chosen_container = container
                 break
 
@@ -376,53 +348,91 @@ def extract_listing_candidates(list_html: str) -> List[Offer]:
 
 
 def parse_product_data_json(soup: BeautifulSoup) -> Optional[dict]:
-    """
-    Extrae el JSON del atributo data-product (fuente de verdad: nombre/sku/precios).
-    """
     form = soup.find("form", attrs={"data-product": True})
     if not form:
         return None
+
     raw = form.get("data-product")
     if not raw:
         return None
+
+    raw = html.unescape(raw).strip()
+
     try:
         return json.loads(raw)
     except Exception:
         return None
 
 
+def parse_prices_from_dom(soup: BeautifulSoup) -> Tuple[Optional[float], Optional[float]]:
+    price = pvr = None
+
+    ip = soup.select_one(".data-all-prices .product-price .integerPrice")
+    if ip:
+        content = ip.get("content")
+        if content:
+            price = safe_float(content)
+
+    ib = soup.select_one(".data-all-prices .product-basePrice .integerPrice")
+    if ib:
+        content = ib.get("content")
+        if content:
+            pvr = safe_float(content)
+
+    return price, pvr
+
+
 def parse_detail_fields(detail_html: str) -> Dict[str, Optional[object]]:
     """
-    PowerPlanet: prioriza el JSON data-product para nombre/sku/precios.
+    IMPORTANTE: usamos retailPrice/basePrice (con IVA), NO alternative* (sin IVA).
     """
     soup = BeautifulSoup(detail_html, "html.parser")
     out: Dict[str, Optional[object]] = {}
 
-    # 1) Fuente de verdad: data-product JSON
     data = parse_product_data_json(soup)
     if data:
         out["product_id"] = data.get("id")
         out["ref"] = data.get("sku")
         out["name"] = data.get("name")
         out["brand"] = data.get("brandName")
-
-        defn = data.get("definition") or {}
-        out["price_eur"] = safe_float(defn.get("price") or defn.get("retailPrice") or defn.get("productRetailPrice"))
-        out["pvr_eur"] = safe_float(defn.get("basePrice") or defn.get("productBasePrice"))
-
-        # Nota: mainCategoryName es solo el último segmento
         out["category_path"] = data.get("mainCategoryName")
 
-    # 2) Imagen principal (src o data-original)
+        defn = data.get("definition") or {}
+
+        # ✅ Con IVA (lo que ves en web): retailPrice / basePrice
+        price = safe_float(defn.get("retailPrice"))
+        if price is None:
+            price = safe_float(defn.get("price")) or safe_float(defn.get("productRetailPrice"))
+
+        pvr = safe_float(defn.get("basePrice"))
+        if pvr is None:
+            pvr = safe_float(defn.get("productBasePrice"))
+
+        # Si falla, fallback DOM (sin usar alternative*)
+        if price is None or pvr is None:
+            dom_price, dom_pvr = parse_prices_from_dom(soup)
+            price = price if price is not None else dom_price
+            pvr = pvr if pvr is not None else dom_pvr
+
+        out["price_eur"] = price
+        out["pvr_eur"] = pvr
+
+    # Imagen principal
     img = soup.select_one("img#main-image") or soup.select_one("img.mainImageTag")
     if img:
         out["image_large"] = (img.get("data-original") or img.get("src") or "").strip() or None
 
-    # 3) Fallbacks por si falla el JSON (muy raro)
+    # Fallback nombre
     if not out.get("name"):
         h1 = soup.select_one("h1.real-title, h1.h1, h1")
         if h1:
             out["name"] = h1.get_text(" ", strip=True)
+
+    # Fallback precios si data-product no parseó
+    if out.get("price_eur") is None or out.get("pvr_eur") is None:
+        dom_price, dom_pvr = parse_prices_from_dom(soup)
+        out["price_eur"] = out.get("price_eur") if out.get("price_eur") is not None else dom_price
+        out["pvr_eur"] = out.get("pvr_eur") if out.get("pvr_eur") is not None else dom_pvr
 
     return out
 
@@ -438,16 +448,12 @@ def classify_offer(name: str, category_path: Optional[str], capacity: Optional[s
     if "smartwatch" in n or "smartband" in n or "reloj" in n:
         return False, "EXCLUDE:name_contains_watch/band"
 
-    if cat:
-        if any(k in cat for k in ["tablet", "wearable", "smartwatch", "smartband"]):
-            return False, "EXCLUDE:category_tablet_or_wearable"
-        if any(k in cat for k in ["moviles", "smartphones"]):
-            return True, "INCLUDE:category_mobile"
+    if cat and any(k in cat for k in ["tablet", "wearable", "smartwatch", "smartband"]):
+        return False, "EXCLUDE:category_tablet_or_wearable"
 
     if capacity and "gb" in normalize_text(capacity):
         return True, "INCLUDE:capacity_has_gb"
 
-    # Último recurso: si el nombre contiene RAM/ROM => móvil
     ram, rom = extract_ram_rom_from_name(name)
     if ram and rom:
         return True, "INCLUDE:name_has_ram_rom"
@@ -518,10 +524,8 @@ def scrape_dryrun(
 
             if include_details:
                 detail_html = fetch_html(sess, offer.url, timeout=timeout)
-
                 fields = parse_detail_fields(detail_html)
 
-                # Preferir SIEMPRE los campos de ficha (sobrescriben listado)
                 if fields.get("name"):
                     offer.name = str(fields["name"])
                 if fields.get("ref"):
@@ -542,36 +546,27 @@ def scrape_dryrun(
                     except Exception:
                         pass
 
-            # RAM/ROM: primero del nombre (8GB/256GB), si no, del campo capacity
             raw_name = offer.name
             ram, rom = extract_ram_rom_from_name(raw_name)
-            if not (ram and rom) and offer.capacity:
-                # fallback simple (si algún día se rellena offer.capacity)
-                ram, rom = extract_ram_rom_from_name(offer.capacity)
-
-            # Guardar capacity para clasificación/filtro (ram/rom)
             if ram and rom:
                 offer.capacity = f"{ram}/{rom}"
 
-            # Clasificación (móvil / excluir tablets)
-            is_mobile, reason = classify_offer(offer.name, offer.category_path, offer.capacity)
+            is_mobile, _reason = classify_offer(offer.name, offer.category_path, offer.capacity)
             if not is_mobile:
-                continue  # en PowerPlanet (móviles más vendidos) normalmente todo será móvil, pero mantenemos filtro
+                continue
 
-            # --- Mapeo a tus logs ---
             nombre_limpio = format_product_title(strip_variant_from_name(raw_name))
             ver = compute_version(nombre_limpio)
-            fuente = offer.source or FUENTE_POWERPLANET
+            fuente = FUENTE_POWERPLANET
 
             p_act = format_price(offer.price_eur)
             p_reg = format_price(offer.pvr_eur)
 
             cup = CUPON_DEFAULT
-
-            img_src = (offer.image_large or offer.image_small or "").strip()
+            img_src = (offer.image_large or "").strip()
 
             url_imp = offer.url
-            url_exp = offer.url  # no hay redirección/acortador propio aquí
+            url_exp = offer.url
 
             url_importada_sin_afiliado = offer.url
             url_sin_acortar_con_mi_afiliado = build_affiliate_url(offer.url, affiliate_query)
@@ -602,7 +597,6 @@ def scrape_dryrun(
 
             if jsonl_file:
                 payload = asdict(offer)
-                payload["_reason"] = reason
                 payload["_affiliate_query"] = affiliate_query
                 payload["_nombre_limpio"] = nombre_limpio
                 payload["_ram"] = ram
@@ -617,18 +611,18 @@ def scrape_dryrun(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="PowerPlanetOnline - Móviles más vendidos (DRY-RUN SOLO LOGS + formato requerido)")
+    ap = argparse.ArgumentParser(description="PowerPlanetOnline - Móviles más vendidos (DRY-RUN SOLO LOGS)")
     ap.add_argument("--max-products", type=int, default=0, help="0 = sin límite")
     ap.add_argument("--sleep", type=float, default=0.7, help="segundos entre requests")
     ap.add_argument("--timeout", type=int, default=25, help="timeout por request (seg)")
     ap.add_argument("--no-details", action="store_true", help="no entra en fichas (menos datos, peor precisión)")
-    ap.add_argument("--jsonl", default="", help="ruta para guardar JSONL (opcional). Ej: logs/powerplanet.jsonl")
+    ap.add_argument("--jsonl", default="", help="ruta para guardar JSONL (opcional)")
     ap.add_argument(
         "--affiliate-query",
         default="",
         help="querystring para afiliado, ej: 'utm_source=ofertasdemoviles&utm_medium=referral'",
     )
-    ap.add_argument("--no-isgd", action="store_true", help="no acortar url_oferta con is.gd (recomendado: NO usar este flag)")
+    ap.add_argument("--no-isgd", action="store_true", help="no acortar url_oferta con is.gd")
     args = ap.parse_args()
 
     scrape_dryrun(
