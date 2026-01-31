@@ -3,51 +3,33 @@
 #
 # PowerPlanetOnline -> WooCommerce + ACF (importador)
 #
-# - Lee /es/moviles-mas-vendidos
-# - Entra en cada ficha y extrae:
-#   - Nombre (limpio, sin RAM/ROM ni color final)
-#   - RAM (ACF memoria) y ROM (ACF capacidad)
-#   - Precios CON IVA (retailPrice / basePrice)
-#   - Imagen principal
-#   - URL de producto (PowerPlanet)
-#   - Enlace de compra (acortado con is.gd)
+# DRY-RUN (sin credenciales):
+#   python3 powerplanet.py --max-products 0 --sleep 0.7 --timeout 25 --jsonl powerplanet_dryrun.jsonl
 #
-# - Crea/actualiza productos WooCommerce tipo EXTERNO y guarda ACF (por meta):
-#   memoria, capacidad, precio_actual, precio_origial, codigo_de_descuento, fuente,
-#   imagen_producto, enviado_desde, enviado_desde_tg, version, importado_de, fecha,
-#   url_importada_sin_afiliado, url_sin_acortar_con_mi_afiliado, url_oferta, url_post_acortada
+# IMPORT REAL (con credenciales + subida de imágenes):
+#   python3 powerplanet.py --wp-url https://ofertasdemoviles.com \
+#     --wc-key XXX --wc-secret YYY \
+#     --wp-user admin --wp-app-pass "xxxx xxxx xxxx xxxx"
 #
-# - Gestión de obsoletos:
-#   Para poder filtrar SOLO los importados de PowerPlanet (sin meta_query), asigna un tag
-#   interno: __importado_de_powerplanetonline
-#   Luego elimina/manda a papelera los productos con ese tag que ya no existen en la fuente.
+# o usando ENV (recomendado en CI):
+#   export WP_URL="https://ofertasdemoviles.com"
+#   export WP_KEY="ck_..."
+#   export WP_SECRET="cs_..."
+#   python3 powerplanet.py
 #
 # Requisitos:
 #   pip install requests beautifulsoup4 pillow
-#
-# Auth:
-#   - WooCommerce REST API: WC_KEY + WC_SECRET
-#   - Subida de imágenes (WP media): WP_USER + WP_APP_PASSWORD (Application Password)
-#
-# Ejemplo:
-#   python3 powerplanet.py --wp-url https://ofertasdemoviles.com \
-#     --wc-key XXX --wc-secret YYY \
-#     --wp-user admin --wp-app-pass "xxxx xxxx xxxx xxxx" \
-#     --max-products 20
-#
-# Notas:
-#   - Por defecto intenta crear/actualizar hasta 10 veces con 15s entre intentos.
-#   - La imagen se descarga, se redimensiona a 600x600 y se sube. Se asigna a la SUBCATEGORÍA
-#     si no tiene imagen; y se usa en el producto.
+#   pip install python-woocommerce   # opcional (si se quiere wcapi)
 #
 
 import argparse
 import html
 import json
+import os
 import re
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import List, Optional, Tuple
@@ -58,17 +40,34 @@ from bs4 import BeautifulSoup
 from PIL import Image
 
 
+# --- CONFIGURACIÓN WORDPRESS ---
+# (Pedido: incluir wcapi con ENV WP_URL/WP_KEY/WP_SECRET)
+try:
+    from woocommerce import API  # type: ignore
+
+    wcapi = API(
+        url=os.environ.get("WP_URL", ""),
+        consumer_key=os.environ.get("WP_KEY", ""),
+        consumer_secret=os.environ.get("WP_SECRET", ""),
+        version="wc/v3",
+        timeout=60,
+    )
+except Exception:
+    API = None  # type: ignore
+    wcapi = None  # type: ignore
+
+
 # =========================
 # CONFIG FUENTE (PowerPlanet)
 # =========================
 BASE_URL = "https://www.powerplanetonline.com"
 LIST_URL = f"{BASE_URL}/es/moviles-mas-vendidos"
 
-FUENTE_RAW = "powerplanetonline"          # interno
+FUENTE_RAW = "powerplanetonline"          # log interno
 FUENTE_ACF = "Powerplanetonline"         # ACF "fuente"
 IMPORTADO_DE = BASE_URL                  # ACF "importado_de"
 ENVIO = "España"                         # ACF "enviado_desde"
-CUPON_DEFAULT = "OFERTA: PROMO."           # ACF "codigo_de_descuento"
+CUPON_DEFAULT = "OFERTA: PROMO."         # ACF "codigo_de_descuento"
 
 TAG_IMPORT = "__importado_de_powerplanetonline"  # tag interno para obsoletos
 
@@ -119,7 +118,6 @@ def smart_title_token(token: str) -> str:
     # Primera letra mayúscula; si mezcla letras/números, letras en mayúscula (14T, 5G).
     if not token:
         return token
-
     raw = token.strip()
     parts = re.split(r"(-)", raw)  # preserva guiones
     out_parts = []
@@ -175,7 +173,6 @@ def extract_ram_rom_from_name(name: str) -> Tuple[str, str]:
     # Soporta: 8GB/256GB | 8GB 256GB | 8gb-256gb | 4b128gb
     if not name:
         return "", ""
-
     n = name.replace("\xa0", " ")
 
     patterns = [
@@ -302,6 +299,7 @@ def extract_listing_product_urls(list_html: str) -> List[str]:
             continue
         urls.append(urljoin(BASE_URL, href))
 
+    # dedupe manteniendo orden
     seen = set()
     out = []
     for u in urls:
@@ -348,6 +346,7 @@ def parse_detail(detail_html: str, url: str) -> Offer:
         h1 = soup.select_one("h1.real-title, h1.h1, h1")
         name_raw = h1.get_text(" ", strip=True) if h1 else ""
 
+    # precios CON IVA (retailPrice/basePrice)
     price = safe_float(defn.get("retailPrice")) or safe_float(defn.get("price")) or safe_float(defn.get("productRetailPrice"))
     pvr = safe_float(defn.get("basePrice")) or safe_float(defn.get("productBasePrice"))
 
@@ -358,11 +357,13 @@ def parse_detail(detail_html: str, url: str) -> Offer:
         if pvr is None:
             pvr = dom_pvr
 
+    # imagen
     img = soup.select_one("img#main-image") or soup.select_one("img.mainImageTag")
     image_url = None
     if img:
         image_url = (img.get("data-original") or img.get("src") or "").strip() or None
 
+    # RAM/ROM
     ram, rom = extract_ram_rom_from_name(name_raw)
     if not (ram and rom):
         ram, rom = extract_ram_rom_from_name(url)
@@ -370,6 +371,7 @@ def parse_detail(detail_html: str, url: str) -> Offer:
     name_clean = format_product_title(strip_variant_from_name(name_raw))
     version = compute_version(name_clean)
 
+    # validación móvil (sin RAM/ROM => ignorar)
     if not (ram and rom):
         raise ValueError("Producto sin RAM/ROM detectables (no se importa)")
 
@@ -394,6 +396,13 @@ def parse_detail(detail_html: str, url: str) -> Offer:
 # WP / WC CLIENT
 # =========================
 class WPClient:
+    """
+    Cliente WooCommerce/WordPress:
+      - WooCommerce: usa python-woocommerce (wcapi) si está disponible y hay credenciales.
+        Si no, usa requests + basic auth.
+      - WP media upload: siempre por requests + application password.
+    """
+
     def __init__(
         self,
         wp_url: str,
@@ -402,9 +411,14 @@ class WPClient:
         wp_user: Optional[str] = None,
         wp_app_password: Optional[str] = None,
         timeout: int = 30,
+        wcapi_instance=None,
     ):
         self.wp_url = wp_url.rstrip("/")
         self.timeout = timeout
+
+        self.wcapi = wcapi_instance
+        if self.wcapi and not (wp_url and wc_key and wc_secret):
+            self.wcapi = None
 
         self.sess_wc = requests.Session()
         self.sess_wc.auth = (wc_key, wc_secret)
@@ -421,6 +435,34 @@ class WPClient:
         return self.wp_url + "/wp-json" + path
 
     def wc(self, method: str, path: str, params=None, payload=None, retries: int = 3):
+        # Preferir wcapi si está disponible (pedido por el usuario)
+        if self.wcapi is not None:
+            ep = path.lstrip("/")
+            last_err = None
+            for attempt in range(1, retries + 1):
+                try:
+                    if method.upper() == "GET":
+                        resp = self.wcapi.get(ep, params=params)
+                    elif method.upper() == "POST":
+                        resp = self.wcapi.post(ep, data=payload)
+                    elif method.upper() == "PUT":
+                        resp = self.wcapi.put(ep, data=payload)
+                    elif method.upper() == "DELETE":
+                        resp = self.wcapi.delete(ep, params=params)
+                    else:
+                        raise ValueError(f"Método no soportado: {method}")
+
+                    if getattr(resp, "status_code", 0) >= 400:
+                        raise RuntimeError(f"WCAPI {method} {ep} -> {resp.status_code} {getattr(resp, 'text', '')[:400]}")
+                    return resp.json()
+                except Exception as e:
+                    last_err = e
+                    if attempt < retries:
+                        time.sleep(1.2 * attempt)
+                    else:
+                        raise last_err
+
+        # Fallback: requests directo
         url = self._url("/wc/v3" + (path if path.startswith("/") else "/" + path))
         last_err = None
         for attempt in range(1, retries + 1):
@@ -434,7 +476,7 @@ class WPClient:
                 if attempt < retries:
                     time.sleep(1.2 * attempt)
                 else:
-                    raise
+                    raise last_err
 
     def wp_media_upload(self, filename: str, content: bytes, mime: str = "image/jpeg", retries: int = 3) -> dict:
         url = self._url("/wp/v2/media")
@@ -591,7 +633,6 @@ def build_product_payload(
     featured_media_id: Optional[int],
     imagen_producto_url: Optional[str],
     status: str,
-    existing_tag_ids: Optional[List[int]] = None,
 ) -> dict:
     meta: List[dict] = []
     meta_set(meta, "memoria", offer.ram)
@@ -610,9 +651,6 @@ def build_product_payload(
     meta_set(meta, "url_sin_acortar_con_mi_afiliado", offer.url)
     meta_set(meta, "url_oferta", external_url)
 
-    tag_ids = set(existing_tag_ids or [])
-    tag_ids.add(tag_id)
-
     payload = {
         "name": offer.name_clean,
         "type": "external",
@@ -621,7 +659,7 @@ def build_product_payload(
         "external_url": external_url,
         "button_text": "Ver oferta",
         "categories": [{"id": cat_id}],
-        "tags": [{"id": tid} for tid in sorted(tag_ids)],
+        "tags": [{"id": tag_id}],
         "meta_data": meta,
     }
     if offer.pvr_eur is not None:
@@ -637,7 +675,14 @@ def shorten_wp_permalink(sess: requests.Session, permalink: str) -> str:
     return shorten_isgd(sess, permalink)
 
 
-def create_or_update_with_retry(client: WPClient, method: str, path: str, payload: dict, attempts: int = 10, sleep_s: int = 15) -> dict:
+def create_or_update_with_retry(
+    client: WPClient,
+    method: str,
+    path: str,
+    payload: dict,
+    attempts: int = 10,
+    sleep_s: int = 15,
+) -> dict:
     last_err = None
     for i in range(1, attempts + 1):
         try:
@@ -681,13 +726,41 @@ def log_product(offer: Offer, url_oferta: str, url_post_short: str) -> None:
     print("-" * 60)
 
 
+def jsonl_write(fp, offer: Offer, sku: str, url_oferta: str, wp_id: Optional[int] = None, wp_permalink: Optional[str] = None, wp_short: Optional[str] = None):
+    row = asdict(offer)
+    row.update(
+        {
+            "sku": sku,
+            "url_oferta": url_oferta,
+            "wp_id": wp_id,
+            "wp_permalink": wp_permalink,
+            "wp_short": wp_short,
+            "acf": {
+                "memoria": offer.ram,
+                "capacidad": offer.rom,
+                "precio_actual": f"{offer.price_eur:.2f}" if offer.price_eur is not None else "",
+                "precio_origial": f"{offer.pvr_eur:.2f}" if offer.pvr_eur is not None else "",
+                "codigo_de_descuento": CUPON_DEFAULT,
+                "fuente": FUENTE_ACF,
+                "imagen_producto": offer.image_url or "",
+                "enviado_desde": ENVIO,
+                "enviado_desde_tg": "🇪🇸 España",
+                "version": offer.version,
+                "importado_de": IMPORTADO_DE,
+                "fecha": today_ddmmyyyy(),
+            },
+        }
+    )
+    fp.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 # =========================
 # MAIN IMPORT
 # =========================
 def run_import(
-    wp_url: str,
-    wc_key: str,
-    wc_secret: str,
+    wp_url: Optional[str],
+    wc_key: Optional[str],
+    wc_secret: Optional[str],
     wp_user: Optional[str],
     wp_app_pass: Optional[str],
     max_products: int,
@@ -696,6 +769,7 @@ def run_import(
     dry_run: bool,
     status: str,
     force_delete_obsoletes: bool,
+    jsonl_path: Optional[str],
 ):
     sess = make_session()
 
@@ -706,10 +780,26 @@ def run_import(
 
     print(f"📌 PowerPlanet: URLs detectadas = {len(product_urls)}")
 
+    fp_jsonl = open(jsonl_path, "w", encoding="utf-8") if jsonl_path else None
+
     client = None
     tag_id = None
+
     if not dry_run:
-        client = WPClient(wp_url=wp_url, wc_key=wc_key, wc_secret=wc_secret, wp_user=wp_user, wp_app_password=wp_app_pass, timeout=timeout)
+        if not (wp_url and wc_key and wc_secret):
+            raise SystemExit("Faltan credenciales. Para dry-run: omite credenciales o usa --dry-run.")
+
+        wcapi_inst = wcapi if (wcapi is not None and os.environ.get("WP_URL") and os.environ.get("WP_KEY") and os.environ.get("WP_SECRET")) else None
+
+        client = WPClient(
+            wp_url=wp_url,
+            wc_key=wc_key,
+            wc_secret=wc_secret,
+            wp_user=wp_user,
+            wp_app_password=wp_app_pass,
+            timeout=timeout,
+            wcapi_instance=wcapi_inst,
+        )
         tag = wc_get_or_create_tag(client, TAG_IMPORT)
         tag_id = int(tag["id"])
 
@@ -720,174 +810,195 @@ def run_import(
 
     current_skus = set()
 
-    for url in product_urls:
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+    try:
+        for url in product_urls:
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
 
-        try:
-            detail_html = fetch_html(sess, url, timeout=timeout)
-            offer = parse_detail(detail_html, url)
-        except Exception as e:
-            print(f"⚠️  Saltado ({url}): {e}")
-            continue
+            try:
+                detail_html = fetch_html(sess, url, timeout=timeout)
+                offer = parse_detail(detail_html, url)
+            except Exception as e:
+                print(f"⚠️  Saltado ({url}): {e}")
+                continue
 
-        sku = compute_sku(offer)
-        current_skus.add(sku)
-        url_oferta = shorten_isgd(sess, offer.url)
+            sku = compute_sku(offer)
+            current_skus.add(sku)
+            url_oferta = shorten_isgd(sess, offer.url)
 
-        if dry_run:
-            log_product(offer, url_oferta=url_oferta, url_post_short="")
-            continue
+            if dry_run:
+                log_product(offer, url_oferta=url_oferta, url_post_short="")
+                if fp_jsonl:
+                    jsonl_write(fp_jsonl, offer, sku=sku, url_oferta=url_oferta)
+                continue
 
-        assert client is not None and tag_id is not None
+            assert client is not None and tag_id is not None
 
-        # categorías
-        brand = format_product_title(get_brand_from_name(offer.name_clean))
-        cat_parent = wc_get_or_create_category(client, brand, parent=0)
-        parent_id = int(cat_parent["id"])
+            brand = format_product_title(get_brand_from_name(offer.name_clean))
+            cat_parent = wc_get_or_create_category(client, brand, parent=0)
+            parent_id = int(cat_parent["id"])
 
-        subcat_name = offer.name_clean
-        cat_sub = wc_get_or_create_category(client, subcat_name, parent=parent_id)
-        sub_id = int(cat_sub["id"])
+            subcat_name = offer.name_clean
+            cat_sub = wc_get_or_create_category(client, subcat_name, parent=parent_id)
+            sub_id = int(cat_sub["id"])
 
-        # imagen subcat -> producto
-        featured_media_id = None
-        imagen_producto_url = None
-        existing_img = (cat_sub.get("image") or {}).get("id")
-        existing_src = (cat_sub.get("image") or {}).get("src")
-        if existing_img:
-            featured_media_id = int(existing_img)
-            imagen_producto_url = existing_src
-        else:
-            if offer.image_url and (wp_user and wp_app_pass):
-                filename_base = re.sub(r"[^a-z0-9\-]+", "-", normalize_text(subcat_name)).strip("-")[:80] or "powerplanet"
-                mid, src = upload_image_with_retry(client, sess, offer.image_url, filename_base, attempts=10, sleep_s=15)
-                if mid:
-                    wc_set_category_image(client, sub_id, mid)
-                    featured_media_id = mid
-                    imagen_producto_url = src
+            featured_media_id = None
+            imagen_producto_url = None
+            existing_img = (cat_sub.get("image") or {}).get("id")
+            existing_src = (cat_sub.get("image") or {}).get("src")
 
-        existing = find_existing_product(client, offer, sku)
-        payload = build_product_payload(offer, sku, url_oferta, sub_id, tag_id, featured_media_id, imagen_producto_url, status, existing_tag_ids=[t.get('id') for t in (existing.get('tags') or [])] if existing else None)
-
-        wp_post_short = ""
-
-        if existing:
-            pid = int(existing["id"])
-            cambios = []
-
-            old_pact = meta_get(existing, "precio_actual") or ""
-            old_pvr = meta_get(existing, "precio_origial") or ""
-            new_pact = payload["meta_data"][2]["value"]
-            new_pvr = payload["meta_data"][3]["value"]
-
-            if str(old_pact).strip() != str(new_pact).strip():
-                cambios.append(f"precio_actual: {old_pact} -> {new_pact}")
-            if str(old_pvr).strip() != str(new_pvr).strip():
-                cambios.append(f"precio_origial: {old_pvr} -> {new_pvr}")
-
-            needs_image = not (existing.get("images") or []) and featured_media_id is not None
-
-            if not cambios and not needs_image:
-                summary_ignorados.append({"nombre": offer.name_clean, "id": pid})
+            if existing_img:
+                featured_media_id = int(existing_img)
+                imagen_producto_url = existing_src
             else:
-                if needs_image and featured_media_id:
-                    payload["images"] = [{"id": featured_media_id}]
-                    cambios.append("imagen: asignada")
+                if offer.image_url and (wp_user and wp_app_pass):
+                    filename_base = re.sub(r"[^a-z0-9\-]+", "-", normalize_text(subcat_name)).strip("-")[:80] or "powerplanet"
+                    mid, src = upload_image_with_retry(client, sess, offer.image_url, filename_base, attempts=10, sleep_s=15)
+                    if mid:
+                        wc_set_category_image(client, sub_id, mid)
+                        featured_media_id = mid
+                        imagen_producto_url = src
 
-                create_or_update_with_retry(client, "PUT", f"/products/{pid}", payload)
-                summary_actualizados.append({"nombre": offer.name_clean, "id": pid, "cambios": cambios})
+            existing = find_existing_product(client, offer, sku)
+            payload = build_product_payload(offer, sku, url_oferta, sub_id, tag_id, featured_media_id, imagen_producto_url, status)
 
-            # permalink corto
-            try:
-                prod = client.wc("GET", f"/products/{pid}")
-                permalink = prod.get("permalink") or ""
-                if permalink:
-                    wp_post_short = shorten_wp_permalink(sess, permalink)
-                    client.wc("PUT", f"/products/{pid}", payload={"meta_data": [{"key": "url_post_acortada", "value": wp_post_short}]})
-            except Exception:
-                wp_post_short = ""
+            wp_post_short = ""
+            wp_permalink = ""
+            wp_id = None
 
-            log_product(offer, url_oferta=url_oferta, url_post_short=wp_post_short)
+            if existing:
+                pid = int(existing["id"])
+                wp_id = pid
+                cambios = []
 
-        else:
-            created = create_or_update_with_retry(client, "POST", "/products", payload)
-            pid = int(created["id"])
-            summary_creados.append({"nombre": offer.name_clean, "id": pid})
+                old_pact = meta_get(existing, "precio_actual") or ""
+                old_pvr = meta_get(existing, "precio_origial") or ""
+                new_pact = payload["meta_data"][2]["value"]
+                new_pvr = payload["meta_data"][3]["value"]
 
-            try:
-                permalink = created.get("permalink") or ""
-                if not permalink:
-                    prod = client.wc("GET", f"/products/{pid}")
-                    permalink = prod.get("permalink") or ""
-                if permalink:
-                    wp_post_short = shorten_wp_permalink(sess, permalink)
-                    client.wc("PUT", f"/products/{pid}", payload={"meta_data": [{"key": "url_post_acortada", "value": wp_post_short}]})
-            except Exception:
-                wp_post_short = ""
+                if str(old_pact).strip() != str(new_pact).strip():
+                    cambios.append(f"precio_actual: {old_pact} -> {new_pact}")
+                if str(old_pvr).strip() != str(new_pvr).strip():
+                    cambios.append(f"precio_origial: {old_pvr} -> {new_pvr}")
 
-            log_product(offer, url_oferta=url_oferta, url_post_short=wp_post_short)
+                needs_image = not (existing.get("images") or []) and featured_media_id is not None
 
-    # obsoletos
-    if not dry_run and client is not None and tag_id is not None:
-        imported_products = wc_get_all(client, "/products", params={"tag": tag_id}, per_page=100, max_pages=50)
-        for p in imported_products:
-            pid = int(p["id"])
-            sku = (p.get("sku") or "").strip().lower()
-            if sku and sku not in current_skus:
+                if not cambios and not needs_image:
+                    summary_ignorados.append({"nombre": offer.name_clean, "id": pid})
+                else:
+                    if needs_image and featured_media_id:
+                        payload["images"] = [{"id": featured_media_id}]
+                        cambios.append("imagen: asignada")
+
+                    create_or_update_with_retry(client, "PUT", f"/products/{pid}", payload)
+                    summary_actualizados.append({"nombre": offer.name_clean, "id": pid, "cambios": cambios})
+
                 try:
-                    delete_product(client, pid, force=force_delete_obsoletes)
-                    summary_eliminados.append({"nombre": p.get("name", ""), "id": pid})
-                except Exception as e:
-                    print(f"⚠️  No se pudo eliminar obsoleto ID {pid}: {e}")
+                    prod = client.wc("GET", f"/products/{pid}")
+                    wp_permalink = prod.get("permalink") or ""
+                    if wp_permalink:
+                        wp_post_short = shorten_wp_permalink(sess, wp_permalink)
+                        client.wc("PUT", f"/products/{pid}", payload={"meta_data": [{"key": "url_post_acortada", "value": wp_post_short}]})
+                except Exception:
+                    wp_permalink = ""
+                    wp_post_short = ""
 
-    # resumen
-    hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print("\n============================================================")
-    print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})")
-    print("============================================================")
-    print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}")
-    for item in summary_creados:
-        print(f"- {item['nombre']} (ID: {item['id']})")
-    print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}")
-    for item in summary_eliminados:
-        print(f"- {item['nombre']} (ID: {item['id']})")
-    print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}")
-    for item in summary_actualizados:
-        print(f"- {item['nombre']} (ID: {item['id']}): {', '.join(item['cambios'])}")
-    print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
-    for item in summary_ignorados:
-        print(f"- {item['nombre']} (ID: {item['id']})")
-    print("============================================================")
+                log_product(offer, url_oferta=url_oferta, url_post_short=wp_post_short)
+
+            else:
+                created = create_or_update_with_retry(client, "POST", "/products", payload)
+                pid = int(created["id"])
+                wp_id = pid
+                summary_creados.append({"nombre": offer.name_clean, "id": pid})
+
+                try:
+                    wp_permalink = created.get("permalink") or ""
+                    if not wp_permalink:
+                        prod = client.wc("GET", f"/products/{pid}")
+                        wp_permalink = prod.get("permalink") or ""
+                    if wp_permalink:
+                        wp_post_short = shorten_wp_permalink(sess, wp_permalink)
+                        client.wc("PUT", f"/products/{pid}", payload={"meta_data": [{"key": "url_post_acortada", "value": wp_post_short}]})
+                except Exception:
+                    wp_permalink = ""
+                    wp_post_short = ""
+
+                log_product(offer, url_oferta=url_oferta, url_post_short=wp_post_short)
+
+            if fp_jsonl:
+                jsonl_write(fp_jsonl, offer, sku=sku, url_oferta=url_oferta, wp_id=wp_id, wp_permalink=wp_permalink, wp_short=wp_post_short)
+
+        if not dry_run and client is not None and tag_id is not None:
+            imported_products = wc_get_all(client, "/products", params={"tag": tag_id}, per_page=100, max_pages=50)
+            for p in imported_products:
+                pid = int(p["id"])
+                sku = (p.get("sku") or "").strip().lower()
+                if sku and sku not in current_skus:
+                    try:
+                        delete_product(client, pid, force=force_delete_obsoletes)
+                        summary_eliminados.append({"nombre": p.get("name", ""), "id": pid})
+                    except Exception as e:
+                        print(f"⚠️  No se pudo eliminar obsoleto ID {pid}: {e}")
+
+        hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print("\n============================================================")
+        print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})")
+        print("============================================================")
+        print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}")
+        for item in summary_creados:
+            print(f"- {item['nombre']} (ID: {item['id']})")
+        print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}")
+        for item in summary_eliminados:
+            print(f"- {item['nombre']} (ID: {item['id']})")
+        print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}")
+        for item in summary_actualizados:
+            print(f"- {item['nombre']} (ID: {item['id']}): {', '.join(item['cambios'])}")
+        print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
+        for item in summary_ignorados:
+            print(f"- {item['nombre']} (ID: {item['id']})")
+        print("============================================================")
+
+    finally:
+        if fp_jsonl:
+            fp_jsonl.close()
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="PowerPlanetOnline -> WooCommerce + ACF (importador)")
-    ap.add_argument("--wp-url", required=True, help="URL base de WordPress, ej: https://ofertasdemoviles.com")
-    ap.add_argument("--wc-key", required=True, help="WooCommerce consumer key")
-    ap.add_argument("--wc-secret", required=True, help="WooCommerce consumer secret")
-    ap.add_argument("--wp-user", default="", help="WP user (Application Password) para subir imágenes")
-    ap.add_argument("--wp-app-pass", default="", help="WP Application Password para subir imágenes")
+
+    ap.add_argument("--wp-url", default=os.environ.get("WP_URL", ""), help="URL base de WordPress, ej: https://ofertasdemoviles.com")
+    ap.add_argument("--wc-key", default=os.environ.get("WP_KEY", ""), help="WooCommerce consumer key")
+    ap.add_argument("--wc-secret", default=os.environ.get("WP_SECRET", ""), help="WooCommerce consumer secret")
+
+    ap.add_argument("--wp-user", default=os.environ.get("WP_USER", ""), help="WP user (Application Password) para subir imágenes")
+    ap.add_argument("--wp-app-pass", default=os.environ.get("WP_APP_PASS", ""), help="WP Application Password para subir imágenes")
+
     ap.add_argument("--max-products", type=int, default=0, help="0 = sin límite")
     ap.add_argument("--sleep", type=float, default=0.7, help="segundos entre requests")
-    ap.add_argument("--timeout", type=int, default=30, help="timeout por request (seg)")
+    ap.add_argument("--timeout", type=int, default=25, help="timeout por request (seg)")
     ap.add_argument("--dry-run", action="store_true", help="solo logs, NO crea/actualiza")
+    ap.add_argument("--jsonl", default="", help="ruta para guardar JSONL (opcional)")
     ap.add_argument("--status", default="publish", choices=["publish", "draft", "pending", "private"], help="estado del producto")
     ap.add_argument("--force-delete-obsoletes", action="store_true", help="borrado definitivo de obsoletos (force=true). Si no, van a papelera.")
+
     args = ap.parse_args()
 
+    have_creds = bool(args.wp_url.strip() and args.wc_key.strip() and args.wc_secret.strip())
+    dry_run = bool(args.dry_run or not have_creds)
+
     run_import(
-        wp_url=args.wp_url,
-        wc_key=args.wc_key,
-        wc_secret=args.wc_secret,
+        wp_url=args.wp_url.strip() or None,
+        wc_key=args.wc_key.strip() or None,
+        wc_secret=args.wc_secret.strip() or None,
         wp_user=args.wp_user.strip() or None,
         wp_app_pass=args.wp_app_pass.strip() or None,
         max_products=args.max_products,
         sleep_seconds=args.sleep,
         timeout=args.timeout,
-        dry_run=args.dry_run,
+        dry_run=dry_run,
         status=args.status,
         force_delete_obsoletes=args.force_delete_obsoletes,
+        jsonl_path=args.jsonl.strip() or None,
     )
 
 
