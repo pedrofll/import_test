@@ -1,0 +1,50 @@
+name: Import PowerPlanet
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 16:00 Europe/Madrid
+    - cron: "0 14 * * *"
+
+concurrency:
+  group: import-powerplanet
+  cancel-in-progress: false
+
+jobs:
+  import_powerplanet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 pillow python-woocommerce
+
+      - name: Run PowerPlanet importer
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_KEY: ${{ secrets.WP_KEY }}
+          WP_SECRET: ${{ secrets.WP_SECRET }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+        run: |
+          set -euo pipefail
+          python powerplanet.py --max-products 0 --sleep 0.7 --timeout 25 --jsonl powerplanet.jsonl
+
+      - name: Upload JSONL artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: powerplanet-jsonl
+          path: powerplanet.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
