@@ -24,7 +24,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import requests
@@ -88,19 +88,76 @@ def safe_json_loads(s: str) -> Optional[dict]:
         return None
 
 
-def safe_float(x) -> Optional[float]:
+def safe_float(s: Any) -> Optional[float]:
+    """
+    Robust number parser for strings that may use:
+      - comma decimals: "1.099,99"
+      - dot decimals:   "269.99"
+      - thousand seps:  "1.099" or "1,099"
+    Returns float or None.
+    """
     try:
-        if x is None:
+        if s is None:
             return None
-        if isinstance(x, (int, float)):
-            return float(x)
-        s = str(x)
-        s = s.replace("\xa0", " ").strip()
-        s = s.replace(".", "").replace(",", ".")
-        s = re.sub(r"[^\d.]+", "", s)
-        return float(s) if s else None
+        if isinstance(s, (int, float)):
+            return float(s)
+
+        raw = str(s).strip()
+        if not raw:
+            return None
+
+        # keep digits, separators and sign
+        cleaned = re.sub(r"[^0-9,\.\-]", "", raw)
+        if not cleaned or cleaned in ("-", ",", "."):
+            return None
+
+        sign = -1.0 if cleaned.startswith("-") else 1.0
+        cleaned = cleaned.lstrip("-")
+
+        has_dot = "." in cleaned
+        has_comma = "," in cleaned
+
+        if has_dot and has_comma:
+            # decimal separator is the last one
+            if cleaned.rfind(".") > cleaned.rfind(","):
+                # dot decimal, comma thousands
+                cleaned = cleaned.replace(",", "")
+            else:
+                # comma decimal, dot thousands
+                cleaned = cleaned.replace(".", "").replace(",", ".")
+        elif has_comma:
+            # assume comma decimal if last group looks like cents
+            parts = cleaned.split(",")
+            if len(parts) == 2 and len(parts[1]) in (1, 2):
+                cleaned = parts[0].replace(".", "") + "." + parts[1]
+            else:
+                cleaned = cleaned.replace(",", "").replace(".", "")
+        elif has_dot:
+            parts = cleaned.split(".")
+            if len(parts) == 2 and len(parts[1]) in (1, 2):
+                # dot decimal
+                cleaned = cleaned
+            else:
+                cleaned = cleaned.replace(".", "")
+        # else: only digits
+
+        val = float(cleaned)
+        return sign * val
     except Exception:
         return None
+
+
+def coerce_price(v: Any) -> Optional[float]:
+    """
+    Price parser with cent-normalization:
+      - If the parsed number is > 9999, it is assumed to be cents and divided by 100.
+    """
+    x = safe_float(v)
+    if x is None:
+        return None
+    if x > 9999:
+        x = x / 100.0
+    return x
 
 
 def parse_eur_amount(text: str) -> Optional[float]:
@@ -226,18 +283,15 @@ def strip_variant_and_noise(raw_name: str) -> str:
 
 
 def clean_product_name(raw_name: str) -> str:
-    # preserva sufijo " /" SOLO si el título original contenía "/"
-    had_slash = "/" in (raw_name or "")
+    # Preserva sufijo " /" SOLO si el título original tenía el separador " / " (no el "GB/GB").
+    had_model_slash = bool(re.search(r"\s/\s", raw_name or "")) or bool(re.search(r"\s/\s*$", raw_name or ""))
     base = strip_variant_and_noise(raw_name)
-    if had_slash and base:
+    if had_model_slash and base:
         base = base.rstrip(" /")
         base = base.strip() + " /"
     return base.strip()
 
 
-# --------------------------
-# RAM / ROM extraction
-# --------------------------
 def extract_ram_rom_from_name(name: str) -> Tuple[str, str]:
     s = (name or "").replace("\xa0", " ")
     m = re.search(
@@ -266,76 +320,98 @@ def infer_iphone_ram(model_name: str) -> str:
 # --------------------------
 # Price extraction (listing + detail)
 # --------------------------
-def extract_prices_from_container(container: BeautifulSoup) -> Tuple[Optional[float], Optional[float]]:
-    """Devuelve (precio_actual, precio_original/PVR)"""
-    text = container.get_text(" ", strip=True) if container else ""
-    amounts = find_all_eur_amounts(text)
-
-    pvr = None
-    # PVR por regex
-    m = re.search(
-        r"(?:PVR|Precio\s*recomendado|Antes)\s*[:\-]?\s*(\d{1,3}(?:[.\s]\d{3})*(?:[.,]\d{2})|\d+(?:[.,]\d{2})|\d+)\s*€",
-        text,
-        flags=re.I,
-    )
-    if m:
-        pvr = safe_float(m.group(1))
-
-    # PVR por nodos que contienen "PVR"
-    if pvr is None:
-        for t in container.find_all(string=re.compile(r"\bPVR\b", re.I)):
-            parent = t.parent
-            if not parent:
+def extract_prices_from_container(element: BeautifulSoup) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Devuelve (precio_actual, precio_original).
+    Evita coger importes de financiación (€/mes) u otros importes pequeños no relacionados.
+    """
+    # 1) JSON-LD (si existe)
+    for s in element.select('script[type="application/ld+json"]'):
+        try:
+            raw = s.string or s.get_text(strip=True) or ""
+            if not raw:
                 continue
-            cand = parse_eur_amount(parent.get_text(" ", strip=True))
-            if cand is not None:
-                pvr = cand
-                break
+            data = json.loads(raw)
 
-    # precio actual por microdata/meta
-    price = None
-    meta_price = container.select_one('meta[itemprop="price"]')
-    if meta_price and meta_price.get("content"):
-        price = safe_float(meta_price.get("content"))
+            def iter_objs(o):
+                if isinstance(o, dict):
+                    yield o
+                    for v in o.values():
+                        yield from iter_objs(v)
+                elif isinstance(o, list):
+                    for it in o:
+                        yield from iter_objs(it)
 
-    if price is None:
-        node_price = container.select_one('[itemprop="price"]')
-        if node_price:
-            price = safe_float(node_price.get("content")) or parse_eur_amount(node_price.get_text(" ", strip=True))
-
-    # JSON-LD dentro del contenedor
-    if price is None:
-        for sc in container.select('script[type="application/ld+json"]'):
-            data = safe_json_loads(sc.get_text(strip=True))
-            if not data:
-                continue
-            # puede ser lista
-            items = data if isinstance(data, list) else [data]
-            for it in items:
-                offers = it.get("offers") if isinstance(it, dict) else None
+            for obj in iter_objs(data):
+                # offers.price
+                offers = obj.get("offers") if isinstance(obj, dict) else None
                 if isinstance(offers, dict):
-                    price = safe_float(offers.get("price"))
-                elif isinstance(offers, list) and offers:
-                    price = safe_float(offers[0].get("price"))
+                    p = coerce_price(offers.get("price"))
+                    if p is not None:
+                        return p, None
+                # algunos JSON-LD ponen price directamente
+                p = coerce_price(obj.get("price")) if isinstance(obj, dict) else None
+                if p is not None:
+                    # no hay forma fiable de inferir PVR aquí
+                    return p, None
+        except Exception:
+            pass
+
+    # 2) data-product (cards de listado suelen tenerlo)
+    node = element if getattr(element, "attrs", None) and element.has_attr("data-product") else element.find(attrs={"data-product": True})
+    if node and node.has_attr("data-product"):
+        try:
+            d = json.loads(node["data-product"])
+            if isinstance(d, dict):
+                price = (coerce_price(d.get("retailPrice")) or coerce_price(d.get("price")) or coerce_price(d.get("specialPrice"))
+                         or coerce_price(d.get("finalPrice")) or coerce_price(d.get("salePrice")))
+                pvr = (coerce_price(d.get("basePrice")) or coerce_price(d.get("pvr")) or coerce_price(d.get("oldPrice"))
+                       or coerce_price(d.get("regularPrice")) or coerce_price(d.get("comparePrice")) or coerce_price(d.get("originalPrice")))
                 if price is not None:
-                    break
-            if price is not None:
-                break
+                    if pvr is not None and pvr < price:
+                        pvr, price = price, pvr
+                    if pvr is not None and abs(pvr - price) < 0.01:
+                        pvr = None
+                    return price, pvr
+        except Exception:
+            pass
 
-    # Fallback: si hay varios importes, el mínimo suele ser precio actual
-    if price is None and amounts:
-        price = min(amounts)
+    # 3) Fallback: buscar "NNN€" en el texto del contenedor y escoger los 2 importes más altos "coherentes"
+    t = element.get_text(" ", strip=True)
+    amounts: List[float] = []
+    for m in re.finditer(r"(\d[\d.,]*)\s*€", t):
+        # Descarta financiación: "€/mes", "al mes", "meses" justo detrás del €
+        after = t[m.end():m.end() + 14].lower()
+        after_n = re.sub(r"\s+", "", after)
+        if after_n.startswith("/mes") or after_n.startswith("mes") or after_n.startswith("almes") or after_n.startswith("meses"):
+            continue
 
-    # Ajuste: si pvr existe y también hay amounts, el mínimo suele ser actual y el máximo suele ser PVR
-    if pvr is None and amounts:
-        # si hay dos precios, el mayor probablemente es PVR
-        if len(amounts) >= 2:
-            pvr = max(amounts)
+        v = coerce_price(m.group(1))
+        if v is not None and v > 0:
+            amounts.append(v)
 
-    # Si sólo hay uno y pvr coincide, usarlo como precio actual también
-    if price is None and pvr is not None:
-        price = pvr
+    if not amounts:
+        return None, None
 
+    uniq = sorted(set(amounts), reverse=True)
+    top = uniq[0]
+
+    # elegir segundo importe que no sea un "importe pequeño" (envío/financiación residual)
+    second = None
+    for v in uniq[1:]:
+        if v <= top * 0.99 and v >= top * 0.30:
+            second = v
+            break
+
+    if second is None:
+        return top, None
+
+    pvr = top
+    price = second
+    if price > pvr:
+        pvr, price = price, pvr
+    if abs(pvr - price) < 0.01:
+        pvr = None
     return price, pvr
 
 
@@ -423,8 +499,10 @@ def extract_listing_candidates(html: str) -> List[Offer]:
         if img and img.startswith("/"):
             img = urljoin(BASE_URL, img)
 
-        price = safe_float(d.get("retailPrice")) or safe_float(d.get("price"))
-        pvr = safe_float(d.get("basePrice")) or safe_float(d.get("pvr"))
+        price = (coerce_price(d.get("retailPrice")) or coerce_price(d.get("price")) or coerce_price(d.get("specialPrice"))
+                 or coerce_price(d.get("finalPrice")) or coerce_price(d.get("salePrice")))
+        pvr = (coerce_price(d.get("basePrice")) or coerce_price(d.get("pvr")) or coerce_price(d.get("oldPrice"))
+               or coerce_price(d.get("regularPrice")) or coerce_price(d.get("comparePrice")) or coerce_price(d.get("originalPrice")))
 
         # fallback por DOM
         if price is None or pvr is None:
