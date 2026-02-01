@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+PowerPlanetOnline - Móviles más vendidos (DRY-RUN SOLO LOGS)
+
+- NO navega a fichas: solo descarga https://www.powerplanetonline.com/es/moviles-mas-vendidos y parsea el HTML.
+- Genera logs y (opcional) JSONL con los campos ACF que luego consume tu importador.
+"""
+
+from __future__ import annotations
 
 import argparse
-import html as ihtml
 import json
 import re
+import sys
 import time
-import unicodedata
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+import urllib.parse
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://www.powerplanetonline.com"
-LIST_URL = f"{BASE_URL}/es/moviles-mas-vendidos"
-
-# --- CONSTANTES DE TU PROYECTO (PowerPlanet) ---
-FUENTE_POWERPLANET = "powerplanetonline"
-ENVIO_POWERPLANET = "España"
-CUPON_DEFAULT = "OFERTA PROMO"
+LIST_URL = "https://www.powerplanetonline.com/es/moviles-mas-vendidos"
 
 # --------------------------
-# RAM iPhone
+# RAM iPhone (fallback)
 # --------------------------
 IPHONE_RAM_MAP = [
     ("iphone 17 pro max", "12GB"),
@@ -55,83 +55,65 @@ IPHONE_RAM_MAP = [
     ("iphone 12", "4GB"),
 ]
 
+REFURB_KEYWORDS = [
+    "reacondicionado",
+    "desprecintado",
+    "segunda mano",
+    "usado",
+    "exposicion",
+    "renovado",
+    "refurb",
+    "refurbished",
+    "estado excelente",
+    "estado muy bueno",
+    "estado bueno",
+]
 
-@dataclass
-class Offer:
-    source: str
-    name: str
-    url: str
-    price_eur: Optional[float] = None
-    pvr_eur: Optional[float] = None
-    image_large: Optional[str] = None
-    scraped_at: Optional[str] = None
-    category_path: Optional[str] = None
+# Si aparece un tamaño en pulgadas en el título, lo tratamos como tablet/accesorio (no móvil)
+INCHES_RE = re.compile(r"\b\d+(?:[\.,]\d+)?\s*(?:\"|''|pulgadas)\b", flags=re.IGNORECASE)
 
+COLOR_WORDS = {
+    "negro", "blanco", "azul", "rojo", "verde", "gris", "plata", "dorado", "oro",
+    "marron", "marrón", "rosa", "morado", "violeta", "amarillo", "beige", "cobre",
+    "titanio", "grafito",
+}
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+COLOR_TRAIL_WORDS = {"oscuro", "claro", "neblina", "drill"}
 
+FINANCE_HINTS = ("mes", "/mes", "cuota", "financi", "al mes")
 
+# --------------------------
+# Helpers
+# --------------------------
 def normalize_text(s: str) -> str:
-    if s is None:
+    if not s:
         return ""
     s = s.replace("\xa0", " ")
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = s.lower()
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    s = re.sub(r"\s+", " ", s)
+    return s.strip().lower()
 
 
-def make_session() -> requests.Session:
-    sess = requests.Session()
-    sess.headers.update(
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        }
-    )
-    return sess
-
-
-def fetch_html(sess: requests.Session, url: str, timeout: int = 25) -> str:
-    # IMPORTANTE: en este scraper SOLO se llama a LIST_URL (PowerPlanet)
-    r = sess.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.text
-
-
-def parse_eur_amount(s: str) -> Optional[float]:
+def title_case_keep_alnum(s: str) -> str:
+    """
+    - Primera letra de cada palabra en mayúscula
+    - Mantiene tokens alfanuméricos con letras en mayúscula: 16E, 14T, 5G, etc.
+    """
     if not s:
-        return None
-    s = s.replace("\xa0", " ").strip()
-    m = re.search(r"(\d[\d\.\,]*)\s*€", s)
-    if not m:
-        return None
-    num = m.group(1).replace(".", "").replace(",", ".")
-    try:
-        return float(num)
-    except ValueError:
-        return None
-
-
-def format_price_int(v: Optional[float]) -> str:
-    if v is None:
-        return "N/A"
-    try:
-        return f"{int(v)}€"
-    except Exception:
-        return "N/A"
-
-
-def int_str(v: Optional[float]) -> str:
-    if v is None:
         return ""
-    try:
-        return str(int(v))
-    except Exception:
-        return ""
+    s = " ".join(w for w in s.strip().split() if w)
+    s = s.title()
+
+    def fix_token(tok: str) -> str:
+        if re.search(r"\d+[a-zA-Z]+", tok):
+            return re.sub(r"(\d+)([a-zA-Z]+)", lambda m: m.group(1) + m.group(2).upper(), tok)
+        return tok
+
+    return " ".join(fix_token(t) for t in s.split())
+
+
+def is_iphone(name: str) -> bool:
+    n = normalize_text(name)
+    return "iphone" in n
 
 
 def infer_iphone_ram(name: str) -> str:
@@ -142,397 +124,591 @@ def infer_iphone_ram(name: str) -> str:
     return ""
 
 
-def extract_ram_rom_from_name(name: str) -> Tuple[str, str]:
+def is_refurb_or_openbox(name: str, url: str = "") -> bool:
+    n = normalize_text(name)
+    u = normalize_text(url)
+    for k in REFURB_KEYWORDS:
+        if k in n or k in u:
+            return True
+    return False
+
+
+def is_tablet_like(name: str, url: str = "") -> bool:
+    n = normalize_text(name)
+    u = normalize_text(url)
+    # Palabras clave claras
+    if " ipad" in f" {n} " or " ipad" in f" {u} ":
+        return True
+    if " tab" in f" {n} " or " tab" in f" {u} " or "tablet" in n or "tablet" in u:
+        return True
+    # Tamaño en pulgadas suele aparecer en tablets
+    if INCHES_RE.search(name) or INCHES_RE.search(url):
+        return True
+    # Caso típico PowerPlanet tablets: "Wifi + 4G"
+    if "wifi" in n and ("+" in name or " + " in n):
+        return True
+    return False
+
+
+def cut_after_4g_5g(name: str) -> str:
     """
-    Detecta '8GB/256GB' (admite separadores comunes).
+    Elimina '4G'/'5G' y todo lo que venga a continuación (incluido el propio token).
     """
     if not name:
-        return "", ""
-    n = name.replace("\xa0", " ")
-    n = re.sub(r"\s+", " ", n).strip()
-    m = re.search(
-        r"\b(\d+)\s*(GB|TB)\s*[/\+\-\|]\s*(\d+)\s*(GB|TB)\b",
-        n,
-        flags=re.IGNORECASE,
-    )
+        return ""
+    m = re.search(r"\b(?:4g|5g)\b", name, flags=re.IGNORECASE)
     if not m:
-        return "", ""
-    ram = f"{m.group(1)}{m.group(2).upper()}"
-    rom = f"{m.group(3)}{m.group(4).upper()}"
+        return name.strip()
+    return name[: m.start()].strip()
+
+
+def remove_storage_tokens(text: str) -> str:
+    """
+    Elimina tokens tipo 128GB, 1TB, 8GB/256GB (solo las partes con unidad).
+    """
+    if not text:
+        return ""
+    t = text
+    t = re.sub(r"\b\d+\s*(?:GB|TB)\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def strip_trailing_colors(text: str) -> str:
+    """
+    Quita color final (1 palabra) y color compuesto (2 palabras): 'Azul Oscuro', 'Verde Drill', etc.
+    """
+    if not text:
+        return ""
+    words = text.strip().split()
+    if not words:
+        return ""
+
+    # 2 palabras: ... <color> <trail>
+    if len(words) >= 2:
+        w1 = normalize_text(words[-2])
+        w2 = normalize_text(words[-1])
+        if w1 in COLOR_WORDS and w2 in COLOR_TRAIL_WORDS:
+            words = words[:-2]
+
+    # 1 palabra: ... <color>
+    if words:
+        w = normalize_text(words[-1])
+        if w in COLOR_WORDS:
+            words = words[:-1]
+
+    return " ".join(words).strip()
+
+
+def build_clean_name(raw_name: str, url: str) -> str:
+    """
+    Nombre final para WP:
+    - Sin 4G/5G y sin lo que venga después
+    - Sin GB/TB (capacidad/memoria)
+    - Sin colores al final
+    - iPhone: prefijo Apple
+    """
+    base = raw_name or ""
+    base = base.replace("–", "-").replace("—", "-").strip()
+
+    base = cut_after_4g_5g(base)
+    base = remove_storage_tokens(base)
+    base = strip_trailing_colors(base)
+    base = re.sub(r"\s+", " ", base).strip()
+
+    base = re.sub(r"\s*-\s*(version\s+internacional|internacional|global)\s*$", "", base, flags=re.IGNORECASE).strip()
+
+    base = title_case_keep_alnum(base)
+
+    if is_iphone(base) or is_iphone(url):
+        if not base.lower().startswith("apple "):
+            base = f"Apple {base}"
+        base = title_case_keep_alnum(base)
+
+    return base.strip()
+
+
+def parse_eur_amount(s: str) -> Optional[float]:
+    """
+    Convierte '1.059,99€' / '1059.99 €' / '1059€' -> float
+    """
+    if not s:
+        return None
+    s = s.replace("\xa0", " ").strip()
+    m = re.search(r"(\d[\d\.\,]*)\s*€", s)
+    if not m:
+        return None
+    num = m.group(1)
+    if "," in num and "." in num:
+        num = num.replace(".", "").replace(",", ".")
+    else:
+        num = num.replace(".", "").replace(",", ".")
+    try:
+        return float(num)
+    except Exception:
+        return None
+
+
+def _amounts_with_context(text: str) -> List[float]:
+    """
+    Extrae importes € evitando financiación tipo '0€/mes' y valores ridículos.
+    """
+    if not text:
+        return []
+    t = text.replace("\xa0", " ")
+    out: List[float] = []
+    for m in re.finditer(r"\d[\d\.\,]*\s*€", t):
+        amt = parse_eur_amount(m.group(0))
+        if amt is None:
+            continue
+        ctx = t[max(0, m.start() - 20): min(len(t), m.end() + 25)].lower()
+        if any(h in ctx for h in FINANCE_HINTS):
+            continue
+        if amt <= 5:
+            continue
+        out.append(amt)
+    return out
+
+
+def _amounts_from_price_attrs(node) -> List[float]:
+    out: List[float] = []
+    for el in node.find_all(True):
+        for k, v in (el.attrs or {}).items():
+            ks = str(k).lower()
+            if not any(x in ks for x in ("price", "precio", "pvp", "pvr")):
+                continue
+            if isinstance(v, (list, tuple)):
+                continue
+            vs = str(v)
+            m = re.search(r"\d[\d\.\,]*", vs)
+            if not m:
+                continue
+            raw = m.group(0)
+            raw = raw.replace(".", "").replace(",", ".")
+            try:
+                val = float(raw)
+            except Exception:
+                continue
+            if val > 5:
+                out.append(val)
+    return out
+
+
+def extract_prices_from_node(node) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Devuelve (precio_actual_int, precio_original_int) o (None,None) si no hay precio fiable.
+    """
+    if not node:
+        return None, None
+
+    old_vals: List[float] = []
+    for el in node.find_all(["del", "s", "strike"]):
+        old_vals.extend(_amounts_with_context(el.get_text(" ", strip=True)))
+
+    cur_vals: List[float] = []
+    for el in node.find_all(True):
+        cls = " ".join(el.get("class", []))
+        key = f"{cls} {(el.get('id') or '')}".lower()
+        if any(k in key for k in ("price", "precio", "pvp", "pvr", "oferta", "special", "sale")):
+            cur_vals.extend(_amounts_with_context(el.get_text(" ", strip=True)))
+
+    attr_vals = _amounts_from_price_attrs(node)
+    all_text_vals = _amounts_with_context(node.get_text(" ", strip=True))
+
+    candidates_cur = cur_vals or all_text_vals or attr_vals
+    candidates_old = old_vals or all_text_vals or attr_vals
+
+    if not candidates_cur:
+        return None, None
+
+    price_cur = min(candidates_cur)
+    price_old = max(candidates_old) if candidates_old else price_cur
+    if price_old < price_cur:
+        price_old = price_cur
+
+    return int(price_cur), int(price_old)
+
+
+def extract_memory_capacity(name: str, url: str = "") -> Tuple[str, str]:
+    """
+    Devuelve (RAM, ROM) como '8GB','256GB' o ('','') si no detecta ambos.
+    """
+    raw = (name or "")
+    n = normalize_text(raw)
+    u = normalize_text(url)
+
+    # 1) RAM/ROM explícito con separador en nombre
+    m = re.search(r"(\d+)\s*(gb|tb)\s*[/\+\-\|]\s*(\d+)\s*(gb|tb)", raw, flags=re.IGNORECASE)
+    if m:
+        ram = f"{m.group(1)}{m.group(2).upper()}"
+        rom = f"{m.group(3)}{m.group(4).upper()}"
+        return ram, rom
+
+    # 2) Extraer todos los <num><unit> del nombre
+    pairs = re.findall(r"(\d+)\s*(GB|TB)\b", raw, flags=re.IGNORECASE)
+    ram_c: List[Tuple[int, str]] = []
+    rom_c: List[Tuple[int, str]] = []
+    for num_s, unit in pairs:
+        try:
+            num = int(num_s)
+        except Exception:
+            continue
+        unit_u = unit.upper()
+        if unit_u == "TB":
+            rom_c.append((num, f"{num}{unit_u}"))
+        else:
+            if num <= 24:
+                ram_c.append((num, f"{num}{unit_u}"))
+            if num >= 32:
+                rom_c.append((num, f"{num}{unit_u}"))
+
+    # 3) URL: -8gb-256gb- y similares
+    if not ram_c or not rom_c:
+        url_pairs = re.findall(r"(\d+)\s*(gb|tb)", u, flags=re.IGNORECASE)
+        for num_s, unit in url_pairs:
+            try:
+                num = int(num_s)
+            except Exception:
+                continue
+            unit_u = unit.upper()
+            if unit_u == "TB":
+                rom_c.append((num, f"{num}{unit_u}"))
+            else:
+                if num <= 24:
+                    ram_c.append((num, f"{num}{unit_u}"))
+                if num >= 32:
+                    rom_c.append((num, f"{num}{unit_u}"))
+
+        # 4) URL: 4b128gb
+        m2 = re.search(r"(\d+)b(\d+)(gb|tb)", u, flags=re.IGNORECASE)
+        if m2:
+            try:
+                r = int(m2.group(1))
+                c = int(m2.group(2))
+                ram_c.append((r, f"{r}GB"))
+                rom_c.append((c, f"{c}{m2.group(3).upper()}"))
+            except Exception:
+                pass
+
+    ram = ""
+    rom = ""
+    if ram_c:
+        ram = sorted(ram_c, key=lambda x: x[0])[0][1]
+    if rom_c:
+        rom = sorted(rom_c, key=lambda x: x[0], reverse=True)[0][1]
+
+    # iPhone: RAM por mapa si falta (pero ROM debe existir)
+    if (not ram) and ("iphone" in n or "iphone" in u):
+        ram = infer_iphone_ram(raw) or infer_iphone_ram(u)
+
     return ram, rom
 
 
-def extract_storage_only(name: str) -> str:
-    """
-    Extrae una única capacidad (ROM) desde el nombre: '256GB' / '1TB'.
-    Ignora GB < 32 (para no confundir RAM).
-    """
-    if not name:
-        return ""
-    caps = re.findall(r"\b(\d+)\s*(TB|GB)\b", name, flags=re.IGNORECASE)
-    if not caps:
-        return ""
-    parsed = []
-    for v, u in caps:
-        try:
-            parsed.append((int(v), u.upper()))
-        except Exception:
-            continue
-    if not parsed:
-        return ""
-    val, unit = max(parsed, key=lambda x: ((x[1] == "TB"), x[0]))
-    if unit == "GB" and val < 32:
-        return ""
-    return f"{val}{unit}"
+def classify_offer(raw_name: str, url: str = "", category_path: Optional[str] = None, ram: str = "", rom: str = "") -> Tuple[bool, str]:
+    if is_refurb_or_openbox(raw_name, url):
+        return False, "EXCLUDE:condition_not_new"
+    if is_tablet_like(raw_name, url):
+        return False, "EXCLUDE:tablet_like"
+
+    cat = normalize_text(category_path) if category_path else ""
+    if cat and any(k in cat for k in ["tablet", "wearable", "smartwatch", "smartband"]):
+        return False, "EXCLUDE:category_tablet_or_wearable"
+
+    if ram and rom:
+        return True, "INCLUDE:has_ram_and_rom"
+
+    if ("iphone" in normalize_text(raw_name) or "iphone" in normalize_text(url)) and rom and infer_iphone_ram(raw_name):
+        return True, "INCLUDE:iphone_ram_inferred"
+
+    return False, "EXCLUDE:missing_ram_or_rom"
 
 
-def strip_variant_from_name(name: str) -> str:
-    """
-    Limpieza fuerte:
-      - Quita RAM/ROM "8GB/256GB"
-      - Quita sufijos "- Versión Internacional"
-      - Quita color final (incluye Obsidiana)
-    """
-    if not name:
-        return ""
-    s = re.sub(r"\s+", " ", name.strip())
-
-    # Quitar sufijos de versión tipo "- Versión Internacional"
-    s = re.sub(r"\s*-\s*versi[oó]n\s+internacional\s*$", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s*-\s*version\s+internacional\s*$", "", s, flags=re.IGNORECASE)
-
-    # Quitar RAM/ROM
-    s = re.sub(
-        r"\s*\b\d+\s*(?:GB|TB)\s*[/\+\-\|]\s*\d+\s*(?:GB|TB)\b\s*",
-        " ",
-        s,
-        flags=re.IGNORECASE,
-    )
-    s = re.sub(r"\s+", " ", s).strip()
-
-    # Quitar color final (última palabra)
-    colors = {
-        "negro", "blanco", "azul", "rojo", "verde", "amarillo", "morado", "violeta",
-        "gris", "plata", "dorado", "oro", "rosa", "naranja", "cian", "turquesa",
-        "beige", "crema", "grafito", "lavanda", "marfil", "champan", "neblina",
-        "midnight", "starlight", "titanio", "titanium", "obsidiana", "violet", "purple",
-    }
-
-    parts = s.split(" ")
-    if parts and normalize_text(parts[-1]) in colors:
-        s = " ".join(parts[:-1]).strip()
-
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def format_product_title(name: str) -> str:
-    """
-    Primera letra de cada palabra en mayúscula, pero tokens alfanuméricos en mayúsculas (5G, 14T...).
-    """
-    if not name:
-        return ""
-    words = re.split(r"\s+", name.strip())
-    out = []
-    for w in words:
-        if not w:
-            continue
-        # Mantener separadores internos
-        if re.search(r"\d", w) and re.search(r"[a-zA-Z]", w):
-            out.append(re.sub(r"[a-zA-Z]+", lambda m: m.group(0).upper(), w))
-        else:
-            out.append(w[:1].upper() + w[1:].lower())
-    return " ".join(out).strip()
-
-
-def compute_version(clean_name: str) -> str:
-    n = normalize_text(clean_name)
-    if "iphone" in n:
-        return "IOS"
-    return "Versión Global"
-
-
-def strip_query(url: str) -> str:
-    pu = urlparse(url)
-    return urlunparse((pu.scheme, pu.netloc, pu.path, "", "", ""))
-
-
-def build_affiliate_url(url: str, affiliate_query: str) -> str:
-    """
-    Añade parámetros de afiliado (utm...) a la URL base.
-    Si affiliate_query está vacío => sin cambios.
-    """
+def add_affiliate_query(url: str, affiliate_query: str) -> str:
     if not affiliate_query:
         return url
-    pu = urlparse(url)
-    base_q = dict(parse_qsl(pu.query, keep_blank_values=True))
-    extra = dict(parse_qsl(affiliate_query.lstrip("?"), keep_blank_values=True))
-    base_q.update(extra)
-    new_q = urlencode(base_q, doseq=True)
-    return urlunparse((pu.scheme, pu.netloc, pu.path, pu.params, new_q, pu.fragment))
+    parsed = urllib.parse.urlsplit(url)
+    q = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    add = urllib.parse.parse_qsl(affiliate_query, keep_blank_values=True)
+    q_dict = dict(q)
+    for k, v in add:
+        q_dict[k] = v
+    new_query = urllib.parse.urlencode(list(q_dict.items()))
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
 
 
-def shorten_isgd(url: str, timeout: int = 25) -> str:
+def isgd_shorten(url: str, timeout: int = 20) -> str:
     try:
         r = requests.get("https://is.gd/create.php", params={"format": "simple", "url": url}, timeout=timeout)
-        if r.status_code == 200 and r.text.strip().startswith("http"):
-            return r.text.strip()
+        if r.status_code == 200:
+            s = r.text.strip()
+            if s.startswith("http"):
+                return s
     except Exception:
         pass
     return url
 
 
-def is_refurb_or_openbox(name: str) -> bool:
-    n = normalize_text(name)
-    bad = [
-        "desprecintado", "desprecintada", "desprecintados", "desprecintadas",
-        "reacondicionado", "reacondicionada", "reacondicionados", "reacondicionadas",
-        "refurbished", "open box", "openbox",
-    ]
-    return any(b in n for b in bad)
+@dataclass
+class Offer:
+    name: str
+    url: str
+    img_url: str
+    category_path: str
+    price_eur: Optional[int] = None
+    pvr_eur: Optional[int] = None
+    version: str = "Versión Global"
+    source: str = "powerplanetonline"
+    sent_from: str = "España"
+
+    codigo_de_descuento: str = "OFERTA PROMO"
+    enlace_de_compra_importado: str = ""
+    url_oferta_sin_acortar: str = ""
+    url_importada_sin_afiliado: str = ""
+    url_sin_acortar_con_mi_afiliado: str = ""
+    url_oferta: str = ""
 
 
-def classify_offer(name: str, category_path: Optional[str], capacity: Optional[str]) -> Tuple[bool, str]:
-    n = normalize_text(name)
-    cat = normalize_text(category_path) if category_path else ""
+def extract_listing_candidates(html: str) -> List[Offer]:
+    soup = BeautifulSoup(html, "html.parser")
 
-    if is_refurb_or_openbox(name):
-        return False, "EXCLUDE:refurb_or_openbox"
+    anchors = soup.find_all("a", href=True)
+    urls: List[Tuple[str, object]] = []
 
-    if " ipad" in f" {n} ":
-        return False, "EXCLUDE:name_contains_ipad"
-    if " tab" in f" {n} " or "tablet" in n:
-        return False, "EXCLUDE:name_contains_tab/tablet"
-    if "smartwatch" in n or "smartband" in n or "reloj" in n:
-        return False, "EXCLUDE:name_contains_watch/band"
-    if cat and any(k in cat for k in ["tablet", "wearable", "smartwatch", "smartband"]):
-        return False, "EXCLUDE:category_tablet_or_wearable"
-
-    # iPhone: aceptar aunque no venga RAM si hay ROM
-    if "iphone" in n and capacity and any(x in normalize_text(capacity) for x in ["gb", "tb"]):
-        return True, "INCLUDE:iphone_with_capacity"
-
-    # resto: exigir capacidad (ROM) o RAM/ROM
-    if capacity and any(x in normalize_text(capacity) for x in ["gb", "tb"]):
-        return True, "INCLUDE:capacity_has_gb"
-
-    ram, rom = extract_ram_rom_from_name(name)
-    if ram and rom:
-        return True, "INCLUDE:name_has_ram_rom"
-
-    return False, "EXCLUDE:no_capacity"
-
-
-def extract_listing_candidates(list_html: str) -> List[Offer]:
-    """
-    Escaneo robusto del listado:
-      - NO depende de 'PVR nodes'
-      - Dedup por URL
-      - Saca nombre/precios/imagen del mismo card (subárbol)
-    """
-    soup = BeautifulSoup(list_html, "html.parser")
-    offers: Dict[str, Offer] = {}
-
-    for a in soup.find_all("a", href=True):
-        href = (a.get("href") or "").strip()
-        if not href.startswith("/es/"):
+    for a in anchors:
+        href = a.get("href", "").strip()
+        if not href:
             continue
-        if "moviles-mas-vendidos" in href:
+        if href.startswith("//"):
+            href = "https:" + href
+        if href.startswith("/"):
+            href = urllib.parse.urljoin(LIST_URL, href)
+
+        p = urllib.parse.urlsplit(href)
+        if p.netloc and "powerplanetonline.com" not in p.netloc:
+            continue
+        if not p.path.startswith("/es/"):
             continue
 
-        url = urljoin(BASE_URL, href.split("#")[0])
-        # nombre desde texto o alt
-        title = a.get_text(" ", strip=True)
-        if len(title) < 6:
-            img_in_a = a.find("img")
-            if img_in_a and img_in_a.get("alt"):
-                title = img_in_a.get("alt").strip()
-        if len(title) < 6:
+        if any(x in href.lower() for x in ["#", "/carrito", "/checkout", "/login", "/account", "/mi-cuenta"]):
             continue
 
-        # buscar el contenedor más cercano que tenga precios
-        best_card = None
-        best_text = None
+        if not re.match(r"^/es/[a-z0-9\-\_]+/?$", p.path, flags=re.IGNORECASE):
+            continue
+        if not re.search(r"\d", p.path):
+            continue
 
-        cur = a
+        urls.append((href, a))
+
+    seen: set = set()
+    offers: List[Offer] = []
+
+    for href, a in urls:
+        if href in seen:
+            continue
+        seen.add(href)
+
+        best_node = None
+        best_len = 10**9
+        node = a
+
         for _ in range(10):
-            cur = cur.parent
-            if cur is None:
+            if not node or not hasattr(node, "get_text"):
                 break
-            txt = cur.get_text(" ", strip=True).replace("\xa0", " ")
-            if "€" in txt:
-                # evitar coger body/html (demasiado grande)
-                if len(txt) > 2500:
-                    continue
-                if best_text is None or len(txt) < len(best_text):
-                    best_card = cur
-                    best_text = txt
+            txt = node.get_text(" ", strip=True)
+            if not txt:
+                node = node.parent
+                continue
 
-        if not best_card or not best_text:
-            continue
+            vals = _amounts_with_context(txt)
+            if vals:
+                l = len(txt)
+                if 40 <= l <= best_len:
+                    best_node = node
+                    best_len = l
 
-        # extraer precios del card
-        euro_strs = re.findall(r"\d[\d\.\,]*\s*€", best_text)
-        vals = [parse_eur_amount(x) for x in euro_strs]
-        vals = [v for v in vals if v is not None]
-        if not vals:
-            continue
+            node = node.parent
 
-        price = min(vals)
-        pvr = max(vals) if len(vals) >= 2 else price
+        card = best_node or a
 
-        # imagen
-        img = best_card.find("img")
-        img_src = ""
+        title = a.get_text(" ", strip=True) or ""
+        if not title or len(title) < 6:
+            cand = card.get_text(" ", strip=True)
+            if cand:
+                title = cand.split("€")[0].strip()
+        title = re.sub(r"\s+", " ", title).strip()
+
+        img_url = ""
+        img = card.find("img")
         if img:
-            img_src = (img.get("data-original") or img.get("data-src") or img.get("src") or "").strip()
-        img_src = urljoin(BASE_URL, img_src) if img_src else ""
+            img_url = (
+                img.get("data-original")
+                or img.get("data-src")
+                or img.get("data-lazy")
+                or img.get("src")
+                or ""
+            ).strip()
+            if img_url.startswith("//"):
+                img_url = "https:" + img_url
+            if img_url.startswith("/"):
+                img_url = urllib.parse.urljoin(LIST_URL, img_url)
 
-        if url not in offers:
-            offers[url] = Offer(
-                source=FUENTE_POWERPLANET,
+        price_eur, pvr_eur = extract_prices_from_node(card)
+        if price_eur is None:
+            continue
+        if pvr_eur is None:
+            pvr_eur = price_eur
+
+        offers.append(
+            Offer(
                 name=title,
-                url=url,
-                price_eur=price,
-                pvr_eur=pvr,
-                image_large=img_src or None,
-                scraped_at=now_iso(),
+                url=href,
+                img_url=img_url,
+                category_path="Móviles > Más vendidos",
+                price_eur=price_eur,
+                pvr_eur=pvr_eur,
             )
+        )
 
-    return list(offers.values())
+    return offers
 
 
-def print_required_logs(acf: dict, nombre: str) -> None:
-    print(f"Detectado {nombre}")
-    print(f"1) Nombre: {nombre}")
-    print(f"2) Memoria (memoria): {acf.get('memoria','')}")
-    print(f"3) Capacidad (capacidad): {acf.get('capacidad','')}")
-    print(f"4) Versión (version): {acf.get('version','')}")
-    print(f"5) Fuente (fuente): {acf.get('fuente','')}")
-    print(f"6) Precio actual (precio_actual): {acf.get('precio_actual','')}€" if acf.get("precio_actual") else "6) Precio actual (precio_actual): ")
-    print(f"7) Precio original (precio_original): {acf.get('precio_original','')}€" if acf.get("precio_original") else "7) Precio original (precio_original): ")
-    print(f"8) Código de descuento (codigo_de_descuento): {acf.get('codigo_de_descuento','')}")
-    print(f"9) URL Imagen (imagen_producto): {acf.get('imagen_producto','')}")
-    print(f"10) Enlace Importado (enlace_de_compra_importado): {acf.get('enlace_de_compra_importado','')}")
-    print(f"11) Enlace Expandido (url_oferta_sin_acortar): {acf.get('url_oferta_sin_acortar','')}")
-    print(f"12) URL importada sin afiliado (url_importada_sin_afiliado): {acf.get('url_importada_sin_afiliado','')}")
-    print(f"13) URL sin acortar con mi afiliado (url_sin_acortar_con_mi_afiliado): {acf.get('url_sin_acortar_con_mi_afiliado','')}")
-    print(f"14) URL acortada con mi afiliado (url_oferta): {acf.get('url_oferta','')}")
-    print(f"15) Enviado desde (enviado_desde): {acf.get('enviado_desde','')}")
-    print(f"16) Encolado para comparar con base de datos...")
-    print("-" * 60)
+def build_acf_payload(offer: Offer, ram: str, rom: str) -> Dict[str, str]:
+    return {
+        "nombre": offer.name,
+        "memoria": ram,
+        "capacidad": rom,
+        "version": offer.version,
+        "fuente": offer.source,
+        "precio_actual": f"{offer.price_eur}€" if offer.price_eur is not None else "0€",
+        "precio_original": f"{offer.pvr_eur}€" if offer.pvr_eur is not None else "0€",
+        "codigo_de_descuento": offer.codigo_de_descuento,
+        "imagen_producto": offer.img_url,
+        "enlace_de_compra_importado": offer.enlace_de_compra_importado,
+        "url_oferta_sin_acortar": offer.url_oferta_sin_acortar,
+        "url_importada_sin_afiliado": offer.url_importada_sin_afiliado,
+        "url_sin_acortar_con_mi_afiliado": offer.url_sin_acortar_con_mi_afiliado,
+        "url_oferta": offer.url_oferta,
+        "enviado_desde": offer.sent_from,
+    }
+
+
+def print_required_logs(offer: Offer, ram: str, rom: str) -> None:
+    print("------------------------------------------------------------")
+    print(f"Detectado {offer.name}")
+    print(f"1) Nombre: {offer.name}")
+    print(f"2) Memoria (memoria): {ram}")
+    print(f"3) Capacidad (capacidad): {rom}")
+    print(f"4) Versión (version): {offer.version}")
+    print(f"5) Fuente (fuente): {offer.source}")
+    print(f"6) Precio actual (precio_actual): {offer.price_eur}€" if offer.price_eur is not None else "6) Precio actual (precio_actual): 0€")
+    print(f"7) Precio original (precio_original): {offer.pvr_eur}€" if offer.pvr_eur is not None else "7) Precio original (precio_original): 0€")
+    print(f"8) Código de descuento (codigo_de_descuento): {offer.codigo_de_descuento}")
+    print(f"9) URL Imagen (imagen_producto): {offer.img_url}")
+    print(f"10) Enlace Importado (enlace_de_compra_importado): {offer.enlace_de_compra_importado}")
+    print(f"11) Enlace Expandido (url_oferta_sin_acortar): {offer.url_oferta_sin_acortar}")
+    print(f"12) URL importada sin afiliado (url_importada_sin_afiliado): {offer.url_importada_sin_afiliado}")
+    print(f"13) URL sin acortar con mi afiliado (url_sin_acortar_con_mi_afiliado): {offer.url_sin_acortar_con_mi_afiliado}")
+    print(f"14) URL acortada con mi afiliado (url_oferta): {offer.url_oferta}")
+    print(f"15) Enviado desde (enviado_desde): {offer.sent_from}")
+    print("16) Encolado para comparar con base de datos...")
 
 
 def scrape_dryrun(
-    max_products: int,
-    sleep_seconds: float,
-    timeout: int,
-    include_details: bool,  # se ignora a propósito (no se navega fuera del listado)
-    write_jsonl_path: Optional[str],
-    affiliate_query: str,
-    do_isgd: bool,
+    max_products: int = 0,
+    sleep_seconds: float = 0.7,
+    timeout: int = 25,
+    include_details: bool = False,
+    write_jsonl_path: Optional[str] = None,
+    affiliate_query: str = "",
+    do_isgd: bool = True,
 ) -> None:
-    sess = make_session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; ofertasdemoviles-bot/1.0; +https://ofertasdemoviles.com/)",
+        "Accept-Language": "es-ES,es;q=0.9",
+    }
 
-    # ✅ ÚNICA descarga a PowerPlanet (la página del listado)
-    list_html = fetch_html(sess, LIST_URL, timeout=timeout)
-    candidates = extract_listing_candidates(list_html)
-
-    if max_products > 0:
-        candidates = candidates[:max_products]
-
-    out_f = open(write_jsonl_path, "a", encoding="utf-8") if write_jsonl_path else None
+    jsonl_file = None
+    if write_jsonl_path:
+        jsonl_file = open(write_jsonl_path, "w", encoding="utf-8")
 
     try:
-        for offer in candidates:
-            raw_name = ihtml.unescape(offer.name or "").strip()
-            if not raw_name:
+        r = requests.get(LIST_URL, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        html = r.text
+
+        offers = extract_listing_candidates(html)
+
+        count = 0
+        for offer in offers:
+            if sleep_seconds:
+                time.sleep(sleep_seconds)
+
+            if is_refurb_or_openbox(offer.name, offer.url):
+                continue
+            if is_tablet_like(offer.name, offer.url):
                 continue
 
-            # filtros
-            if is_refurb_or_openbox(raw_name):
-                continue
-
-            # RAM/ROM
-            ram, rom = extract_ram_rom_from_name(raw_name)
-            if not rom:
-                rom = extract_storage_only(raw_name)
-            if (not ram) and ("iphone" in normalize_text(raw_name)):
-                ram = infer_iphone_ram(raw_name)
-
-            ok, reason = classify_offer(raw_name, offer.category_path, rom)
+            ram, rom = extract_memory_capacity(offer.name, offer.url)
+            ok, _reason = classify_offer(offer.name, offer.url, offer.category_path, ram, rom)
             if not ok:
                 continue
 
-            clean_name = format_product_title(strip_variant_from_name(raw_name))
-            ver = compute_version(clean_name)
+            offer.name = build_clean_name(offer.name, offer.url)
+            if not offer.name:
+                continue
 
-            url_oferta_sin_acortar = offer.url
-            url_importada_sin_afiliado = strip_query(url_oferta_sin_acortar)
-            url_sin_acortar_con_mi_afiliado = build_affiliate_url(url_importada_sin_afiliado, affiliate_query)
-            url_oferta = shorten_isgd(url_sin_acortar_con_mi_afiliado, timeout=timeout) if do_isgd else url_sin_acortar_con_mi_afiliado
+            if is_iphone(offer.name) or is_iphone(offer.url):
+                offer.version = "IOS"
 
-            acf = {
-                "memoria": ram,
-                "capacidad": rom,
-                "version": ver,
-                "fuente": FUENTE_POWERPLANET,
-                "precio_actual": int_str(offer.price_eur),
-                "precio_original": int_str(offer.pvr_eur if offer.pvr_eur is not None else offer.price_eur),
-                "codigo_de_descuento": CUPON_DEFAULT,
-                "imagen_producto": offer.image_large or "",
-                "enlace_de_compra_importado": offer.url,
-                "url_oferta_sin_acortar": url_oferta_sin_acortar,
-                "url_importada_sin_afiliado": url_importada_sin_afiliado,
-                "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
-                "url_oferta": url_oferta,
-                "enviado_desde": ENVIO_POWERPLANET,
-            }
+            offer.enlace_de_compra_importado = offer.url
+            offer.url_oferta_sin_acortar = offer.url
+            offer.url_importada_sin_afiliado = offer.url
 
-            print_required_logs(acf, clean_name)
+            offer.url_sin_acortar_con_mi_afiliado = add_affiliate_query(offer.url, affiliate_query)
+            offer.url_oferta = offer.url_sin_acortar_con_mi_afiliado
+            if do_isgd:
+                offer.url_oferta = isgd_shorten(offer.url_sin_acortar_con_mi_afiliado, timeout=timeout)
 
-            if out_f:
-                payload = asdict(offer)
-                payload["nombre"] = clean_name
-                payload["reason"] = reason
-                payload.update(acf)          # claves ACF a nivel raíz
-                payload["acf"] = acf         # y también anidadas
-                out_f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                out_f.flush()
+            print_required_logs(offer, ram, rom)
 
-            if sleep_seconds > 0:
-                time.sleep(sleep_seconds)
+            if jsonl_file:
+                jsonl_file.write(json.dumps(build_acf_payload(offer, ram, rom), ensure_ascii=False) + "\n")
 
+            count += 1
+            if max_products and count >= max_products:
+                break
+
+    except KeyboardInterrupt:
+        print("\n[ABORT] Cancelado por el usuario.", file=sys.stderr)
     finally:
-        if out_f:
-            out_f.close()
-
-
-def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--max-products", type=int, default=0)
-    ap.add_argument("--sleep", type=float, default=0.7)
-    ap.add_argument("--timeout", type=int, default=25)
-    ap.add_argument("--no-details", action="store_true", help="compatibilidad (ignorado)")
-    ap.add_argument("--jsonl", default=None)
-    ap.add_argument("--affiliate-query", default="", help="ej: utm_source=x&utm_campaign=y")
-    ap.add_argument("--no-isgd", action="store_true")
-    ap.add_argument("--status", default="", help="compatibilidad (no se usa)")
-    return ap
+        if jsonl_file:
+            jsonl_file.close()
 
 
 def main() -> None:
-    args = build_parser().parse_args()
-    include_details = False  # ✅ FORZADO: no navegar a fichas ni otras rutas PowerPlanet
-    do_isgd = not args.no_isgd
+    ap = argparse.ArgumentParser(description="PowerPlanetOnline - Móviles más vendidos (DRY-RUN SOLO LOGS)")
+    ap.add_argument("--max-products", type=int, default=0, help="0 = sin límite")
+    ap.add_argument("--sleep", type=float, default=0.7, help="segundos entre requests")
+    ap.add_argument("--timeout", type=int, default=25, help="timeout por request (seg)")
+    ap.add_argument("--status", default="publish", help="compat: ignored (wp/cli)")
+    ap.add_argument("--no-details", action="store_true", help="compat: ignored (no entra en fichas)")
+    ap.add_argument("--jsonl", default="", help="ruta para guardar JSONL (opcional)")
+    ap.add_argument(
+        "--affiliate-query",
+        default="",
+        help="querystring para afiliado, ej: 'utm_source=ofertasdemoviles&utm_medium=referral'",
+    )
+    ap.add_argument("--no-isgd", action="store_true", help="no acortar url_oferta con is.gd")
+    args = ap.parse_args()
 
     scrape_dryrun(
         max_products=args.max_products,
         sleep_seconds=args.sleep,
         timeout=args.timeout,
-        include_details=include_details,
-        write_jsonl_path=args.jsonl,
-        affiliate_query=args.affiliate_query,
-        do_isgd=do_isgd,
+        include_details=(not args.no_details),
+        write_jsonl_path=(args.jsonl.strip() or None),
+        affiliate_query=args.affiliate_query.strip(),
+        do_isgd=(not args.no_isgd),
     )
 
 
