@@ -496,6 +496,8 @@ def wp_basic_auth_headers(user: str, app_pass: str) -> Dict[str, str]:
 
 def download_and_resize_image(sess: requests.Session, img_url: str, timeout: int = 25) -> Tuple[bytes, str]:
     """Descarga imagen y la devuelve como JPEG 600x600 (bytes, filename)."""
+    if Image is None:
+        raise RuntimeError("Pillow no disponible (pip install pillow).")
     r = sess.get(img_url, timeout=timeout)
     r.raise_for_status()
 
@@ -630,7 +632,8 @@ def ensure_category_image(
             print(msg)
 
             # si es auth, no tiene sentido esperar 15s y repetir 10 veces
-            if "Unauthorized" in last_err or "401" in last_err or "403" in last_err:
+            err_low = last_err.lower()
+            if ("401" in err_low) or ("403" in err_low) or ("unauthorized" in err_low) or ("forbidden" in err_low) or ("pillow" in err_low) or ("pil" in err_low):
                 break
 
             if attempt < max_attempts:
@@ -754,25 +757,55 @@ def build_product_payload(
     return payload
 
 
-def update_product_meta_and_price(wcapi: API, product_id: int, pd: ProductData, status: str, image_id: Optional[int]) -> Dict[str, Any]:
+def update_product_meta_and_price(
+    wcapi: API,
+    product_id: int,
+    pd: ProductData,
+    status: str,
+    image_id: Optional[int],
+    existing_product: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     payload = build_product_payload(pd, cat_id=0, image_id=image_id, status=status, include_fecha=False)
 
     # en update NO queremos sobrescribir categorías a 0
     payload.pop("categories", None)
 
+    # Para evitar duplicados de meta (y que ACF/WP coja valores antiguos),
+    # si tenemos el producto existente, reenviamos los IDs de meta por key.
+    if existing_product and payload.get("meta_data"):
+        id_map: Dict[str, int] = {}
+        for md in (existing_product.get("meta_data") or []):
+            k = md.get("key")
+            mid = md.get("id")
+            if k and mid:
+                try:
+                    id_map[str(k)] = int(mid)
+                except Exception:
+                    continue
+
+        for md in payload["meta_data"]:
+            k = md.get("key")
+            if k in id_map:
+                md["id"] = id_map[k]
+
     res = wcapi.put(f"products/{product_id}", payload).json()
     return res
-
-
 def set_product_categories(wcapi: API, product_id: int, cat_id: int) -> None:
     wcapi.put(f"products/{product_id}", {"categories": [{"id": cat_id}]}).json()
 
 
-def set_url_post_acortada(wcapi: API, product_id: int, short_url: str) -> None:
-    wcapi.put(
-        f"products/{product_id}",
-        {"meta_data": [{"key": "url_post_acortada", "value": short_url}]},
-    ).json()
+def set_url_post_acortada(
+    wcapi: API, product_id: int, short_url: str, existing_product: Optional[Dict[str, Any]] = None
+) -> None:
+    md: Dict[str, Any] = {"key": "url_post_acortada", "value": short_url}
+
+    if existing_product:
+        for emd in (existing_product.get("meta_data") or []):
+            if emd.get("key") == "url_post_acortada" and emd.get("id"):
+                md["id"] = emd.get("id")
+                break
+
+    wcapi.put(f"products/{product_id}", {"meta_data": [md]}).json()
 
 
 def wc_list_imported_products(wcapi: API) -> List[Dict[str, Any]]:
@@ -931,6 +964,17 @@ def category_main_name(product_name: str) -> str:
 def scrape_and_import(args: argparse.Namespace) -> None:
     sess = make_session()
 
+    jsonl_fp = open(args.jsonl, "a", encoding="utf-8") if getattr(args, "jsonl", "") else None
+
+    def jsonl_write(obj: Dict[str, Any]) -> None:
+        if not jsonl_fp:
+            return
+        try:
+            jsonl_fp.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            jsonl_fp.flush()
+        except Exception:
+            pass
+
     print(f"📌 PowerPlanet: Escaneando SOLO: {LIST_URL}")
     list_html = fetch_html(sess, LIST_URL, timeout=args.timeout)
     urls = extract_product_urls(list_html)
@@ -979,7 +1023,28 @@ def scrape_and_import(args: argparse.Namespace) -> None:
         # LOGS siempre
         print_required_logs(pd)
 
+        rec_base: Dict[str, Any] = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "nombre": pd.nombre,
+            "memoria": pd.memoria,
+            "capacidad": pd.capacidad,
+            "version": pd.version,
+            "fuente": pd.fuente,
+            "precio_actual": pd.precio_actual,
+            "precio_original": pd.precio_original,
+            "codigo_de_descuento": pd.codigo_de_descuento,
+            "imagen_producto": pd.imagen_producto,
+            "enlace_de_compra_importado": pd.enlace_de_compra_importado,
+            "url_oferta": pd.url_oferta,
+            "url_importada_sin_afiliado": pd.url_importada_sin_afiliado,
+            "url_sin_acortar_con_mi_afiliado": pd.url_sin_acortar_con_mi_afiliado,
+            "url_oferta_sin_acortar": pd.url_oferta_sin_acortar,
+            "url_acortada_con_mi_afiliado": pd.url_acortada_con_mi_afiliado,
+            "importado_de": pd.importado_de,
+        }
+
         if args.dry_run:
+            jsonl_write({**rec_base, "action": "dry_run"})
             continue
 
         # categorías: marca (cat main) + subcat = nombre completo
@@ -1020,18 +1085,20 @@ def scrape_and_import(args: argparse.Namespace) -> None:
                 cambios.append(f"precio_original {old_po} -> {pd.precio_original}")
 
             if cambios or (img_id and not existing.get("images")):
-                updated = update_product_meta_and_price(wcapi, pid, pd, status=args.status, image_id=img_id)
+                updated = update_product_meta_and_price(wcapi, pid, pd, status=args.status, image_id=img_id, existing_product=existing)
                 set_product_categories(wcapi, pid, int(sub_cat["id"]))
 
                 # url_post_acortada
                 permalink = updated.get("permalink") or existing.get("permalink")
                 if permalink:
                     short_post = shorten_isgd(str(permalink), sess=sess, timeout=args.timeout)
-                    set_url_post_acortada(wcapi, pid, short_post)
+                    set_url_post_acortada(wcapi, pid, short_post, existing_product=updated)
 
                 summary_actualizados.append({"nombre": pd.nombre, "id": pid, "cambios": cambios})
+                jsonl_write({**rec_base, "action": "updated", "product_id": pid, "changes": cambios, "url_post_acortada": pd.url_post_acortada})
             else:
                 summary_ignorados.append({"nombre": pd.nombre, "id": pid})
+                jsonl_write({**rec_base, "action": "ignored", "product_id": pid})
 
             continue
 
@@ -1060,9 +1127,10 @@ def scrape_and_import(args: argparse.Namespace) -> None:
         permalink = created.get("permalink")
         if permalink:
             short_post = shorten_isgd(str(permalink), sess=sess, timeout=args.timeout)
-            set_url_post_acortada(wcapi, pid, short_post)
+            set_url_post_acortada(wcapi, pid, short_post, existing_product=created)
 
         summary_creados.append({"nombre": pd.nombre, "id": pid})
+        jsonl_write({**rec_base, "action": "created", "product_id": pid, "url_post_acortada": pd.url_post_acortada})
 
     # obsoletos
     if (not args.dry_run) and args.force_delete_obsoletes and (args.max_products == 0):
@@ -1108,6 +1176,12 @@ def scrape_and_import(args: argparse.Namespace) -> None:
 
     print("============================================================")
 
+    if jsonl_fp:
+        try:
+            jsonl_fp.close()
+        except Exception:
+            pass
+
 
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="PowerPlanetOnline -> WooCommerce (móviles más vendidos)")
@@ -1128,6 +1202,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--force-delete-obsoletes", dest="force_delete_obsoletes", action="store_true")
 
     ap.add_argument("--affiliate-query", default="", help="querystring para afiliado (opcional)")
+    ap.add_argument("--jsonl", default="", help="ruta de salida JSONL (1 objeto por línea) para depuración/monitorización")
 
     return ap
 
