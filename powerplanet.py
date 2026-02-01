@@ -225,6 +225,7 @@ def strip_variant_from_name(name: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+
 def truncate_after_network(name: str) -> str:
     """Trunca el nombre cuando aparezca '4G' o '5G' y elimina todo lo posterior."""
     if not name:
@@ -234,7 +235,6 @@ def truncate_after_network(name: str) -> str:
     if not m:
         return s
     return s[: m.start()].strip()
-
 
 
 def format_product_title(name: str) -> str:
