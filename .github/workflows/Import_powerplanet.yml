@@ -1,4 +1,4 @@
-name: Import PowerPlanet (Woo + ACF)
+name: Import PowerPlanet
 
 on:
   workflow_dispatch: {}
