@@ -1,70 +1,38 @@
 name: Import PowerPlanet (Woo + ACF)
 
 on:
-  workflow_dispatch:
-    inputs:
-      force:
-        description: "Forzar ejecución aunque no sean las 16:00 en Madrid"
-        required: false
-        default: "false"
+  workflow_dispatch: {}
   schedule:
     # GitHub cron es UTC. Para clavar 16:00 Europe/Madrid todo el año (CET/CEST),
     # lanzamos a 14:00 UTC y filtramos por hora local.
     - cron: "0 14 * * *"
 
-concurrency:
-  group: import-powerplanet
-  cancel-in-progress: false
-
 jobs:
-  import_powerplanet:
+  import:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (same interpreter)
+      - name: Install dependencies
         run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install requests beautifulsoup4 pillow woocommerce
-          python -c "import PIL; from PIL import Image; print('Pillow OK:', PIL.__version__)"
+          pip install --upgrade pip
+          pip install requests beautifulsoup4 pillow woocommerce
 
-      - name: Decide if run
-        id: decide
-        env:
-          FORCE: ${{ github.event.inputs.force }}
+      - name: Gate to 16:00 Europe/Madrid
         run: |
-          set -euo pipefail
-          echo "event_name=${{ github.event_name }}"
-          echo "force=${FORCE:-false}"
-
-          # Manual -> por defecto ejecuta (o si force=true)
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${FORCE:-false}" = "true" ] || [ "${FORCE:-false}" = "false" ]; then
-              echo "run_import=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+          HOUR=$(TZ=Europe/Madrid date +%H)
+          echo "Madrid hour: $HOUR"
+          if [ "$HOUR" != "16" ]; then
+            echo "Not 16:00 in Madrid. Skipping."
+            exit 0
           fi
 
-          # Schedule -> solo si son las 16:00 en Madrid
-          MADRID_HOUR=$(TZ=Europe/Madrid date +%H)
-          echo "madrid_hour=$MADRID_HOUR"
-          if [ "$MADRID_HOUR" = "16" ]; then
-            echo "run_import=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_import=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run PowerPlanet importer
-        if: steps.decide.outputs.run_import == 'true'
+      - name: Run importer
         env:
           WP_URL: ${{ secrets.WP_URL }}
           WP_KEY: ${{ secrets.WP_KEY }}
@@ -72,14 +40,5 @@ jobs:
           WP_USER: ${{ secrets.WP_USER }}
           WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
         run: |
-          set -euo pipefail
-          python powerplanet.py --max-products 0 --sleep 0.7 --timeout 25 --jsonl powerplanet.jsonl
+          python powerplanet.py --max-products 0 --sleep 0.7 --timeout 25 --status publish --jsonl powerplanet.jsonl
 
-      - name: Upload JSONL artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: powerplanet-jsonl
-          path: powerplanet.jsonl
-          if-no-files-found: ignore
-          retention-days: 14
