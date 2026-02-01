@@ -23,6 +23,56 @@ FUENTE_POWERPLANET = "powerplanetonline"
 ENVIO_POWERPLANET = "España"
 CUPON_DEFAULT = "OFERTA PROMO"
 
+# Palabras que indican NO NUEVO (se deben saltar)
+FORBIDDEN_CONDITION_KEYWORDS = [
+    "desprecintado",
+    "reacondicionado",
+    "reacondicionados",
+    "reacondicionada",
+    "reacondicionadas",
+]
+
+# Colores / acabados frecuentes (para limpiar del nombre)
+COLOR_PHRASES = {
+    # 1 palabra
+    "negro",
+    "blanco",
+    "azul",
+    "rojo",
+    "verde",
+    "amarillo",
+    "morado",
+    "violeta",
+    "gris",
+    "plata",
+    "dorado",
+    "oro",
+    "rosa",
+    "naranja",
+    "cian",
+    "turquesa",
+    "beige",
+    "crema",
+    "grafito",
+    "lavanda",
+    "marfil",
+    "champan",
+    "neblina",
+    "midnight",
+    "starlight",
+    "titanio",
+    "titanium",
+    "marron",
+    "obsidiana",
+    "grafito",
+    # 2 palabras
+    "titanio negro",
+    "titanio gris",
+    "titanio blanco",
+    "space gray",
+    "space grey",
+}
+
 
 @dataclass
 class Offer:
@@ -53,7 +103,7 @@ def now_iso() -> str:
 
 
 def normalize_text(s: str) -> str:
-    s = s.strip().lower()
+    s = (s or "").strip().lower()
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s
@@ -99,8 +149,8 @@ def smart_title_token(token: str) -> str:
 
 
 def format_product_title(name: str) -> str:
-    name = re.sub(r"\s+", " ", name.strip())
-    return " ".join(smart_title_token(t) for t in name.split(" "))
+    name = re.sub(r"\s+", " ", (name or "").strip())
+    return " ".join(smart_title_token(t) for t in name.split(" ") if t)
 
 
 def safe_float(v) -> Optional[float]:
@@ -146,10 +196,20 @@ def parse_int_from(s: str, pattern: str) -> Optional[int]:
         return None
 
 
+def to_int_eur(v: Optional[float]) -> Optional[int]:
+    """Convierte precio float a entero (quita decimales sin redondeo)."""
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
 def format_price(v: Optional[float]) -> str:
     if v is None:
         return "N/A"
-    return f"{v:.2f}€"
+    return f"{int(v)}€"
 
 
 def extract_ram_rom_from_name(name: str) -> Tuple[str, str]:
@@ -170,11 +230,16 @@ def extract_ram_rom_from_name(name: str) -> Tuple[str, str]:
     return "", ""
 
 
+def is_forbidden_condition(name: str) -> bool:
+    n = normalize_text(name)
+    return any(k in n for k in FORBIDDEN_CONDITION_KEYWORDS)
+
+
 def strip_variant_from_name(name: str) -> str:
-    """
-    Quita del nombre:
-      - el bloque '8GB/256GB' (cualquier separador común)
-      - y un color final típico (Negro, Azul, etc.)
+    """Limpia el nombre:
+    - quita RAM/ROM del tipo 8GB/256GB
+    - quita sufijos tipo "- Versión Internacional"
+    - quita color/acabado al final (1-3 palabras)
     """
     if not name:
         return name
@@ -190,33 +255,45 @@ def strip_variant_from_name(name: str) -> str:
     )
     s = re.sub(r"\s+", " ", s).strip()
 
-    # Quitar color final
-    colors = {
-        "negro", "blanco", "azul", "rojo", "verde", "amarillo", "morado", "violeta",
-        "gris", "plata", "dorado", "oro", "rosa", "naranja", "cian", "turquesa",
-        "beige", "crema", "grafito", "lavanda", "marfil", "champan", "neblina",
-        "midnight", "starlight", "titanio", "titanium",
-    }
-    parts = s.split(" ")
-    if parts and normalize_text(parts[-1]) in colors:
-        s = " ".join(parts[:-1]).strip()
+    # Quitar sufijos por guion (internacional/global, etc.)
+    s = re.sub(r"\s*[\-–—]\s*versi[oó]n\s+internacional\b.*$", "", s, flags=re.IGNORECASE).strip()
+
+    # Limpiar paréntesis y puntuación simple
+    s = s.replace("(", " ").replace(")", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[\,\.;:]+$", "", s).strip()
+
+    # Quitar color/acabado final (hasta 3 palabras)
+    tokens = s.split(" ")
+
+    def norm_phrase(words: List[str]) -> str:
+        return normalize_text(" ".join(w.strip(" ,.;:") for w in words if w))
+
+    removed = False
+    for k in (3, 2, 1):
+        if len(tokens) >= k:
+            phrase = norm_phrase(tokens[-k:])
+            if phrase in COLOR_PHRASES:
+                tokens = tokens[:-k]
+                removed = True
+                break
+
+    if removed:
+        s = " ".join(tokens).strip()
 
     return re.sub(r"\s+", " ", s).strip()
 
 
 def compute_version(clean_name: str) -> str:
-    # PowerPlanet es tienda España: Global (salvo iPhone => IOS)
+    # PowerPlanet es tienda España: Versión Global (salvo iPhone => IOS)
     n = normalize_text(clean_name)
     if "iphone" in n:
         return "IOS"
-    return "Global"
+    return "Versión Global"
 
 
 def build_affiliate_url(url: str, affiliate_query: str) -> str:
-    """
-    Añade parámetros de afiliado (string tipo 'utm_source=x&utm_campaign=y').
-    Si affiliate_query está vacío, devuelve url sin cambios.
-    """
+    """Añade parámetros de afiliado (string tipo 'utm_source=x&utm_campaign=y')."""
     if not affiliate_query.strip():
         return url
 
@@ -297,7 +374,8 @@ def extract_listing_candidates(list_html: str) -> List[Offer]:
 
             anchors = container.find_all("a", href=True)
             prod_anchors = [
-                a for a in anchors
+                a
+                for a in anchors
                 if a["href"].startswith("/es/")
                 and "moviles-mas-vendidos" not in a["href"]
                 and len(a.get_text(" ", strip=True)) >= 6
@@ -381,9 +459,7 @@ def parse_prices_from_dom(soup: BeautifulSoup) -> Tuple[Optional[float], Optiona
 
 
 def parse_detail_fields(detail_html: str) -> Dict[str, Optional[object]]:
-    """
-    IMPORTANTE: usamos retailPrice/basePrice (con IVA), NO alternative* (sin IVA).
-    """
+    """IMPORTANTE: usamos retailPrice/basePrice (con IVA), NO alternative* (sin IVA)."""
     soup = BeautifulSoup(detail_html, "html.parser")
     out: Dict[str, Optional[object]] = {}
 
@@ -439,6 +515,11 @@ def classify_offer(name: str, category_path: Optional[str], capacity: Optional[s
     n = normalize_text(name)
     cat = normalize_text(category_path) if category_path else ""
 
+    # ❌ Saltar desprecintados/reacondicionados
+    if is_forbidden_condition(name):
+        return False, "EXCLUDE:condition_not_new"
+
+    # ❌ No móviles
     if " ipad" in f" {n} ":
         return False, "EXCLUDE:name_contains_ipad"
     if " tab" in f" {n} " or "tablet" in n:
@@ -449,6 +530,7 @@ def classify_offer(name: str, category_path: Optional[str], capacity: Optional[s
     if cat and any(k in cat for k in ["tablet", "wearable", "smartwatch", "smartband"]):
         return False, "EXCLUDE:category_tablet_or_wearable"
 
+    # ✅ Móvil si tiene GB
     if capacity and "gb" in normalize_text(capacity):
         return True, "INCLUDE:capacity_has_gb"
 
@@ -493,7 +575,7 @@ def print_required_logs(
     print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
     print(f"15) URL acortada con mi afiliado: {url_oferta}")
     print(f"16) Enviado desde: {enviado_desde}")
-    print(f"17) Encolado para comparar con base de datos...")
+    print("17) Encolado para comparar con base de datos...")
     print("-" * 60)
 
 
@@ -545,6 +627,11 @@ def scrape_dryrun(
                         pass
 
             raw_name = offer.name
+
+            # ❌ saltar desprecintados / reacondicionados
+            if is_forbidden_condition(raw_name):
+                continue
+
             ram, rom = extract_ram_rom_from_name(raw_name)
             if ram and rom:
                 offer.capacity = f"{ram}/{rom}"
@@ -553,18 +640,23 @@ def scrape_dryrun(
             if not is_mobile:
                 continue
 
+            # Nombre limpio (sin RAM/ROM, sin color, etc.)
             nombre_limpio = format_product_title(strip_variant_from_name(raw_name))
+
             ver = compute_version(nombre_limpio)
             fuente = FUENTE_POWERPLANET
 
-            p_act = format_price(offer.price_eur)
-            p_reg = format_price(offer.pvr_eur)
+            # Precios sin decimales
+            precio_actual_int = to_int_eur(offer.price_eur)
+            precio_original_int = to_int_eur(offer.pvr_eur)
+            p_act = f"{precio_actual_int}€" if precio_actual_int is not None else "N/A"
+            p_reg = f"{precio_original_int}€" if precio_original_int is not None else "N/A"
 
             cup = CUPON_DEFAULT
             img_src = (offer.image_large or "").strip()
 
-            url_imp = offer.url
-            url_exp = offer.url
+            enlace_de_compra_importado = offer.url
+            url_oferta_sin_acortar = offer.url
 
             url_importada_sin_afiliado = offer.url
             url_sin_acortar_con_mi_afiliado = build_affiliate_url(offer.url, affiliate_query)
@@ -585,8 +677,8 @@ def scrape_dryrun(
                 p_reg=p_reg,
                 cup=cup,
                 img_src=img_src,
-                url_imp=url_imp,
-                url_exp=url_exp,
+                url_imp=enlace_de_compra_importado,
+                url_exp=url_oferta_sin_acortar,
                 url_importada_sin_afiliado=url_importada_sin_afiliado,
                 url_sin_acortar_con_mi_afiliado=url_sin_acortar_con_mi_afiliado,
                 url_oferta=url_oferta,
@@ -595,12 +687,29 @@ def scrape_dryrun(
 
             if jsonl_file:
                 payload = asdict(offer)
-                payload["_affiliate_query"] = affiliate_query
-                payload["_nombre_limpio"] = nombre_limpio
-                payload["_ram"] = ram
-                payload["_rom"] = rom
-                payload["_version"] = ver
-                payload["_url_oferta_isgd"] = url_oferta
+
+                # --- CAMPOS ACF (lo que necesitas para WP/ACF) ---
+                payload.update(
+                    {
+                        "memoria": ram,
+                        "capacidad": rom,
+                        "version": ver,
+                        "fuente": fuente,
+                        "precio_actual": precio_actual_int,
+                        "precio_original": precio_original_int,
+                        "codigo_de_descuento": cup,
+                        "imagen_producto": img_src,
+                        "enlace_de_compra_importado": enlace_de_compra_importado,
+                        "url_oferta_sin_acortar": url_oferta_sin_acortar,
+                        "url_importada_sin_afiliado": url_importada_sin_afiliado,
+                        "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
+                        "url_oferta": url_oferta,
+                        "enviado_desde": enviado_desde,
+                        "_nombre_limpio": nombre_limpio,
+                        "_affiliate_query": affiliate_query,
+                    }
+                )
+
                 jsonl_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     finally:
