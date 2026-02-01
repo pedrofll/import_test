@@ -1,1005 +1,590 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#
-# PowerPlanetOnline -> WooCommerce + ACF (importador)
-#
-# DRY-RUN (sin credenciales):
-#   python3 powerplanet.py --max-products 0 --sleep 0.7 --timeout 25 --jsonl powerplanet_dryrun.jsonl
-#
-# IMPORT REAL (con credenciales + subida de imágenes):
-#   python3 powerplanet.py --wp-url https://ofertasdemoviles.com \
-#     --wc-key XXX --wc-secret YYY \
-#     --wp-user admin --wp-app-pass "xxxx xxxx xxxx xxxx"
-#
-# o usando ENV (recomendado en CI):
-#   export WP_URL="https://ofertasdemoviles.com"
-#   export WP_KEY="ck_..."
-#   export WP_SECRET="cs_..."
-#   python3 powerplanet.py
-#
-# Requisitos:
-#   pip install requests beautifulsoup4 pillow
-#   pip install python-woocommerce   # opcional (si se quiere wcapi)
-#
 
 import argparse
-import html
+import hashlib
 import json
 import os
 import re
+import sys
 import time
-import unicodedata
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
-from io import BytesIO
-from typing import List, Optional, Tuple
-from urllib.parse import urljoin
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+LIST_URL = "https://www.powerplanetonline.com/es/moviles-mas-vendidos"
+IMPORT_SOURCE = "powerplanetonline"
+IMPORTADO_DE = "https://www.powerplanetonline.com/"
+CUPON_DEFAULT = "OFERTA PROMO"  # fijo
+
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+COLOR_ENDINGS = [
+    "xiaomi",  # (por si viniese como "Xiaomi /" raro, no afecta normalmente)
+    "negro", "blanco", "azul", "rojo", "verde", "gris", "plata", "dorado",
+    "titanio", "amarillo", "marron", "marrón", "violeta", "lila", "rosa",
+    "obsidiana", "neblina", "oscuro", "claro",
+    "azul neblina", "azul oscuro", "titanio negro",
+]
+
+# --------------------------
+# RAM iPhone
+# --------------------------
+IPHONE_RAM_MAP = [
+    ("iphone 17 pro max", "12GB"),
+    ("iphone 17 pro", "12GB"),
+    ("iphone 17 air", "12GB"),
+    ("iphone air", "12GB"),
+    ("iphone 17", "8GB"),
+    ("iphone 16 pro max", "8GB"),
+    ("iphone 16 pro", "8GB"),
+    ("iphone 16 plus", "8GB"),
+    ("iphone 16e", "8GB"),
+    ("iphone 16", "8GB"),
+    ("iphone 15 pro max", "8GB"),
+    ("iphone 15 pro", "8GB"),
+    ("iphone 15 plus", "6GB"),
+    ("iphone 15", "6GB"),
+    ("iphone 14 pro max", "6GB"),
+    ("iphone 14 pro", "6GB"),
+    ("iphone 14 plus", "6GB"),
+    ("iphone 14", "6GB"),
+    ("iphone 13 pro max", "6GB"),
+    ("iphone 13 pro", "6GB"),
+    ("iphone 13 mini", "4GB"),
+    ("iphone 13", "4GB"),
+    ("iphone 12 pro max", "6GB"),
+    ("iphone 12 pro", "6GB"),
+    ("iphone 12 mini", "4GB"),
+    ("iphone 12", "4GB"),
+]
 
 
-# --- CONFIGURACIÓN WORDPRESS ---
-# (Pedido: incluir wcapi con ENV WP_URL/WP_KEY/WP_SECRET)
-try:
-    from woocommerce import API  # type: ignore
+# ============================================================
+# DATA
+# ============================================================
 
-    wcapi = API(
-        url=os.environ.get("WP_URL", ""),
-        consumer_key=os.environ.get("WP_KEY", ""),
-        consumer_secret=os.environ.get("WP_SECRET", ""),
-        version="wc/v3",
-        timeout=60,
-    )
-except Exception:
-    API = None  # type: ignore
-    wcapi = None  # type: ignore
-
-
-# =========================
-# CONFIG FUENTE (PowerPlanet)
-# =========================
-BASE_URL = "https://www.powerplanetonline.com"
-LIST_URL = f"{BASE_URL}/es/moviles-mas-vendidos"
-
-FUENTE_RAW = "powerplanetonline"          # log interno
-FUENTE_ACF = "Powerplanetonline"         # ACF "fuente"
-IMPORTADO_DE = BASE_URL                  # ACF "importado_de"
-ENVIO = "España"                         # ACF "enviado_desde"
-CUPON_DEFAULT = "OFERTA: PROMO."         # ACF "codigo_de_descuento"
-
-TAG_IMPORT = "__importado_de_powerplanetonline"  # tag interno para obsoletos
-
-
-# =========================
-# MODELO
-# =========================
 @dataclass
 class Offer:
-    source: str
-    name_raw: str
-    name_clean: str
-    url: str
-
-    ram: str
-    rom: str
+    nombre: str
+    memoria: str
+    capacidad: str
     version: str
-
-    price_eur: Optional[float] = None
-    pvr_eur: Optional[float] = None
-
-    image_url: Optional[str] = None
-    ref: Optional[str] = None
-    product_id: Optional[int] = None
-
-    scraped_at: str = ""
-
-
-# =========================
-# UTILS
-# =========================
-def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    fuente: str
+    precio_actual: int
+    precio_original: int
+    codigo_de_descuento: str
+    url_imagen: str
+    enlace_de_compra_importado: str
+    enlace_expandido: str
+    url_importada_sin_afiliado: str
+    url_sin_acortar_con_mi_afiliado: str
+    url_oferta_sin_acortar: str
+    url_oferta: str  # (acortada)
+    enviado_desde: str
 
 
-def today_ddmmyyyy() -> str:
-    return datetime.now().strftime("%d/%m/%Y")
+# ============================================================
+# HELPERS
+# ============================================================
 
+def norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
 
-def normalize_text(s: str) -> str:
-    s = s.strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+def strip_accents_basic(s: str) -> str:
+    s = s.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+    s = s.replace("Á", "a").replace("É", "e").replace("Í", "i").replace("Ó", "o").replace("Ú", "u")
+    s = s.replace("ñ", "n").replace("Ñ", "n")
     return s
 
+def is_iphone(name: str) -> bool:
+    return "iphone" in norm(name)
 
-def smart_title_token(token: str) -> str:
-    # Primera letra mayúscula; si mezcla letras/números, letras en mayúscula (14T, 5G).
-    if not token:
-        return token
-    raw = token.strip()
-    parts = re.split(r"(-)", raw)  # preserva guiones
-    out_parts = []
+def iphone_ram_for(name: str) -> Optional[str]:
+    n = norm(strip_accents_basic(name))
+    for key, ram in IPHONE_RAM_MAP:
+        if key in n:
+            return ram
+    return None
 
-    for p in parts:
-        if p == "-":
-            out_parts.append(p)
-            continue
-
-        low = p.lower()
-        if low == "iphone":
-            out_parts.append("iPhone")
-            continue
-        if low == "ipad":
-            out_parts.append("iPad")
-            continue
-        if low == "ios":
-            out_parts.append("iOS")
-            continue
-
-        has_digit = any(ch.isdigit() for ch in p)
-        has_alpha = any(ch.isalpha() for ch in p)
-
-        if has_digit and has_alpha:
-            out_parts.append("".join(ch.upper() if ch.isalpha() else ch for ch in p))
-        else:
-            out_parts.append(p[:1].upper() + p[1:].lower())
-
-    return "".join(out_parts)
-
-
-def format_product_title(name: str) -> str:
-    name = re.sub(r"\s+", " ", name.strip())
-    return " ".join(smart_title_token(t) for t in name.split(" "))
-
-
-def safe_float(v) -> Optional[float]:
-    if v is None:
+def parse_price_number(txt: str) -> Optional[float]:
+    if not txt:
         return None
+    t = txt.strip()
+    t = re.sub(r"[^\d\.,\-]", "", t)
+    if not t:
+        return None
+    if "." in t and "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    else:
+        if "," in t:
+            t = t.replace(",", ".")
     try:
-        return float(v)
+        return float(t)
     except Exception:
         return None
 
+def price_to_int_trunc(p: Optional[float]) -> int:
+    if p is None:
+        return 0
+    try:
+        return int(p)  # truncar decimales
+    except Exception:
+        return 0
 
-def format_price_eur(v: Optional[float]) -> str:
-    if v is None:
-        return "N/A"
-    return f"{v:.2f}€"
-
-
-def extract_ram_rom_from_name(name: str) -> Tuple[str, str]:
-    # Soporta: 8GB/256GB | 8GB 256GB | 8gb-256gb | 4b128gb
-    if not name:
-        return "", ""
-    n = name.replace("\xa0", " ")
-
-    patterns = [
-        r"\b(\d+)\s*(GB|TB)\s*[/\+\-\|]\s*(\d+)\s*(GB|TB)\b",
-        r"\b(\d+)\s*(GB|TB)\s+(\d+)\s*(GB|TB)\b",
-        r"\b(\d+)\s*gb\s*(\d+)\s*gb\b",
-        r"\b(\d+)\s*b\s*(\d+)\s*(gb|tb)\b",
-    ]
-
-    for pat in patterns:
-        m = re.search(pat, n, flags=re.IGNORECASE)
-        if not m:
-            continue
-        if pat == patterns[2]:
-            return f"{m.group(1)}GB", f"{m.group(2)}GB"
-        if pat == patterns[3]:
-            return f"{m.group(1)}GB", f"{m.group(2)}{m.group(3).upper()}"
-        return f"{m.group(1)}{m.group(2).upper()}", f"{m.group(3)}{m.group(4).upper()}"
-
-    return "", ""
-
-
-def strip_variant_from_name(name: str) -> str:
-    # Quita RAM/ROM y color final.
-    if not name:
-        return name
-
-    s = re.sub(r"\s+", " ", name.strip())
-
-    s = re.sub(
-        r"\s*\b\d+\s*(?:GB|TB)\s*[/\+\-\| ]\s*\d+\s*(?:GB|TB)\b\s*",
-        " ",
-        s,
-        flags=re.IGNORECASE,
-    )
-    s = re.sub(r"\s*\b\d+\s*b\s*\d+\s*(?:gb|tb)\b\s*", " ", s, flags=re.IGNORECASE)
+def clean_name_remove_ram_rom(name: str) -> str:
+    s = re.sub(r"\s*[/\-–—]\s*", " ", (name or "").strip())
+    s = re.sub(r"\b\d+\s*GB\s*/\s*\d+\s*(GB|TB)\b", "", s, flags=re.I)
+    s = re.sub(r"\b\d+\s*GB\s+\d+\s*(GB|TB)\b", "", s, flags=re.I)
+    s = re.sub(r"\b\d+\s*b\s*\d+\s*(GB|TB)\b", "", s, flags=re.I)
+    s = re.sub(r"\bversi[oó]n\s+internacional\b", "", s, flags=re.I)
     s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-    colors = {
-        "negro", "blanco", "azul", "rojo", "verde", "amarillo", "morado", "violeta",
-        "gris", "plata", "dorado", "oro", "rosa", "naranja", "cian", "turquesa",
-        "beige", "crema", "grafito", "lavanda", "marfil", "champan", "neblina",
-        "midnight", "starlight", "titanio", "titanium", "marron",
-    }
-    parts = s.split(" ")
-    if parts and normalize_text(parts[-1]) in colors:
-        s = " ".join(parts[:-1]).strip()
+def drop_trailing_color(name: str) -> str:
+    s = re.sub(r"\s+", " ", (name or "").strip()).strip(" /-–—|,")
+    low = norm(strip_accents_basic(s))
 
-    return re.sub(r"\s+", " ", s).strip()
+    for c in sorted(COLOR_ENDINGS, key=lambda x: len(x.split()), reverse=True):
+        c_low = norm(strip_accents_basic(c))
+        if low.endswith(" " + c_low):
+            s = s[: max(0, len(s) - len(c))].strip()
+            low = norm(strip_accents_basic(s))
+            break
+
+    s = s.strip(" /-–—|,")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def extract_storage_from_url_or_name(url: str, name: str) -> Optional[str]:
+    u = (url or "").lower()
+    m = re.search(r"-(\d+)(gb|tb)(?:-|$)", u)
+    if m:
+        return f"{m.group(1)}{m.group(2).upper()}"
+
+    candidates = re.findall(r"(\d+)\s*(GB|TB)\b", name or "", flags=re.I)
+    if candidates:
+        num, unit = candidates[-1]
+        return f"{num}{unit.upper()}"
+    return None
+
+def extract_ram_rom_from_slug(url: str) -> Tuple[Optional[str], Optional[str]]:
+    slug = (urlparse(url).path or "").lower().replace("_", "-")
+
+    m = re.search(r"-(\d{1,2})gb[-/]?(\d{2,4})(gb|tb)\b", slug)
+    if m:
+        return f"{m.group(1)}GB", f"{m.group(2)}{m.group(3).upper()}"
+
+    m = re.search(r"-(\d{1,2})b(\d{2,4})(gb|tb)\b", slug)
+    if m:
+        return f"{m.group(1)}GB", f"{m.group(2)}{m.group(3).upper()}"
+
+    return None, None
+
+def extract_ram_rom_from_name(name: str) -> Tuple[Optional[str], Optional[str]]:
+    s = (name or "")
+
+    m = re.search(r"\b(\d{1,2})\s*(GB)\s*/\s*(\d{2,4})\s*(GB|TB)\b", s, flags=re.I)
+    if m:
+        return f"{m.group(1)}GB", f"{m.group(3)}{m.group(4).upper()}"
+
+    m = re.search(r"\b(\d{1,2})\s*(GB)\s+(\d{2,4})\s*(GB|TB)\b", s, flags=re.I)
+    if m:
+        return f"{m.group(1)}GB", f"{m.group(3)}{m.group(4).upper()}"
+
+    m = re.search(r"\b(\d{1,2})\s*b\s*(\d{2,4})\s*(GB|TB)\b", s, flags=re.I)
+    if m:
+        return f"{m.group(1)}GB", f"{m.group(2)}{m.group(3).upper()}"
+
+    return None, None
+
+def valid_ram(ram: Optional[str]) -> bool:
+    if not ram:
+        return False
+    m = re.match(r"^(\d+)\s*GB$", ram.strip(), flags=re.I)
+    if not m:
+        return False
+    v = int(m.group(1))
+    return 1 <= v <= 32
+
+def valid_cap(cap: Optional[str]) -> bool:
+    if not cap:
+        return False
+    m = re.match(r"^(\d+)\s*(GB|TB)$", cap.strip(), flags=re.I)
+    if not m:
+        return False
+    v = int(m.group(1))
+    unit = m.group(2).upper()
+    if unit == "TB":
+        return 1 <= v <= 8
+    return 8 <= v <= 4096
 
 
-def compute_version(clean_name: str) -> str:
-    if "iphone" in normalize_text(clean_name):
-        return "IOS"
-    return "Global"
+# ============================================================
+# LISTING PAGE (NO SALIR DE LIST_URL)
+# ============================================================
+
+PRICE_EUR_RE = re.compile(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?|\d+(?:,\d{2})?)\s*€")
+
+def extract_prices_from_card(card) -> Tuple[Optional[float], Optional[float]]:
+    if not card:
+        return None, None
+
+    txt = card.get_text(" ", strip=True)
+    hits = PRICE_EUR_RE.findall(txt)
+    floats = []
+    for h in hits:
+        f = parse_price_number(h)
+        if f is not None and f > 0:
+            floats.append(f)
+
+    if not floats:
+        for meta in card.select('meta[itemprop="price"][content]'):
+            f = parse_price_number(meta.get("content", ""))
+            if f is not None and f > 0:
+                floats.append(f)
+
+    if not floats:
+        return None, None
+
+    if len(floats) == 1:
+        return floats[0], floats[0]
+
+    return min(floats), max(floats)
+
+def extract_name_url_img_from_anchor(a, base_url: str) -> Tuple[str, str, str]:
+    href = a.get("href", "")
+    url = urljoin(base_url, href)
+
+    name = (a.get("title") or "").strip()
+    if not name:
+        name = a.get_text(" ", strip=True)
+    if not name:
+        img = a.find("img")
+        if img and img.get("alt"):
+            name = img.get("alt", "").strip()
+
+    img_url = ""
+    img = a.find("img")
+    if img:
+        img_url = (img.get("src") or img.get("data-src") or "").strip()
+        if img_url:
+            img_url = urljoin(base_url, img_url)
+
+    return name.strip(), url, img_url
+
+def iter_product_anchors_from_listing(soup: BeautifulSoup, base_url: str):
+    for a in soup.select("a[href^='/es/']"):
+        href = a.get("href", "")
+        if not href or href == "/es/" or "moviles-mas-vendidos" in href:
+            continue
+
+        if not a.find("img"):
+            continue
+
+        card = None
+        cur = a
+        for _ in range(7):
+            if cur is None:
+                break
+            try:
+                t = cur.get_text(" ", strip=True)
+            except Exception:
+                t = ""
+            tl = t.lower()
+            if "€" in t and ("gb" in tl or "tb" in tl or "iphone" in tl):
+                card = cur
+                break
+            cur = cur.parent
+
+        if card is None:
+            continue
+
+        yield a, card
+
+def extract_offers_from_listing(html: str, base_url: str, max_products: int = 0) -> List[Dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    seen_urls = set()
+    items = []
+
+    for a, card in iter_product_anchors_from_listing(soup, base_url):
+        name, url, img_url = extract_name_url_img_from_anchor(a, base_url)
+        p_now, p_old = extract_prices_from_card(card)
+
+        if not name or not url:
+            continue
+        if p_now is None:
+            continue
+        if url in seen_urls:
+            continue
+
+        seen_urls.add(url)
+        items.append({"raw_name": name, "url": url, "img": img_url, "p_now": p_now, "p_old": p_old})
+
+        if max_products and len(items) >= max_products:
+            break
+
+    return items
 
 
-def get_brand_from_name(clean_name: str) -> str:
-    if normalize_text(clean_name).startswith("iphone"):
-        return "Apple"
-    return clean_name.split(" ")[0] if clean_name else ""
+# ============================================================
+# SHORTENER
+# ============================================================
 
-
-def shorten_isgd(sess: requests.Session, url: str, timeout: int = 15, retries: int = 5) -> str:
-    endpoint = "https://is.gd/create.php"
-    for attempt in range(1, retries + 1):
-        try:
-            r = sess.get(endpoint, params={"format": "simple", "url": url}, timeout=timeout)
-            r.raise_for_status()
-            short = (r.text or "").strip()
-            if short.startswith("http"):
-                return short
-        except Exception:
-            time.sleep(1.2 * attempt)
+def isgd_shorten(url: str, timeout: int = 20) -> str:
+    try:
+        api = "https://is.gd/create.php"
+        r = requests.get(api, params={"format": "simple", "url": url}, timeout=timeout, headers={"User-Agent": UA})
+        r.raise_for_status()
+        short = (r.text or "").strip()
+        if short.startswith("http"):
+            return short
+    except Exception:
+        pass
     return url
 
 
-def make_session() -> requests.Session:
-    sess = requests.Session()
-    sess.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0 Safari/537.36"
-            ),
-            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        }
-    )
-    return sess
+# ============================================================
+# BUILD OFFER
+# ============================================================
 
+def build_offer_from_listing_item(item: Dict, timeout: int) -> Optional[Offer]:
+    raw_name = item["raw_name"].strip()
+    url = item["url"].strip()
+    img = (item.get("img") or "").strip()
 
-def fetch_html(sess: requests.Session, url: str, timeout: int = 25, retries: int = 3) -> str:
-    last_err = None
-    for attempt in range(1, retries + 1):
-        try:
-            r = sess.get(url, timeout=timeout)
-            r.raise_for_status()
-            r.encoding = r.apparent_encoding or "utf-8"
-            return r.text
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(1.2 * attempt)
-            else:
-                raise RuntimeError(f"Error descargando {url}: {last_err}") from last_err
-    raise RuntimeError(f"Error descargando {url}: {last_err}")
+    p_now_f = item.get("p_now")
+    p_old_f = item.get("p_old") if item.get("p_old") is not None else p_now_f
 
+    precio_actual = price_to_int_trunc(p_now_f)
+    precio_original = price_to_int_trunc(p_old_f)
 
-# =========================
-# SCRAPING
-# =========================
-def extract_listing_product_urls(list_html: str) -> List[str]:
-    soup = BeautifulSoup(list_html, "html.parser")
+    if precio_original and precio_actual and precio_original < precio_actual:
+        precio_original = precio_actual
 
-    urls: List[str] = []
-    for a in soup.select("a[href^='/es/']"):
-        href = a.get("href", "")
-        if not href:
-            continue
-        if "moviles-mas-vendidos" in href:
-            continue
-        if href.count("/") < 2:
-            continue
-        urls.append(urljoin(BASE_URL, href))
+    ram, cap = extract_ram_rom_from_slug(url)
+    if not (valid_ram(ram) and valid_cap(cap)):
+        ram2, cap2 = extract_ram_rom_from_name(raw_name)
+        if valid_ram(ram2) and valid_cap(cap2):
+            ram, cap = ram2, cap2
 
-    # dedupe manteniendo orden
-    seen = set()
-    out = []
-    for u in urls:
-        if u in seen:
-            continue
-        seen.add(u)
-        out.append(u)
-    return out
+    if is_iphone(raw_name):
+        cap_i = extract_storage_from_url_or_name(url, raw_name)
+        if cap_i and valid_cap(cap_i):
+            cap = cap_i
+        ram_i = iphone_ram_for(raw_name)
+        if ram_i:
+            ram = ram_i
 
+    if not is_iphone(raw_name):
+        if not (valid_ram(ram) and valid_cap(cap)):
+            return None
+    else:
+        if not valid_cap(cap):
+            return None
+        if not valid_ram(ram):
+            return None
 
-def parse_product_data_json(soup: BeautifulSoup) -> Optional[dict]:
-    form = soup.find("form", attrs={"data-product": True})
-    if not form:
-        return None
-    raw = form.get("data-product")
-    if not raw:
-        return None
-    raw = html.unescape(raw).strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        return None
+    name_clean = clean_name_remove_ram_rom(raw_name)
+    if is_iphone(name_clean):
+        name_clean = re.sub(r"\b\d+\s*(GB|TB)\b", "", name_clean, flags=re.I).strip()
 
+    name_clean = drop_trailing_color(name_clean)
+    name_clean = re.sub(r"\s+", " ", name_clean).strip()
 
-def parse_prices_from_dom(soup: BeautifulSoup) -> Tuple[Optional[float], Optional[float]]:
-    price = pvr = None
-    ip = soup.select_one(".data-all-prices .product-price .integerPrice")
-    if ip and ip.get("content"):
-        price = safe_float(ip.get("content"))
-    ib = soup.select_one(".data-all-prices .product-basePrice .integerPrice")
-    if ib and ib.get("content"):
-        pvr = safe_float(ib.get("content"))
-    return price, pvr
+    enlace_de_compra_importado = url
+    enlace_expandido = url
+    url_importada_sin_afiliado = url
+    url_sin_acortar_con_mi_afiliado = url
+    url_oferta_sin_acortar = url
+    url_oferta = isgd_shorten(url, timeout=timeout)
 
-
-def parse_detail(detail_html: str, url: str) -> Offer:
-    soup = BeautifulSoup(detail_html, "html.parser")
-
-    data = parse_product_data_json(soup) or {}
-    defn = data.get("definition") or {}
-
-    name_raw = (data.get("name") or "").strip()
-    if not name_raw:
-        h1 = soup.select_one("h1.real-title, h1.h1, h1")
-        name_raw = h1.get_text(" ", strip=True) if h1 else ""
-
-    # precios CON IVA (retailPrice/basePrice)
-    price = safe_float(defn.get("retailPrice")) or safe_float(defn.get("price")) or safe_float(defn.get("productRetailPrice"))
-    pvr = safe_float(defn.get("basePrice")) or safe_float(defn.get("productBasePrice"))
-
-    if price is None or pvr is None:
-        dom_price, dom_pvr = parse_prices_from_dom(soup)
-        if price is None:
-            price = dom_price
-        if pvr is None:
-            pvr = dom_pvr
-
-    # imagen
-    img = soup.select_one("img#main-image") or soup.select_one("img.mainImageTag")
-    image_url = None
-    if img:
-        image_url = (img.get("data-original") or img.get("src") or "").strip() or None
-
-    # RAM/ROM
-    ram, rom = extract_ram_rom_from_name(name_raw)
-    if not (ram and rom):
-        ram, rom = extract_ram_rom_from_name(url)
-
-    name_clean = format_product_title(strip_variant_from_name(name_raw))
-    version = compute_version(name_clean)
-
-    # validación móvil (sin RAM/ROM => ignorar)
-    if not (ram and rom):
-        raise ValueError("Producto sin RAM/ROM detectables (no se importa)")
+    enviado_desde = "España"
 
     return Offer(
-        source=FUENTE_RAW,
-        name_raw=name_raw,
-        name_clean=name_clean,
-        url=url,
-        ram=ram,
-        rom=rom,
-        version=version,
-        price_eur=price,
-        pvr_eur=pvr,
-        image_url=image_url,
-        ref=str(data.get("sku")) if data.get("sku") else None,
-        product_id=int(data.get("id")) if data.get("id") is not None else None,
-        scraped_at=now_iso(),
+        nombre=name_clean,
+        memoria=ram,
+        capacidad=cap,
+        version="Global",
+        fuente=IMPORT_SOURCE,
+        precio_actual=precio_actual,
+        precio_original=precio_original,
+        codigo_de_descuento=CUPON_DEFAULT,
+        url_imagen=img,
+        enlace_de_compra_importado=enlace_de_compra_importado,
+        enlace_expandido=enlace_expandido,
+        url_importada_sin_afiliado=url_importada_sin_afiliado,
+        url_sin_acortar_con_mi_afiliado=url_sin_acortar_con_mi_afiliado,
+        url_oferta_sin_acortar=url_oferta_sin_acortar,
+        url_oferta=url_oferta,
+        enviado_desde=enviado_desde,
     )
 
 
-# =========================
-# WP / WC CLIENT
-# =========================
-class WPClient:
-    """
-    Cliente WooCommerce/WordPress:
-      - WooCommerce: usa python-woocommerce (wcapi) si está disponible y hay credenciales.
-        Si no, usa requests + basic auth.
-      - WP media upload: siempre por requests + application password.
-    """
+# ============================================================
+# ACF/META (LO QUE SE GUARDARIA)
+# ============================================================
 
-    def __init__(
-        self,
-        wp_url: str,
-        wc_key: str,
-        wc_secret: str,
-        wp_user: Optional[str] = None,
-        wp_app_password: Optional[str] = None,
-        timeout: int = 30,
-        wcapi_instance=None,
-    ):
-        self.wp_url = wp_url.rstrip("/")
-        self.timeout = timeout
+def meta_kv(key: str, value) -> dict:
+    return {"key": key, "value": value if value is not None else ""}
 
-        self.wcapi = wcapi_instance
-        if self.wcapi and not (wp_url and wc_key and wc_secret):
-            self.wcapi = None
+def build_acf_meta(offer: Offer) -> List[dict]:
+    return [
+        meta_kv("memoria", offer.memoria),
+        meta_kv("capacidad", offer.capacidad),
+        meta_kv("version", offer.version),
+        meta_kv("fuente", offer.fuente),
 
-        self.sess_wc = requests.Session()
-        self.sess_wc.auth = (wc_key, wc_secret)
-        self.sess_wc.headers.update({"User-Agent": "PowerPlanetImporter/1.0"})
+        meta_kv("precio_actual", str(int(offer.precio_actual or 0))),
+        meta_kv("precio_original", str(int(offer.precio_original or 0))),
 
-        self.sess_wp = requests.Session()
-        if wp_user and wp_app_password:
-            self.sess_wp.auth = (wp_user, wp_app_password)
-        self.sess_wp.headers.update({"User-Agent": "PowerPlanetImporter/1.0"})
+        meta_kv("codigo_de_descuento", offer.codigo_de_descuento),
 
-    def _url(self, path: str) -> str:
-        if not path.startswith("/"):
-            path = "/" + path
-        return self.wp_url + "/wp-json" + path
+        meta_kv("importado_de", IMPORTADO_DE),
 
-    def wc(self, method: str, path: str, params=None, payload=None, retries: int = 3):
-        # Preferir wcapi si está disponible (pedido por el usuario)
-        if self.wcapi is not None:
-            ep = path.lstrip("/")
-            last_err = None
-            for attempt in range(1, retries + 1):
-                try:
-                    if method.upper() == "GET":
-                        resp = self.wcapi.get(ep, params=params)
-                    elif method.upper() == "POST":
-                        resp = self.wcapi.post(ep, data=payload)
-                    elif method.upper() == "PUT":
-                        resp = self.wcapi.put(ep, data=payload)
-                    elif method.upper() == "DELETE":
-                        resp = self.wcapi.delete(ep, params=params)
-                    else:
-                        raise ValueError(f"Método no soportado: {method}")
+        meta_kv("enlace_de_compra_importado", offer.enlace_de_compra_importado),
+        meta_kv("url_importada_sin_afiliado", offer.url_importada_sin_afiliado),
+        meta_kv("url_sin_acortar_con_mi_afiliado", offer.url_sin_acortar_con_mi_afiliado),
+        meta_kv("url_oferta_sin_acortar", offer.url_oferta_sin_acortar),
+        meta_kv("url_oferta", offer.url_oferta),
 
-                    if getattr(resp, "status_code", 0) >= 400:
-                        raise RuntimeError(f"WCAPI {method} {ep} -> {resp.status_code} {getattr(resp, 'text', '')[:400]}")
-                    return resp.json()
-                except Exception as e:
-                    last_err = e
-                    if attempt < retries:
-                        time.sleep(1.2 * attempt)
-                    else:
-                        raise last_err
+        meta_kv("url_imagen", offer.url_imagen),
 
-        # Fallback: requests directo
-        url = self._url("/wc/v3" + (path if path.startswith("/") else "/" + path))
-        last_err = None
-        for attempt in range(1, retries + 1):
-            try:
-                r = self.sess_wc.request(method, url, params=params, json=payload, timeout=self.timeout)
-                if r.status_code >= 400:
-                    raise RuntimeError(f"WC {method} {path} -> {r.status_code} {r.text[:400]}")
-                return r.json()
-            except Exception as e:
-                last_err = e
-                if attempt < retries:
-                    time.sleep(1.2 * attempt)
-                else:
-                    raise last_err
+        meta_kv("enviado_desde", offer.enviado_desde),
+        meta_kv("enviado_desde_tg", "🇪🇸 España" if offer.enviado_desde == "España" else ""),
+    ]
 
-    def wp_media_upload(self, filename: str, content: bytes, mime: str = "image/jpeg", retries: int = 3) -> dict:
-        url = self._url("/wp/v2/media")
-        headers = {"Content-Disposition": f'attachment; filename="{filename}"', "Content-Type": mime}
-        last_err = None
-        for attempt in range(1, retries + 1):
-            try:
-                r = self.sess_wp.post(url, headers=headers, data=content, timeout=self.timeout)
-                if r.status_code >= 400:
-                    raise RuntimeError(f"WP media upload -> {r.status_code} {r.text[:400]}")
-                return r.json()
-            except Exception as e:
-                last_err = e
-                if attempt < retries:
-                    time.sleep(1.2 * attempt)
-                else:
-                    raise RuntimeError(f"Error subiendo media: {last_err}") from last_err
+def log_acf_meta(meta: List[dict]) -> None:
+    print("🧾 ACF/META que se guardaría:", flush=True)
+    for m in meta:
+        k = m.get("key", "")
+        v = m.get("value", "")
+        print(f"   - {k}: {v}", flush=True)
 
 
-def wc_get_all(client: WPClient, path: str, params: dict, per_page: int = 100, max_pages: int = 50) -> List[dict]:
-    out: List[dict] = []
-    page = 1
-    while page <= max_pages:
-        p = dict(params or {})
-        p.update({"per_page": per_page, "page": page})
-        items = client.wc("GET", path, params=p)
-        if not items:
-            break
-        out.extend(items)
-        if len(items) < per_page:
-            break
-        page += 1
-    return out
+# ============================================================
+# SCRAPE (SOLO LIST_URL)
+# ============================================================
 
+def scrape(args) -> List[Offer]:
+    print(f"📌 PowerPlanet: Escaneando SOLO: {LIST_URL}", flush=True)
 
-def meta_get(product: dict, key: str) -> Optional[str]:
-    for m in product.get("meta_data", []) or []:
-        if m.get("key") == key:
-            v = m.get("value")
-            return str(v) if v is not None else None
-    return None
+    s = requests.Session()
+    s.headers.update({"User-Agent": UA})
 
-
-def meta_set(meta_list: List[dict], key: str, value) -> None:
-    meta_list.append({"key": key, "value": value})
-
-
-# =========================
-# IMAGENES (download + resize 600x600 + upload)
-# =========================
-def download_image(sess: requests.Session, url: str, timeout: int = 25) -> bytes:
-    r = sess.get(url, timeout=timeout, stream=True)
+    r = s.get(LIST_URL, timeout=args.timeout)
     r.raise_for_status()
-    return r.content
 
+    items = extract_offers_from_listing(r.text, base_url=LIST_URL, max_products=args.max_products)
+    print(f"📌 PowerPlanet: Productos detectados = {len(items)}", flush=True)
 
-def resize_to_600_square(img_bytes: bytes) -> bytes:
-    im = Image.open(BytesIO(img_bytes)).convert("RGB")
-    w, h = im.size
-    side = min(w, h)
-    left = (w - side) // 2
-    top = (h - side) // 2
-    im = im.crop((left, top, left + side, top + side)).resize((600, 600), Image.LANCZOS)
-    out = BytesIO()
-    im.save(out, format="JPEG", quality=90, optimize=True)
-    return out.getvalue()
+    offers: List[Offer] = []
 
-
-def upload_image_with_retry(
-    client: WPClient,
-    sess: requests.Session,
-    image_url: str,
-    filename_base: str,
-    attempts: int = 10,
-    sleep_s: int = 15,
-) -> Tuple[Optional[int], Optional[str]]:
-    last_err = None
-    for i in range(1, attempts + 1):
-        try:
-            raw = download_image(sess, image_url)
-            resized = resize_to_600_square(raw)
-            media = client.wp_media_upload(filename=f"{filename_base}.jpg", content=resized, mime="image/jpeg", retries=3)
-            mid = int(media.get("id")) if media.get("id") is not None else None
-            src = media.get("source_url")
-            return mid, src
-        except Exception as e:
-            last_err = e
-            if i < attempts:
-                time.sleep(sleep_s)
-            else:
-                print(f"⚠️  Imagen NO subida tras {attempts} intentos: {image_url} -> {last_err}")
-                return None, None
-    return None, None
-
-
-# =========================
-# WC TAXONOMIAS (cat/subcat/tag)
-# =========================
-def wc_get_or_create_category(client: WPClient, name: str, parent: int = 0) -> dict:
-    existing = client.wc("GET", "/products/categories", params={"search": name, "per_page": 100})
-    for t in existing or []:
-        if normalize_text(t.get("name", "")) == normalize_text(name) and int(t.get("parent") or 0) == int(parent):
-            return t
-    return client.wc("POST", "/products/categories", payload={"name": name, "parent": parent})
-
-
-def wc_get_or_create_tag(client: WPClient, name: str) -> dict:
-    existing = client.wc("GET", "/products/tags", params={"search": name, "per_page": 100})
-    for t in existing or []:
-        if normalize_text(t.get("name", "")) == normalize_text(name):
-            return t
-    return client.wc("POST", "/products/tags", payload={"name": name})
-
-
-def wc_set_category_image(client: WPClient, cat_id: int, media_id: int) -> dict:
-    return client.wc("PUT", f"/products/categories/{cat_id}", payload={"image": {"id": media_id}})
-
-
-# =========================
-# WC PRODUCTOS
-# =========================
-def compute_sku(offer: Offer) -> str:
-    pid = offer.product_id if offer.product_id is not None else abs(hash(offer.url)) % 10_000_000
-    ram = offer.ram.replace(" ", "")
-    rom = offer.rom.replace(" ", "")
-    return f"ppo-{pid}-{ram}-{rom}".lower()
-
-
-def find_existing_product(client: WPClient, offer: Offer, sku: str) -> Optional[dict]:
-    by_sku = client.wc("GET", "/products", params={"sku": sku, "per_page": 10})
-    if by_sku:
-        return by_sku[0]
-
-    search = client.wc("GET", "/products", params={"search": offer.name_clean, "per_page": 100})
-    for p in search or []:
-        if (meta_get(p, "memoria") or "").strip() != offer.ram:
+    for it in items:
+        offer = build_offer_from_listing_item(it, timeout=args.timeout)
+        if not offer:
+            print(f"⚠️  Saltado ({it.get('url')}): Producto sin RAM/ROM detectables (no se importa)", flush=True)
             continue
-        if (meta_get(p, "capacidad") or "").strip() != offer.rom:
-            continue
-        if normalize_text(meta_get(p, "fuente") or "") != normalize_text(FUENTE_ACF):
-            continue
-        if normalize_text(meta_get(p, "importado_de") or "") != normalize_text(IMPORTADO_DE):
-            continue
-        return p
-    return None
+
+        offers.append(offer)
+
+        print(f"Detectado {offer.nombre}", flush=True)
+        print(f"1) Nombre: {offer.nombre}", flush=True)
+        print(f"2) Memoria: {offer.memoria}", flush=True)
+        print(f"3) Capacidad: {offer.capacidad}", flush=True)
+        print(f"4) Versión: {offer.version}", flush=True)
+        print(f"5) Fuente: {offer.fuente}", flush=True)
+        print(f"6) Precio actual: {offer.precio_actual}€", flush=True)
+        print(f"7) Precio original: {offer.precio_original}€", flush=True)
+        print(f"8) Código de descuento: {offer.codigo_de_descuento}", flush=True)
+        print(f"9) Version: {offer.version}", flush=True)
+        print(f"10) URL Imagen: {offer.url_imagen}", flush=True)
+        print(f"11) Enlace Importado: {offer.enlace_de_compra_importado}", flush=True)
+        print(f"12) Enlace Expandido: {offer.enlace_expandido}", flush=True)
+        print(f"13) URL importada sin afiliado: {offer.url_importada_sin_afiliado}", flush=True)
+        print(f"14) URL sin acortar con mi afiliado: {offer.url_sin_acortar_con_mi_afiliado}", flush=True)
+        print(f"15) URL acortada con mi afiliado: {offer.url_oferta}", flush=True)
+        print(f"16) Enviado desde: {offer.enviado_desde}", flush=True)
+
+        if args.log_acf:
+            meta = build_acf_meta(offer)
+            log_acf_meta(meta)
+
+        print("------------------------------------------------------------", flush=True)
+
+        if args.sleep:
+            time.sleep(args.sleep)
+
+    return offers
 
 
-def build_product_payload(
-    offer: Offer,
-    sku: str,
-    external_url: str,
-    cat_id: int,
-    tag_id: int,
-    featured_media_id: Optional[int],
-    imagen_producto_url: Optional[str],
-    status: str,
-) -> dict:
-    meta: List[dict] = []
-    meta_set(meta, "memoria", offer.ram)
-    meta_set(meta, "capacidad", offer.rom)
-    meta_set(meta, "precio_actual", f"{offer.price_eur:.2f}" if offer.price_eur is not None else "")
-    meta_set(meta, "precio_origial", f"{offer.pvr_eur:.2f}" if offer.pvr_eur is not None else "")
-    meta_set(meta, "codigo_de_descuento", CUPON_DEFAULT)
-    meta_set(meta, "fuente", FUENTE_ACF)
-    meta_set(meta, "imagen_producto", imagen_producto_url or (offer.image_url or ""))
-    meta_set(meta, "enviado_desde", ENVIO)
-    meta_set(meta, "enviado_desde_tg", "🇪🇸 España")
-    meta_set(meta, "version", offer.version)
-    meta_set(meta, "importado_de", IMPORTADO_DE)
-    meta_set(meta, "fecha", today_ddmmyyyy())
-    meta_set(meta, "url_importada_sin_afiliado", offer.url)
-    meta_set(meta, "url_sin_acortar_con_mi_afiliado", offer.url)
-    meta_set(meta, "url_oferta", external_url)
+# ============================================================
+# JSONL
+# ============================================================
 
-    payload = {
-        "name": offer.name_clean,
-        "type": "external",
-        "status": status,
-        "sku": sku,
-        "external_url": external_url,
-        "button_text": "Ver oferta",
-        "categories": [{"id": cat_id}],
-        "tags": [{"id": tag_id}],
-        "meta_data": meta,
-    }
-    if offer.pvr_eur is not None:
-        payload["regular_price"] = f"{offer.pvr_eur:.2f}"
-    if offer.price_eur is not None:
-        payload["sale_price"] = f"{offer.price_eur:.2f}"
-    if featured_media_id:
-        payload["images"] = [{"id": featured_media_id}]
-    return payload
+def write_jsonl(path: str, offers: List[Offer]) -> None:
+    if not path:
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        for o in offers:
+            f.write(json.dumps(asdict(o), ensure_ascii=False) + "\n")
 
 
-def shorten_wp_permalink(sess: requests.Session, permalink: str) -> str:
-    return shorten_isgd(sess, permalink)
+# ============================================================
+# CLI
+# ============================================================
 
-
-def create_or_update_with_retry(
-    client: WPClient,
-    method: str,
-    path: str,
-    payload: dict,
-    attempts: int = 10,
-    sleep_s: int = 15,
-) -> dict:
-    last_err = None
-    for i in range(1, attempts + 1):
-        try:
-            return client.wc(method, path, payload=payload, retries=3)
-        except Exception as e:
-            last_err = e
-            if i < attempts:
-                time.sleep(sleep_s)
-            else:
-                raise RuntimeError(f"WC {method} {path} falló tras {attempts} intentos: {last_err}") from last_err
-    raise RuntimeError(f"WC {method} {path} falló: {last_err}")
-
-
-def delete_product(client: WPClient, product_id: int, force: bool = False) -> None:
-    client.wc("DELETE", f"/products/{product_id}", params={"force": "true" if force else "false"})
-
-
-# =========================
-# LOGS
-# =========================
-def log_product(offer: Offer, url_oferta: str, url_post_short: str) -> None:
-    print(f"Detectado {offer.name_clean}")
-    print(f"1) Nombre: {offer.name_clean}")
-    print(f"2) Memoria: {offer.ram}")
-    print(f"3) Capacidad: {offer.rom}")
-    print(f"4) Versión: {offer.version}")
-    print(f"5) Fuente: {FUENTE_RAW}")
-    print(f"6) Precio actual: {format_price_eur(offer.price_eur)}")
-    print(f"7) Precio original: {format_price_eur(offer.pvr_eur)}")
-    print(f"8) Código de descuento: {CUPON_DEFAULT}")
-    print(f"9) Version: {offer.version}")
-    print(f"10) URL Imagen: {offer.image_url or ''}")
-    print(f"11) Enlace Importado: {offer.url}")
-    print(f"12) Enlace Expandido: {offer.url}")
-    print(f"13) URL importada sin afiliado: {offer.url}")
-    print(f"14) URL sin acortar con mi afiliado: {offer.url}")
-    print(f"15) URL acortada con mi afiliado: {url_oferta}")
-    print(f"16) Enviado desde: {ENVIO}")
-    print(f"17) URL post acortada: {url_post_short}")
-    print(f"18) Encolado para comparar con base de datos...")
-    print("-" * 60)
-
-
-def jsonl_write(fp, offer: Offer, sku: str, url_oferta: str, wp_id: Optional[int] = None, wp_permalink: Optional[str] = None, wp_short: Optional[str] = None):
-    row = asdict(offer)
-    row.update(
-        {
-            "sku": sku,
-            "url_oferta": url_oferta,
-            "wp_id": wp_id,
-            "wp_permalink": wp_permalink,
-            "wp_short": wp_short,
-            "acf": {
-                "memoria": offer.ram,
-                "capacidad": offer.rom,
-                "precio_actual": f"{offer.price_eur:.2f}" if offer.price_eur is not None else "",
-                "precio_origial": f"{offer.pvr_eur:.2f}" if offer.pvr_eur is not None else "",
-                "codigo_de_descuento": CUPON_DEFAULT,
-                "fuente": FUENTE_ACF,
-                "imagen_producto": offer.image_url or "",
-                "enviado_desde": ENVIO,
-                "enviado_desde_tg": "🇪🇸 España",
-                "version": offer.version,
-                "importado_de": IMPORTADO_DE,
-                "fecha": today_ddmmyyyy(),
-            },
-        }
-    )
-    fp.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
-# =========================
-# MAIN IMPORT
-# =========================
-def run_import(
-    wp_url: Optional[str],
-    wc_key: Optional[str],
-    wc_secret: Optional[str],
-    wp_user: Optional[str],
-    wp_app_pass: Optional[str],
-    max_products: int,
-    sleep_seconds: float,
-    timeout: int,
-    dry_run: bool,
-    status: str,
-    force_delete_obsoletes: bool,
-    jsonl_path: Optional[str],
-):
-    sess = make_session()
-
-    list_html = fetch_html(sess, LIST_URL, timeout=timeout)
-    product_urls = extract_listing_product_urls(list_html)
-    if max_products > 0:
-        product_urls = product_urls[:max_products]
-
-    print(f"📌 PowerPlanet: URLs detectadas = {len(product_urls)}")
-
-    fp_jsonl = open(jsonl_path, "w", encoding="utf-8") if jsonl_path else None
-
-    client = None
-    tag_id = None
-
-    if not dry_run:
-        if not (wp_url and wc_key and wc_secret):
-            raise SystemExit("Faltan credenciales. Para dry-run: omite credenciales o usa --dry-run.")
-
-        wcapi_inst = wcapi if (wcapi is not None and os.environ.get("WP_URL") and os.environ.get("WP_KEY") and os.environ.get("WP_SECRET")) else None
-
-        client = WPClient(
-            wp_url=wp_url,
-            wc_key=wc_key,
-            wc_secret=wc_secret,
-            wp_user=wp_user,
-            wp_app_password=wp_app_pass,
-            timeout=timeout,
-            wcapi_instance=wcapi_inst,
-        )
-        tag = wc_get_or_create_tag(client, TAG_IMPORT)
-        tag_id = int(tag["id"])
-
-    summary_creados = []
-    summary_eliminados = []
-    summary_actualizados = []
-    summary_ignorados = []
-
-    current_skus = set()
-
-    try:
-        for url in product_urls:
-            if sleep_seconds > 0:
-                time.sleep(sleep_seconds)
-
-            try:
-                detail_html = fetch_html(sess, url, timeout=timeout)
-                offer = parse_detail(detail_html, url)
-            except Exception as e:
-                print(f"⚠️  Saltado ({url}): {e}")
-                continue
-
-            sku = compute_sku(offer)
-            current_skus.add(sku)
-            url_oferta = shorten_isgd(sess, offer.url)
-
-            if dry_run:
-                log_product(offer, url_oferta=url_oferta, url_post_short="")
-                if fp_jsonl:
-                    jsonl_write(fp_jsonl, offer, sku=sku, url_oferta=url_oferta)
-                continue
-
-            assert client is not None and tag_id is not None
-
-            brand = format_product_title(get_brand_from_name(offer.name_clean))
-            cat_parent = wc_get_or_create_category(client, brand, parent=0)
-            parent_id = int(cat_parent["id"])
-
-            subcat_name = offer.name_clean
-            cat_sub = wc_get_or_create_category(client, subcat_name, parent=parent_id)
-            sub_id = int(cat_sub["id"])
-
-            featured_media_id = None
-            imagen_producto_url = None
-            existing_img = (cat_sub.get("image") or {}).get("id")
-            existing_src = (cat_sub.get("image") or {}).get("src")
-
-            if existing_img:
-                featured_media_id = int(existing_img)
-                imagen_producto_url = existing_src
-            else:
-                if offer.image_url and (wp_user and wp_app_pass):
-                    filename_base = re.sub(r"[^a-z0-9\-]+", "-", normalize_text(subcat_name)).strip("-")[:80] or "powerplanet"
-                    mid, src = upload_image_with_retry(client, sess, offer.image_url, filename_base, attempts=10, sleep_s=15)
-                    if mid:
-                        wc_set_category_image(client, sub_id, mid)
-                        featured_media_id = mid
-                        imagen_producto_url = src
-
-            existing = find_existing_product(client, offer, sku)
-            payload = build_product_payload(offer, sku, url_oferta, sub_id, tag_id, featured_media_id, imagen_producto_url, status)
-
-            wp_post_short = ""
-            wp_permalink = ""
-            wp_id = None
-
-            if existing:
-                pid = int(existing["id"])
-                wp_id = pid
-                cambios = []
-
-                old_pact = meta_get(existing, "precio_actual") or ""
-                old_pvr = meta_get(existing, "precio_origial") or ""
-                new_pact = payload["meta_data"][2]["value"]
-                new_pvr = payload["meta_data"][3]["value"]
-
-                if str(old_pact).strip() != str(new_pact).strip():
-                    cambios.append(f"precio_actual: {old_pact} -> {new_pact}")
-                if str(old_pvr).strip() != str(new_pvr).strip():
-                    cambios.append(f"precio_origial: {old_pvr} -> {new_pvr}")
-
-                needs_image = not (existing.get("images") or []) and featured_media_id is not None
-
-                if not cambios and not needs_image:
-                    summary_ignorados.append({"nombre": offer.name_clean, "id": pid})
-                else:
-                    if needs_image and featured_media_id:
-                        payload["images"] = [{"id": featured_media_id}]
-                        cambios.append("imagen: asignada")
-
-                    create_or_update_with_retry(client, "PUT", f"/products/{pid}", payload)
-                    summary_actualizados.append({"nombre": offer.name_clean, "id": pid, "cambios": cambios})
-
-                try:
-                    prod = client.wc("GET", f"/products/{pid}")
-                    wp_permalink = prod.get("permalink") or ""
-                    if wp_permalink:
-                        wp_post_short = shorten_wp_permalink(sess, wp_permalink)
-                        client.wc("PUT", f"/products/{pid}", payload={"meta_data": [{"key": "url_post_acortada", "value": wp_post_short}]})
-                except Exception:
-                    wp_permalink = ""
-                    wp_post_short = ""
-
-                log_product(offer, url_oferta=url_oferta, url_post_short=wp_post_short)
-
-            else:
-                created = create_or_update_with_retry(client, "POST", "/products", payload)
-                pid = int(created["id"])
-                wp_id = pid
-                summary_creados.append({"nombre": offer.name_clean, "id": pid})
-
-                try:
-                    wp_permalink = created.get("permalink") or ""
-                    if not wp_permalink:
-                        prod = client.wc("GET", f"/products/{pid}")
-                        wp_permalink = prod.get("permalink") or ""
-                    if wp_permalink:
-                        wp_post_short = shorten_wp_permalink(sess, wp_permalink)
-                        client.wc("PUT", f"/products/{pid}", payload={"meta_data": [{"key": "url_post_acortada", "value": wp_post_short}]})
-                except Exception:
-                    wp_permalink = ""
-                    wp_post_short = ""
-
-                log_product(offer, url_oferta=url_oferta, url_post_short=wp_post_short)
-
-            if fp_jsonl:
-                jsonl_write(fp_jsonl, offer, sku=sku, url_oferta=url_oferta, wp_id=wp_id, wp_permalink=wp_permalink, wp_short=wp_post_short)
-
-        if not dry_run and client is not None and tag_id is not None:
-            imported_products = wc_get_all(client, "/products", params={"tag": tag_id}, per_page=100, max_pages=50)
-            for p in imported_products:
-                pid = int(p["id"])
-                sku = (p.get("sku") or "").strip().lower()
-                if sku and sku not in current_skus:
-                    try:
-                        delete_product(client, pid, force=force_delete_obsoletes)
-                        summary_eliminados.append({"nombre": p.get("name", ""), "id": pid})
-                    except Exception as e:
-                        print(f"⚠️  No se pudo eliminar obsoleto ID {pid}: {e}")
-
-        hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print("\n============================================================")
-        print(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt})")
-        print("============================================================")
-        print(f"\na) ARTICULOS CREADOS: {len(summary_creados)}")
-        for item in summary_creados:
-            print(f"- {item['nombre']} (ID: {item['id']})")
-        print(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}")
-        for item in summary_eliminados:
-            print(f"- {item['nombre']} (ID: {item['id']})")
-        print(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}")
-        for item in summary_actualizados:
-            print(f"- {item['nombre']} (ID: {item['id']}): {', '.join(item['cambios'])}")
-        print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
-        for item in summary_ignorados:
-            print(f"- {item['nombre']} (ID: {item['id']})")
-        print("============================================================")
-
-    finally:
-        if fp_jsonl:
-            fp_jsonl.close()
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="PowerPlanetOnline -> WooCommerce + ACF (importador)")
-
-    ap.add_argument("--wp-url", default=os.environ.get("WP_URL", ""), help="URL base de WordPress, ej: https://ofertasdemoviles.com")
-    ap.add_argument("--wc-key", default=os.environ.get("WP_KEY", ""), help="WooCommerce consumer key")
-    ap.add_argument("--wc-secret", default=os.environ.get("WP_SECRET", ""), help="WooCommerce consumer secret")
-
-    ap.add_argument("--wp-user", default=os.environ.get("WP_USER", ""), help="WP user (Application Password) para subir imágenes")
-    ap.add_argument("--wp-app-pass", default=os.environ.get("WP_APP_PASS", ""), help="WP Application Password para subir imágenes")
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--wp-url", default=os.getenv("WP_URL", "").strip(), help="URL base de WordPress")
+    ap.add_argument("--wc-key", default=os.getenv("WP_KEY", "").strip(), help="WooCommerce Consumer Key")
+    ap.add_argument("--wc-secret", default=os.getenv("WP_SECRET", "").strip(), help="WooCommerce Consumer Secret")
+    ap.add_argument("--wp-user", default=os.getenv("WP_USER", "").strip(), help="Usuario WP (media upload)")
+    ap.add_argument("--wp-app-pass", default=os.getenv("WP_APP_PASS", "").strip(), help="App Password WP (media upload)")
 
     ap.add_argument("--max-products", type=int, default=0, help="0 = sin límite")
-    ap.add_argument("--sleep", type=float, default=0.7, help="segundos entre requests")
-    ap.add_argument("--timeout", type=int, default=25, help="timeout por request (seg)")
-    ap.add_argument("--dry-run", action="store_true", help="solo logs, NO crea/actualiza")
-    ap.add_argument("--jsonl", default="", help="ruta para guardar JSONL (opcional)")
-    ap.add_argument("--status", default="publish", choices=["publish", "draft", "pending", "private"], help="estado del producto")
-    ap.add_argument("--force-delete-obsoletes", action="store_true", help="borrado definitivo de obsoletos (force=true). Si no, van a papelera.")
+    ap.add_argument("--sleep", type=float, default=0.7)
+    ap.add_argument("--timeout", type=int, default=25)
+
+    ap.add_argument("--no-import", action="store_true", help="NO crea/actualiza productos. Solo logs + jsonl.")
+    ap.add_argument("--status", default="publish", choices=["publish", "draft", "pending", "private"])
+
+    ap.add_argument("--jsonl", default="", help="Ruta JSONL de salida (ej: powerplanet.jsonl)")
+    ap.add_argument("--log-acf", action="store_true", help="Loguea todas las claves ACF/meta por producto")
 
     args = ap.parse_args()
+    # por defecto: si no especificas --log-acf, lo activamos siempre (lo pediste explícito)
+    if "--log-acf" not in sys.argv:
+        args.log_acf = True
+    return args
 
-    have_creds = bool(args.wp_url.strip() and args.wc_key.strip() and args.wc_secret.strip())
-    dry_run = bool(args.dry_run or not have_creds)
 
-    run_import(
-        wp_url=args.wp_url.strip() or None,
-        wc_key=args.wc_key.strip() or None,
-        wc_secret=args.wc_secret.strip() or None,
-        wp_user=args.wp_user.strip() or None,
-        wp_app_pass=args.wp_app_pass.strip() or None,
-        max_products=args.max_products,
-        sleep_seconds=args.sleep,
-        timeout=args.timeout,
-        dry_run=dry_run,
-        status=args.status,
-        force_delete_obsoletes=args.force_delete_obsoletes,
-        jsonl_path=args.jsonl.strip() or None,
-    )
+def main():
+    args = parse_args()
+
+    offers = scrape(args)
+
+    if args.jsonl:
+        write_jsonl(args.jsonl, offers)
+
+    if args.no_import:
+        print("🧪 MODO --no-import: NO se crean productos. Solo scraping + logs ACF/meta + jsonl (si aplica).", flush=True)
+        return
+
+    # Si algún día vuelves a activar import, aquí pondrías el cliente WC.
+    print("❌ Import deshabilitado en este archivo. Usa --no-import (por defecto recomendado).", flush=True)
+    sys.exit(2)
 
 
 if __name__ == "__main__":
