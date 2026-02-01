@@ -361,39 +361,116 @@ def is_iphone(name: str) -> bool:
 
 
 def extract_product_urls(list_html: str) -> List[str]:
-    """Extrae URLs de producto desde el listado (sin navegar a otras categorías)."""
+    """Extrae SOLO URLs de fichas de producto desde el listado.
+
+    Problema original: la página incluye muchísimos enlaces del menú/otros módulos
+    (accesorios, audio, tablets, etc.). Si cogemos todos los <a href="/es/...">,
+    se cuelan URLs que NO son móviles.
+
+    Solución:
+    1) Solo aceptar enlaces que estén dentro de un "card" con precio (contiene € o PVR).
+    2) Solo aceptar slugs con token de capacidad (128gb/256gb/512gb/1tb...) para asegurar
+       que es una ficha de dispositivo (y permite iPhone + mapping RAM).
+    3) Bloquear keywords típicas no-móvil (accesorios, smartwatch, tablet, etc.).
+    """
     soup = BeautifulSoup(list_html, "html.parser")
     urls: List[str] = []
 
-    # En cards, suele haber links /es/<slug>
+    # Slugs NO móviles (menú/otras secciones)
+    blocked = {
+        "smartphone-accesorios",
+        "smartphones",
+        "accesorios",
+        "smartwatch",
+        "smartband",
+        "pulsera",
+        "auriculares",
+        "altavoces",
+        "barras-de-sonido",
+        "televisores",
+        "videojuegos",
+        "volantes",
+        "gafas-realidad",
+        "mini-pc",
+        "tablets",
+        "tablet",
+        "ipad",
+        "e-readers",
+        "libros-electronicos",
+        "cargadores",
+        "cables",
+        "fundas",
+        "power-bank",
+        "cepillos",
+        "afeitadoras",
+        "aspiradoras",
+        "comederos",
+        "bebederos",
+        "aire-acondicionado",
+        "receptor-tv",
+        "android-tv",
+        "video-camaras",
+        "gimbal",
+    }
+
+    def in_price_card(a_tag) -> bool:
+        node = a_tag
+        for _ in range(6):
+            if node is None:
+                break
+            try:
+                t = node.get_text(" ", strip=True)
+            except Exception:
+                t = ""
+            if "€" in t or "PVR" in t or "P.V.R" in t:
+                return True
+            node = getattr(node, "parent", None)
+        return False
+
+    # capacidad en slug (128gb, 256gb, 512gb, 1tb, etc.)
+    cap_re = re.compile(r"(?:\b\d{2,4}gb\b|\b\d{1}tb\b)", re.I)
+
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
+        href = (a.get("href") or "").strip()
         if not href.startswith("/es/"):
             continue
         if href.startswith("/es/moviles-mas-vendidos"):
             continue
-        # descarta paginación o categorías
-        if href in ["/es/smartphones", "/es/telefonos-moviles"]:
+
+        # Solo /es/<slug> (sin subrutas)
+        slug = href[len("/es/") :]
+        if not slug or "/" in slug:
             continue
+
+        slug_l = slug.lower()
+        if any(b in slug_l for b in blocked):
+            continue
+
+        # Si no hay capacidad en slug -> probablemente no es ficha de dispositivo
+        if not cap_re.search(slug_l):
+            continue
+
+        # Refuerzo: el texto del enlace de un producto suele incluir RAM/ROM o capacidad.
+        # Evita capturar enlaces de cabecera/secciones que pueden colarse en el mismo HTML.
+        txt = (a.get_text(" ", strip=True) or "")
+        txt_l = txt.lower()
+        has_mem_in_text = bool(
+            re.search(r"\b\d{1,2}\s*gb\s*/\s*\d{2,4}\s*gb\b", txt_l)
+            or re.search(r"\b\d{2,4}\s*(?:gb|tb)\b", txt_l)
+        )
+        if not has_mem_in_text:
+            # iPhone: a veces el RAM no aparece, pero la capacidad sí en el slug
+            if not (slug_l.startswith("iphone-") or "iphone" in txt_l):
+                continue
+
+        # Debe estar en un card con precio (evita menú/footers)
+        if not in_price_card(a):
+            continue
+
         url = urljoin(BASE_URL, href)
         if url not in urls:
             urls.append(url)
 
-    # filtra para quedarnos con páginas de producto (heurística: suelen tener guiones y no acabar en /es/xxxx general)
-    def looks_like_product(u: str) -> bool:
-        path = urlparse(u).path
-        if path.count("-") < 2:
-            return False
-        # evita categorías muy genéricas
-        bad = [
-            "/es/moviles-", "/es/smartphones", "/es/telefonos-moviles", "/es/moviles",
-            "/es/oukitel", "/es/ulefone", "/es/realme", "/es/samsung", "/es/xiaomi",
-        ]
-        if any(path.startswith(b) for b in bad):
-            return False
-        return True
-
-    urls = [u for u in urls if looks_like_product(u)]
     return urls
 
 
