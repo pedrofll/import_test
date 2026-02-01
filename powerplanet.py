@@ -613,6 +613,7 @@ def main() -> None:
     ap.add_argument("--max-products", type=int, default=0, help="0 = sin límite")
     ap.add_argument("--sleep", type=float, default=0.7, help="segundos entre requests")
     ap.add_argument("--timeout", type=int, default=25, help="timeout por request (seg)")
+    ap.add_argument("--status", default="publish", help="compat: ignored (wp/cli)")
     ap.add_argument("--no-details", action="store_true", help="no entra en fichas (menos datos, peor precisión)")
     ap.add_argument("--jsonl", default="", help="ruta para guardar JSONL (opcional)")
     ap.add_argument(
