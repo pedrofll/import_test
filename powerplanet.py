@@ -225,18 +225,6 @@ def strip_variant_from_name(name: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-
-def truncate_after_network(name: str) -> str:
-    """Trunca el nombre cuando aparezca '4G' o '5G' y elimina todo lo posterior."""
-    if not name:
-        return ""
-    s = re.sub(r"\s+", " ", name).strip()
-    m = re.search(r"\b(?:4G|5G)\b", s, flags=re.IGNORECASE)
-    if not m:
-        return s
-    return s[: m.start()].strip()
-
-
 def format_product_title(name: str) -> str:
     """
     Primera letra de cada palabra en mayúscula, pero tokens alfanuméricos en mayúsculas (5G, 14T...).
@@ -475,7 +463,7 @@ def scrape_dryrun(
             if not ok:
                 continue
 
-            clean_name = format_product_title(truncate_after_network(strip_variant_from_name(raw_name)))
+            clean_name = format_product_title(strip_variant_from_name(raw_name))
             ver = compute_version(clean_name)
 
             url_oferta_sin_acortar = offer.url
