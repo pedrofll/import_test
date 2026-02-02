@@ -22,6 +22,7 @@ LIST_URL = f"{BASE_URL}/es/moviles-mas-vendidos"
 FUENTE_POWERPLANET = "powerplanetonline"
 ENVIO_POWERPLANET = "España"
 CUPON_DEFAULT = "OFERTA PROMO"
+IMPORTADO_DE_POWERPLANET = BASE_URL  # ACF: importado_de
 
 
 @dataclass
@@ -52,6 +53,11 @@ class Offer:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def today_ddmmyyyy() -> str:
+    """Fecha formato ACF: dd/mm/yyyy."""
+    return datetime.now().strftime("%d/%m/%Y")
 
 
 def normalize_text(s: str) -> str:
@@ -568,46 +574,53 @@ def classify_offer(name: str, category_path: Optional[str], capacity: Optional[s
 
 
 def print_required_logs(
-    nombre: str,
     nombre_5g: str,
-    ram: str,
-    rom: str,
-    ver: str,
+    nombre: str,
+    memoria: str,
+    capacidad: str,
+    version: str,
     fuente: str,
-    p_act: str,
-    p_reg: str,
-    cup: str,
-    img_src: str,
-    url_imp: str,
-    url_exp: str,
+    importado_de: str,
+    precio_actual: Optional[int],
+    precio_original: Optional[int],
+    codigo_de_descuento: str,
+    imagen_producto: str,
+    enlace_de_compra_importado: str,
+    url_oferta_sin_acortar: str,
     url_importada_sin_afiliado: str,
     url_sin_acortar_con_mi_afiliado: str,
     url_oferta: str,
     enviado_desde: str,
+    fecha: str,
 ) -> None:
-    # Detectado => ACF nombre_5g
+    def fmt_eur(v: Optional[int]) -> str:
+        return f"{v}€" if v is not None else "N/A"
+
+    # Detectado: es lo que almacenamos en ACF nombre_5g
     print(f"Detectado {nombre_5g}")
 
-    # Nombre => limpio (sin 4G/5G y lo posterior)
-    print(f"1) Nombre: {nombre}")
-    print(f"1b) Nombre_5G: {nombre_5g}")
+    # --- LOGS ACF (en este orden) ---
+    print(f"1) Nombre Importado (nombre_5g): {nombre_5g}")
+    print(f"2) Nombre (nombre): {nombre}")
+    print(f"3) Memoria (memoria): {memoria}")
+    print(f"4) Capacidad (capacidad): {capacidad}")
+    print(f"5) Versión (version): {version}")
+    print(f"6) Fuente (fuente): {fuente}")
+    print(f"7) Importado de (importado_de): {importado_de}")
+    print(f"8) Precio actual (precio_actual): {fmt_eur(precio_actual)}")
+    print(f"9) Precio original (precio_originl): {fmt_eur(precio_original)}")
+    print(f"10) Código de descuento (codigo_de_descuento): {codigo_de_descuento}")
+    print(f"11) Version (version): {version}")
+    print(f"12) URL Imagen (imagen_producto): {imagen_producto}")
+    print(f"13) Enlace Importado (enlace_de_compra_importado): {enlace_de_compra_importado}")
+    print(f"14) Enlace Expandido (url_oferta_sin_acortar): {url_oferta_sin_acortar}")
+    print(f"15) URL importada sin afiliado (url_importada_sin_afiliado): {url_importada_sin_afiliado}")
+    print(f"16) URL sin acortar con mi afiliado (url_sin_acortar_con_mi_afiliado): {url_sin_acortar_con_mi_afiliado}")
+    print(f"17) URL acortada con mi afiliado (url_oferta): {url_oferta}")
+    print(f"18) Enviado desde (enviado_desde): {enviado_desde}")
+    print(f"19) Fecha (fecha): {fecha}")
 
-    print(f"2) Memoria: {ram}")
-    print(f"3) Capacidad: {rom}")
-    print(f"4) Versión: {ver}")
-    print(f"5) Fuente: {fuente}")
-    print(f"6) Precio actual: {p_act}")
-    print(f"7) Precio original: {p_reg}")
-    print(f"8) Código de descuento: {cup}")
-    print(f"9) Version: {ver}")
-    print(f"10) URL Imagen: {img_src}")
-    print(f"11) Enlace Importado: {url_imp}")
-    print(f"12) Enlace Expandido: {url_exp}")
-    print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
-    print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
-    print(f"15) URL acortada con mi afiliado: {url_oferta}")
-    print(f"16) Enviado desde: {enviado_desde}")
-    print(f"17) Encolado para comparar con base de datos...")
+    print("20) Encolado para comparar con base de datos...")
     print("-" * 60)
 
 
@@ -685,8 +698,6 @@ def scrape_dryrun(
             fuente = offer.source or FUENTE_POWERPLANET
 
             # 2) Precios sin decimales (TRUNCADOS)
-            p_act = format_price(offer.price_eur)
-            p_reg = format_price(offer.pvr_eur)
             precio_actual_int = truncate_price(offer.price_eur)
             precio_original_int = truncate_price(offer.pvr_eur)
 
@@ -694,41 +705,67 @@ def scrape_dryrun(
 
             img_src = (offer.image_large or offer.image_small or "").strip()
 
-            url_imp = offer.url
-            url_exp = offer.url  # no hay redirección/acortador propio aquí
+            importado_de = IMPORTADO_DE_POWERPLANET
+            fecha = today_ddmmyyyy()
 
+            enlace_de_compra_importado = offer.url
             url_importada_sin_afiliado = offer.url
             url_sin_acortar_con_mi_afiliado = build_affiliate_url(offer.url, affiliate_query)
+            url_oferta_sin_acortar = url_sin_acortar_con_mi_afiliado
 
-            url_oferta = url_sin_acortar_con_mi_afiliado
+            url_oferta = url_oferta_sin_acortar
             if do_isgd:
-                url_oferta = shorten_isgd(sess, url_sin_acortar_con_mi_afiliado)
+                url_oferta = shorten_isgd(sess, url_oferta_sin_acortar)
 
             enviado_desde = ENVIO_POWERPLANET
 
             print_required_logs(
-                nombre=nombre_limpio,
                 nombre_5g=nombre_5g,
-                ram=ram,
-                rom=rom,
-                ver=ver,
+                nombre=nombre_limpio,
+                memoria=ram,
+                capacidad=rom,
+                version=ver,
                 fuente=fuente,
-                p_act=p_act,
-                p_reg=p_reg,
-                cup=cup,
-                img_src=img_src,
-                url_imp=url_imp,
-                url_exp=url_exp,
+                importado_de=importado_de,
+                precio_actual=precio_actual_int,
+                precio_original=precio_original_int,
+                codigo_de_descuento=cup,
+                imagen_producto=img_src,
+                enlace_de_compra_importado=enlace_de_compra_importado,
+                url_oferta_sin_acortar=url_oferta_sin_acortar,
                 url_importada_sin_afiliado=url_importada_sin_afiliado,
                 url_sin_acortar_con_mi_afiliado=url_sin_acortar_con_mi_afiliado,
                 url_oferta=url_oferta,
                 enviado_desde=enviado_desde,
+                fecha=fecha,
             )
 
             if jsonl_file:
                 payload = asdict(offer)
                 payload["_reason"] = reason
                 payload["_affiliate_query"] = affiliate_query
+
+                # --- ACF (campos finales a asignar en Woo) ---
+                payload["acf"] = {
+                    "nombre_5g": nombre_5g,
+                    "nombre": nombre_limpio,
+                    "memoria": ram,
+                    "capacidad": rom,
+                    "version": ver,
+                    "fuente": fuente,
+                    "importado_de": importado_de,
+                    "precio_actual": precio_actual_int,
+                    "precio_originl": precio_original_int,
+                    "codigo_de_descuento": cup,
+                    "imagen_producto": img_src,
+                    "enlace_de_compra_importado": enlace_de_compra_importado,
+                    "url_oferta_sin_acortar": url_oferta_sin_acortar,
+                    "url_importada_sin_afiliado": url_importada_sin_afiliado,
+                    "url_sin_acortar_con_mi_afiliado": url_sin_acortar_con_mi_afiliado,
+                    "url_oferta": url_oferta,
+                    "enviado_desde": enviado_desde,
+                    "fecha": fecha,
+                }
 
                 # Campos ACF / normalizados
                 payload["_acf_nombre"] = nombre_limpio
