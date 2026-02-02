@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import re
 import time
 import unicodedata
@@ -61,7 +62,8 @@ def normalize_text(s: str) -> str:
 
 
 def smart_title_token(token: str) -> str:
-    """
+    """Capitalización especial de tokens.
+
     - Primera letra en mayúscula.
     - Si mezcla letras/números (14t, 5g), letras en mayúscula => 14T, 5G.
     """
@@ -71,9 +73,8 @@ def smart_title_token(token: str) -> str:
     raw = token.strip()
 
     # Preservar separadores internos (muy típico: "Pro+", etc.)
-    # Trabajamos por sub-tokens separando por '-' pero manteniendo el separador.
     parts = re.split(r"(-)", raw)
-    out_parts = []
+    out_parts: List[str] = []
     for p in parts:
         if p == "-":
             out_parts.append(p)
@@ -98,7 +99,6 @@ def smart_title_token(token: str) -> str:
         if has_digit and has_alpha:
             out_parts.append("".join(ch.upper() if ch.isalpha() else ch for ch in p))
         else:
-            # Title case normal
             out_parts.append(p[:1].upper() + p[1:].lower())
 
     return "".join(out_parts)
@@ -106,9 +106,46 @@ def smart_title_token(token: str) -> str:
 
 def format_product_title(name: str) -> str:
     # Normaliza espacios y capitaliza tokens
-    name = re.sub(r"\s+", " ", name.strip())
-    tokens = name.split(" ")
+    name = re.sub(r"\s+", " ", (name or "").strip())
+    tokens = name.split(" ") if name else []
     return " ".join(smart_title_token(t) for t in tokens)
+
+
+def strip_after_4g_5g(nombre_5g: str) -> str:
+    """Devuelve el nombre base cortando en el primer token 4G/5G y eliminando todo lo posterior.
+
+    Ej:
+      - 'Oppo A5 Pro 5G Marrón' -> 'Oppo A5 Pro'
+      - 'Motorola Moto G15 4G'  -> 'Motorola Moto G15'
+    """
+    if not nombre_5g:
+        return nombre_5g
+
+    tokens = nombre_5g.split()
+    kept: List[str] = []
+    for tok in tokens:
+        tok_clean = re.sub(r"[^0-9A-Za-z]+", "", tok).lower()
+        if tok_clean in {"4g", "5g"}:
+            break
+        kept.append(tok)
+
+    base = " ".join(kept).strip()
+    return base if base else nombre_5g.strip()
+
+
+def build_nombre_fields(raw_name: str) -> Tuple[str, str]:
+    """Construye:
+      - nombre_5g: EXACTAMENTE lo que imprimimos tras 'Detectado ...' (ACF 'nombre_5g')
+      - nombre: nombre limpio para Woo (sin 4G/5G y sin el resto de especificaciones)
+    """
+    nombre_5g = format_product_title(re.sub(r"\s+", " ", (raw_name or "").strip()))
+
+    # Nombre base: cortar en 4G/5G y limpiar variantes habituales (RAM/ROM + color final)
+    nombre_base = strip_after_4g_5g(nombre_5g)
+    nombre_base = strip_variant_from_name(nombre_base)
+    nombre_base = format_product_title(nombre_base)
+
+    return nombre_5g, nombre_base
 
 
 def safe_float(v) -> Optional[float]:
@@ -165,34 +202,111 @@ def parse_float_from(s: str, pattern: str) -> Optional[float]:
         return None
 
 
-def format_price(v: Optional[float]) -> str:
+def truncate_price(v: Optional[float]) -> Optional[int]:
+    """Trunca el precio eliminando decimales (174.99 -> 174)."""
     if v is None:
-        return "N/A"
-    return f"{v:.2f}€"
+        return None
+    try:
+        return int(math.floor(float(v)))
+    except Exception:
+        return None
 
 
-def extract_ram_rom_from_name(name: str) -> Tuple[str, str]:
-    """
-    Extrae RAM/ROM desde el nombre del producto:
-      - '8GB/256GB' (o con espacios, guiones, '+', '|')
-    Devuelve ('8GB','256GB') o ('','') si no detecta.
+def format_price(v: Optional[float]) -> str:
+    """Formato precio sin decimales (TRUNCADO)."""
+    iv = truncate_price(v)
+    return f"{iv}€" if iv is not None else "N/A"
+
+
+def extract_ram_rom_from_name(name: str, url: str = "") -> Tuple[str, str]:
+    """Extrae RAM/ROM desde nombre y/o URL.
+
+    Soporta:
+      - 8GB/256GB, 8GB+256GB, 8GB-256GB
+      - 8GB 256GB
+      - 8GB256GB
+      - 4B128GB (slugs)
+      - Fallback por heurística si hay 2+ tokens 'GB/TB'
+      - Fallback desde URL tipo ...-8gb-256gb-...
     """
     if not name:
         return "", ""
 
-    n = name.replace("\xa0", " ")
+    n = (name or "").replace("\xa0", " ").strip()
+
+    # 4B128GB (slugs)
+    m = re.search(r"\b(\d+)\s*b\s*(\d+)\s*(GB|TB)\b", n, flags=re.IGNORECASE)
+    if m:
+        ram = f"{m.group(1)}GB"
+        rom = f"{m.group(2)}{m.group(3).upper()}"
+        return ram, rom
+
+    # 8GB/256GB, 8GB+256GB, 8GB-256GB, 8GB|256GB
     m = re.search(r"(\d+)\s*(GB|TB)\s*[/\+\-\|]\s*(\d+)\s*(GB|TB)", n, flags=re.IGNORECASE)
     if m:
         ram = f"{m.group(1)}{m.group(2).upper()}"
         rom = f"{m.group(3)}{m.group(4).upper()}"
         return ram, rom
+
+    # 8GB 256GB
+    m = re.search(r"\b(\d+)\s*(GB|TB)\s+(\d+)\s*(GB|TB)\b", n, flags=re.IGNORECASE)
+    if m:
+        ram = f"{m.group(1)}{m.group(2).upper()}"
+        rom = f"{m.group(3)}{m.group(4).upper()}"
+        return ram, rom
+
+    # 8GB256GB (sin separador)
+    m = re.search(r"\b(\d+)\s*GB\s*(\d+)\s*(GB|TB)\b", n, flags=re.IGNORECASE)
+    if m:
+        ram = f"{m.group(1)}GB"
+        rom = f"{m.group(2)}{m.group(3).upper()}"
+        return ram, rom
+
+    # Fallback URL: ...-8gb-256gb-...
+    if url:
+        try:
+            p = urlparse(url)
+            path = (p.path or "").lower()
+            m = re.search(r"-(\d+)gb-(\d+)gb(?:-|\b)", path)
+            if m:
+                return f"{m.group(1)}GB", f"{m.group(2)}GB"
+        except Exception:
+            pass
+
+    # Heurística: capturar todos los tokens GB/TB y deducir RAM/ROM
+    vals_gb: List[int] = []
+    for mm in re.finditer(r"\b(\d+)\s*(GB|TB)\b", n, flags=re.IGNORECASE):
+        try:
+            v = int(mm.group(1))
+            unit = (mm.group(2) or "").upper()
+            gb = v * 1024 if unit == "TB" else v
+            vals_gb.append(gb)
+        except Exception:
+            continue
+
+    if len(vals_gb) >= 2:
+        # RAM suele ser <= 32GB; ROM suele ser >= 64GB
+        ram_candidates = [v for v in vals_gb if 1 <= v <= 32]
+        rom_candidates = [v for v in vals_gb if v >= 64]
+
+        if ram_candidates and rom_candidates:
+            ram = max(ram_candidates)
+            rom = max(rom_candidates)
+            return f"{ram}GB", f"{rom}GB"
+
+        # fallback general: menor como RAM, mayor como ROM
+        vals_sorted = sorted(set(vals_gb))
+        if len(vals_sorted) >= 2:
+            ram = vals_sorted[0]
+            rom = vals_sorted[-1]
+            return f"{ram}GB", f"{rom}GB"
+
     return "", ""
 
 
 def strip_variant_from_name(name: str) -> str:
-    """
-    Quita del nombre:
-      - el bloque '8GB/256GB' (cualquier separador común)
+    """Quita del nombre:
+      - el bloque RAM/ROM (múltiples formatos: 8GB/256GB, 8GB 256GB, 4B128GB, 8GB128GB)
       - y un color final típico (Negro, Azul, etc.)
     """
     if not name:
@@ -200,13 +314,19 @@ def strip_variant_from_name(name: str) -> str:
 
     s = re.sub(r"\s+", " ", name.strip())
 
-    # Quitar RAM/ROM
-    s = re.sub(
+    # Quitar RAM/ROM (varios formatos)
+    for pat in (
+        # 8GB/256GB, 8GB+256GB, 8GB-256GB
         r"\s*\b\d+\s*(?:GB|TB)\s*[/\+\-\|]\s*\d+\s*(?:GB|TB)\b\s*",
-        " ",
-        s,
-        flags=re.IGNORECASE,
-    )
+        # 8GB 256GB
+        r"\s*\b\d+\s*(?:GB|TB)\s+\d+\s*(?:GB|TB)\b\s*",
+        # 4B128GB (slugs)
+        r"\s*\b\d+\s*b\s*\d+\s*(?:GB|TB)\b\s*",
+        # 8GB128GB (sin separador explícito)
+        r"\s*\b\d+\s*GB\s*\d+\s*(?:GB|TB)\b\s*",
+    ):
+        s = re.sub(pat, " ", s, flags=re.IGNORECASE)
+
     s = re.sub(r"\s+", " ", s).strip()
 
     # Quitar color final (si coincide con lista típica)
@@ -215,6 +335,8 @@ def strip_variant_from_name(name: str) -> str:
         "gris", "plata", "dorado", "oro", "rosa", "naranja", "cian", "turquesa",
         "beige", "crema", "grafito", "lavanda", "marfil", "champan", "neblina",
         "midnight", "starlight", "titanio", "titanium",
+        # ejemplo del cliente: "Marrón"
+        "marron",
     }
     parts = s.split(" ")
     if parts and normalize_text(parts[-1]) in colors:
@@ -224,10 +346,9 @@ def strip_variant_from_name(name: str) -> str:
 
 
 def compute_version(clean_name: str) -> str:
-    """
-    Reglas de tu proyecto:
+    """Reglas de tu proyecto:
       - iPhone => IOS
-      - PowerPlanet (tienda España) y no iPhone => Global (según tu petición)
+      - PowerPlanet (tienda España) y no iPhone => Global
     """
     n = normalize_text(clean_name)
     if "iphone" in n:
@@ -236,8 +357,7 @@ def compute_version(clean_name: str) -> str:
 
 
 def build_affiliate_url(url: str, affiliate_query: str) -> str:
-    """
-    Añade parámetros de afiliado (string tipo 'utm_source=x&utm_campaign=y').
+    """Añade parámetros de afiliado (string tipo 'utm_source=x&utm_campaign=y').
     Si affiliate_query está vacío, devuelve url sin cambios.
     """
     if not affiliate_query.strip():
@@ -253,11 +373,8 @@ def build_affiliate_url(url: str, affiliate_query: str) -> str:
 
 
 def shorten_isgd(sess: requests.Session, url: str, timeout: int = 15, retries: int = 5) -> str:
-    """
-    Acorta con is.gd (format=simple). Si falla, devuelve la URL larga.
-    """
+    """Acorta con is.gd (format=simple). Si falla, devuelve la URL larga."""
     endpoint = "https://is.gd/create.php"
-    last_err = None
     for attempt in range(1, retries + 1):
         try:
             r = sess.get(endpoint, params={"format": "simple", "url": url}, timeout=timeout)
@@ -265,10 +382,8 @@ def shorten_isgd(sess: requests.Session, url: str, timeout: int = 15, retries: i
             short = (r.text or "").strip()
             if short.startswith("http"):
                 return short
-        except Exception as e:
-            last_err = e
+        except Exception:
             time.sleep(1.2 * attempt)
-    # fallback
     return url
 
 
@@ -326,7 +441,8 @@ def extract_listing_candidates(list_html: str) -> List[Offer]:
 
             anchors = container.find_all("a", href=True)
             prod_anchors = [
-                a for a in anchors
+                a
+                for a in anchors
                 if a["href"].startswith("/es/")
                 and "moviles-mas-vendidos" not in a["href"]
                 and len(a.get_text(" ", strip=True)) >= 6
@@ -376,9 +492,7 @@ def extract_listing_candidates(list_html: str) -> List[Offer]:
 
 
 def parse_product_data_json(soup: BeautifulSoup) -> Optional[dict]:
-    """
-    Extrae el JSON del atributo data-product (fuente de verdad: nombre/sku/precios).
-    """
+    """Extrae el JSON del atributo data-product (fuente de verdad: nombre/sku/precios)."""
     form = soup.find("form", attrs={"data-product": True})
     if not form:
         return None
@@ -392,9 +506,7 @@ def parse_product_data_json(soup: BeautifulSoup) -> Optional[dict]:
 
 
 def parse_detail_fields(detail_html: str) -> Dict[str, Optional[object]]:
-    """
-    PowerPlanet: prioriza el JSON data-product para nombre/sku/precios.
-    """
+    """PowerPlanet: prioriza el JSON data-product para nombre/sku/precios."""
     soup = BeautifulSoup(detail_html, "html.parser")
     out: Dict[str, Optional[object]] = {}
 
@@ -457,6 +569,7 @@ def classify_offer(name: str, category_path: Optional[str], capacity: Optional[s
 
 def print_required_logs(
     nombre: str,
+    nombre_5g: str,
     ram: str,
     rom: str,
     ver: str,
@@ -472,8 +585,13 @@ def print_required_logs(
     url_oferta: str,
     enviado_desde: str,
 ) -> None:
-    print(f"Detectado {nombre}")
+    # Detectado => ACF nombre_5g
+    print(f"Detectado {nombre_5g}")
+
+    # Nombre => limpio (sin 4G/5G y lo posterior)
     print(f"1) Nombre: {nombre}")
+    print(f"1b) Nombre_5G: {nombre_5g}")
+
     print(f"2) Memoria: {ram}")
     print(f"3) Capacidad: {rom}")
     print(f"4) Versión: {ver}")
@@ -501,7 +619,7 @@ def scrape_dryrun(
     write_jsonl_path: Optional[str],
     affiliate_query: str,
     do_isgd: bool,
-    status: str,  # <-- compat CLI (no usado en dry-run)
+    status: str,
 ) -> None:
     sess = make_session()
     list_html = fetch_html(sess, LIST_URL, timeout=timeout)
@@ -543,29 +661,34 @@ def scrape_dryrun(
                     except Exception:
                         pass
 
-            # RAM/ROM: primero del nombre (8GB/256GB), si no, del campo capacity
+            # RAM/ROM: primero del nombre (8GB/256GB), si no, por URL (slugs)
             raw_name = offer.name
-            ram, rom = extract_ram_rom_from_name(raw_name)
-            if not (ram and rom) and offer.capacity:
-                # fallback simple (si algún día se rellena offer.capacity)
-                ram, rom = extract_ram_rom_from_name(offer.capacity)
+            ram, rom = extract_ram_rom_from_name(raw_name, offer.url)
 
             # Guardar capacity para clasificación/filtro (ram/rom)
             if ram and rom:
                 offer.capacity = f"{ram}/{rom}"
 
-            # Clasificación (móvil / excluir tablets)
-            is_mobile, reason = classify_offer(offer.name, offer.category_path, offer.capacity)
-            if not is_mobile:
-                continue  # en PowerPlanet (móviles más vendidos) normalmente todo será móvil, pero mantenemos filtro
+            # 1) Nombre_5G + Nombre (limpio)
+            nombre_5g, nombre_limpio = build_nombre_fields(raw_name)
 
-            # --- Mapeo a tus logs ---
-            nombre_limpio = format_product_title(strip_variant_from_name(raw_name))
+            # 3) Excluir Oukitel
+            if re.match(r"^oukitel\b", normalize_text(nombre_5g)):
+                continue
+
+            # Clasificación (móvil / excluir tablets)
+            is_mobile, reason = classify_offer(nombre_5g, offer.category_path, offer.capacity)
+            if not is_mobile:
+                continue
+
             ver = compute_version(nombre_limpio)
             fuente = offer.source or FUENTE_POWERPLANET
 
+            # 2) Precios sin decimales (TRUNCADOS)
             p_act = format_price(offer.price_eur)
             p_reg = format_price(offer.pvr_eur)
+            precio_actual_int = truncate_price(offer.price_eur)
+            precio_original_int = truncate_price(offer.pvr_eur)
 
             cup = CUPON_DEFAULT
 
@@ -585,6 +708,7 @@ def scrape_dryrun(
 
             print_required_logs(
                 nombre=nombre_limpio,
+                nombre_5g=nombre_5g,
                 ram=ram,
                 rom=rom,
                 ver=ver,
@@ -605,12 +729,22 @@ def scrape_dryrun(
                 payload = asdict(offer)
                 payload["_reason"] = reason
                 payload["_affiliate_query"] = affiliate_query
-                payload["_nombre_limpio"] = nombre_limpio
+
+                # Campos ACF / normalizados
+                payload["_acf_nombre"] = nombre_limpio
+                payload["_acf_nombre_5g"] = nombre_5g
+                payload["_nombre_limpio"] = nombre_limpio  # alias compat
+
                 payload["_ram"] = ram
                 payload["_rom"] = rom
                 payload["_version"] = ver
+
+                payload["_acf_precio_actual"] = precio_actual_int
+                payload["_acf_precio_original"] = precio_original_int
+
                 payload["_url_oferta_isgd"] = url_oferta
-                payload["_status"] = status  # <-- trazabilidad (aunque no se use aquí)
+                payload["_status"] = status
+
                 jsonl_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     finally:
@@ -619,7 +753,9 @@ def scrape_dryrun(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="PowerPlanetOnline - Móviles más vendidos (DRY-RUN SOLO LOGS + formato requerido)")
+    ap = argparse.ArgumentParser(
+        description="PowerPlanetOnline - Móviles más vendidos (DRY-RUN SOLO LOGS + formato requerido)"
+    )
     ap.add_argument("--max-products", type=int, default=0, help="0 = sin límite")
     ap.add_argument("--sleep", type=float, default=0.7, help="segundos entre requests")
     ap.add_argument("--timeout", type=int, default=25, help="timeout por request (seg)")
@@ -632,12 +768,12 @@ def main() -> None:
     )
     ap.add_argument("--no-isgd", action="store_true", help="no acortar url_oferta con is.gd (recomendado: NO usar este flag)")
 
-    # ✅ Compatibilidad con tu runner (aunque este script sea DRY-RUN)
+    # Compatibilidad con tu runner (aunque este script sea dry-run)
     ap.add_argument(
         "--status",
         default="publish",
         choices=["publish", "draft", "pending", "private"],
-        help="Estado WooCommerce (compatibilidad CLI). En este dry-run no se usa para crear productos.",
+        help="Compatibilidad CLI. En este dry-run no crea productos, solo se guarda en JSONL.",
     )
 
     args = ap.parse_args()
