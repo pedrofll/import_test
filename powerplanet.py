@@ -501,6 +501,7 @@ def scrape_dryrun(
     write_jsonl_path: Optional[str],
     affiliate_query: str,
     do_isgd: bool,
+    status: str,  # <-- compat CLI (no usado en dry-run)
 ) -> None:
     sess = make_session()
     list_html = fetch_html(sess, LIST_URL, timeout=timeout)
@@ -609,6 +610,7 @@ def scrape_dryrun(
                 payload["_rom"] = rom
                 payload["_version"] = ver
                 payload["_url_oferta_isgd"] = url_oferta
+                payload["_status"] = status  # <-- trazabilidad (aunque no se use aquí)
                 jsonl_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     finally:
@@ -629,6 +631,15 @@ def main() -> None:
         help="querystring para afiliado, ej: 'utm_source=ofertasdemoviles&utm_medium=referral'",
     )
     ap.add_argument("--no-isgd", action="store_true", help="no acortar url_oferta con is.gd (recomendado: NO usar este flag)")
+
+    # ✅ Compatibilidad con tu runner (aunque este script sea DRY-RUN)
+    ap.add_argument(
+        "--status",
+        default="publish",
+        choices=["publish", "draft", "pending", "private"],
+        help="Estado WooCommerce (compatibilidad CLI). En este dry-run no se usa para crear productos.",
+    )
+
     args = ap.parse_args()
 
     scrape_dryrun(
@@ -639,6 +650,7 @@ def main() -> None:
         write_jsonl_path=(args.jsonl.strip() or None),
         affiliate_query=args.affiliate_query.strip(),
         do_isgd=(not args.no_isgd),
+        status=args.status,
     )
 
 
