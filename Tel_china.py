@@ -570,6 +570,7 @@ async def main():
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": url_sin_acortar_con_mi_afiliado},
                 {"key": "url_oferta", "value": url_oferta},
                 {"key": "enviado_desde", "value": enviado_desde},
+                {"key": "enviado_desde_tg", "value": enviado_desde_tg},
                 {"key": "importado_de", "value": "Telegram_Chinabay"},
                 {"key": "fecha", "value": hoy_dt.strftime("%Y-%m-%d")},
             ],
