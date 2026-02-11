@@ -510,14 +510,13 @@ async def main():
 
         enviado_desde = "España" if fuente in ["Aliexpress", "Amazon", "powerplanet", "Fnac", "MediaMarkt", "Phone House"] else "China"
         enviado_desde_tg = ""
-    if enviado_desde == "España":
+        if enviado_desde == "España":
         enviado_desde_tg = "🇪🇸 España"
-    elif enviado_desde == "Europa":
+        elif enviado_desde == "Europa":
         enviado_desde_tg = "🇪🇺 Europa"
-    elif enviado_desde == "China":
+        elif enviado_desde == "China":
         enviado_desde_tg = "🇨🇳 China"
-
-    return enviado_desde, enviado_desde_tg
+        return enviado_desde, enviado_desde_tg
 
         # categorías
         marca = nombre.split(" ")[0]
