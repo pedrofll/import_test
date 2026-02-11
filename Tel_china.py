@@ -507,16 +507,14 @@ async def main():
 
         # acortar para 'url_oferta'
         url_oferta = acortar_url(url_sin_acortar_con_mi_afiliado) if url_sin_acortar_con_mi_afiliado else ""
-
+        
         enviado_desde = "España" if fuente in ["Aliexpress", "Amazon", "powerplanet", "Fnac", "MediaMarkt", "Phone House"] else "China"
-        enviado_desde_tg = ""
         if enviado_desde == "España":
-        enviado_desde_tg = "🇪🇸 España"
+            enviado_desde_tg = "🇪🇸 España"
         elif enviado_desde == "Europa":
-        enviado_desde_tg = "🇪🇺 Europa"
-        elif enviado_desde == "China":
-        enviado_desde_tg = "🇨🇳 China"
-        return enviado_desde, enviado_desde_tg
+            enviado_desde_tg = "🇪🇺 Europa"
+        else:
+            enviado_desde_tg = "🇨🇳 China"
 
         # categorías
         marca = nombre.split(" ")[0]
