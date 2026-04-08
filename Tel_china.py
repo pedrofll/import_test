@@ -7,9 +7,12 @@ import urllib.parse
 import time
 import math
 import hashlib
+import unicodedata
 from bs4 import BeautifulSoup
 from datetime import datetime
 from woocommerce import API
+
+SCRIPT_VERSION = "2026-04-08 hotfix-prefijo-v4"
 
 # --- CONFIGURACIÓN ---
 wcapi = API(
@@ -102,6 +105,7 @@ def print(*args, sep=" ", end="\n", file=None, flush=False):
 def log_bloque_inicio():
     print("\n" + "=" * 80)
     print(f"RUN: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"SCRIPT_VERSION: {SCRIPT_VERSION}")
     print("=" * 80)
 
 
@@ -267,6 +271,24 @@ def obtener_o_crear_categoria_con_imagen(nombre_cat, parent_id=0):
         return 0, ""
 
 
+def _normalizar_espacios_nombre(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+
+def _token_base(tok: str) -> str:
+    """Reduce un token a sus letras/números visibles, quitando marcas Unicode invisibles."""
+    if not tok:
+        return ""
+    out = []
+    for ch in unicodedata.normalize("NFKD", str(tok)):
+        cat = unicodedata.category(ch)
+        if cat in ("Mn", "Me", "Cf"):
+            continue
+        if ch.isalnum():
+            out.append(ch)
+    return "".join(out)
+
+
 def _token_sin_letras_es_decorativo(tok: str) -> bool:
     """Detecta tokens iniciales decorativos como 1️⃣, 1), •, emojis, etc."""
     if not tok:
@@ -276,65 +298,67 @@ def _token_sin_letras_es_decorativo(tok: str) -> bool:
     if not t:
         return True
 
-    # quita invisibles y marcas típicas de keycap/emoji para inspeccionar el token
-    base = re.sub(r"[\u200b-\u200f\u2060\ufeff\ufe0e\ufe0f\u20e3]", "", t)
-    base = re.sub(r"^[\W_]+|[\W_]+$", "", base)
+    base = _token_base(t)
+    visible = "".join(
+        ch for ch in unicodedata.normalize("NFKD", t)
+        if unicodedata.category(ch) not in ("Mn", "Me", "Cf")
+    ).strip()
 
-    # si ya contiene letras, no es un prefijo decorativo
+    # Si contiene letras reales, no lo tocamos (p.ej. 1MORE, X200, iQOO)
     if any(ch.isalpha() for ch in base):
         return False
 
-    # token vacío o extremadamente corto tras limpiar -> decorativo
-    if not base or len(base) <= 1:
+    # Token vacío o solo símbolos/emoji
+    if not base:
         return True
 
-    # numeración corta pura al inicio: "1", "2"
-    if re.fullmatch(r"[0-9]+", base) and len(base) <= 2:
+    # Numeración corta típica de listas: 1, 2, 01, 10
+    if base.isdigit() and len(base) <= 2:
         return True
 
-    # numeraciones envueltas o con signos: "(1)", "1)", "1.", "01-"
-    if t != base and re.fullmatch(r"[0-9]+", base) and len(base) <= 3:
-        return True
-
-    # secuencias muy cortas sin letras y con símbolos/emoji
-    if t != base and len(base) <= 3:
+    # Tokens muy cortos sin letras y con símbolos alrededor: (1), 1️⃣, 1., •
+    if len(base) <= 3 and any(not ch.isalnum() for ch in visible):
         return True
 
     return False
 
 
 def limpiar_prefijo_nombre(s: str) -> str:
-    """Limpia prefijos de numeración/emoji típicos de mensajes de Telegram.
-
-    Ejemplos que elimina al inicio:
-    - 1️⃣ OnePlus Nord CE 5 5G
-    - 1. OnePlus Nord CE 5 5G
-    - 1) OnePlus Nord CE 5 5G
-    - • OnePlus Nord CE 5 5G
-    """
+    """Limpia prefijos de numeración/emoji típicos de mensajes de Telegram."""
     if not s:
         return ""
 
-    s = str(s).strip()
-    patrones = [
-        r"^\s*[0-9]\ufe0f?\u20e3\s*",    # 1️⃣ 2️⃣ 3️⃣ ...
-        r"^\s*\(?\d+\)?[.)]\s*",      # 1. 1) (1)
-        r"^\s*[•·▪▫◦►▶-]+\s*",                # bullets comunes
-        r"^[^\w]+",                              # resto de símbolos/emojis al inicio
-    ]
+    s = _normalizar_espacios_nombre(s)
 
-    anterior = None
-    while s != anterior:
-        anterior = s
-        for patron in patrones:
-            s = re.sub(patron, "", s).strip()
+    # Quita ruido inicial obvio (balas, emojis, signos) pero sin comerse marcas válidas con letras
+    while s:
+        original = s
+        s = re.sub(r"^[\s\u200b-\u200f\u2060\ufeff]+", "", s)
+        s = re.sub(r"^[•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐]+\s*", "", s)
+        s = re.sub(r"^\(?\d{1,2}\)?[.)-]+\s*", "", s)
+        s = re.sub(r"^[^\w]+", "", s)
+        s = _normalizar_espacios_nombre(s)
+        if s == original:
+            break
 
-        # segunda capa: elimina tokens iniciales cortos sin letras,
-        # aunque vengan con combinaciones Unicode raras
-        partes = s.split()
-        while len(partes) > 1 and _token_sin_letras_es_decorativo(partes[0]):
-            partes = partes[1:]
-        s = " ".join(partes).strip()
+    partes = s.split()
+    while len(partes) > 1 and _token_sin_letras_es_decorativo(partes[0]):
+        partes = partes[1:]
+
+    s = _normalizar_espacios_nombre(" ".join(partes))
+
+    # Última red de seguridad: si el primer token sigue sin letras y es muy corto, lo quitamos.
+    partes = s.split()
+    if len(partes) > 1:
+        tok0 = partes[0]
+        base0 = _token_base(tok0)
+        if not any(ch.isalpha() for ch in base0):
+            visible0 = "".join(
+                ch for ch in unicodedata.normalize("NFKD", tok0)
+                if unicodedata.category(ch) not in ("Mn", "Me", "Cf")
+            ).strip()
+            if (not base0) or (base0.isdigit() and len(base0) <= 2) or (len(base0) <= 3 and any(not ch.isalnum() for ch in visible0)):
+                s = _normalizar_espacios_nombre(" ".join(partes[1:]))
 
     return s
 
@@ -528,6 +552,9 @@ async def main():
             continue
 
         nombre, memoria, capacidad, version, codigo_de_descuento, precio_actual = res_data
+        nombre_raw = nombre
+        nombre = limpiar_prefijo_nombre(nombre)
+        nombre = _normalizar_espacios_nombre(nombre)
 
         # --- VERIFICACIÓN DE DUPLICADOS ---
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 10}).json()
@@ -585,6 +612,8 @@ async def main():
         # --- LOGS DETALLADOS (guardados a fichero) ---
         print("# --- LOGS DETALLADOS SOLICITADOS ---")
         print(f"Detectado {nombre}")
+        print(f"0) Nombre RAW parser: {nombre_raw}")
+        print(f"0b) Nombre normalizado final: {nombre}")
         print(f"1) Nombre: {nombre}")
         print(f"2) Memoria: {memoria}")
         print(f"3) Capacidad: {capacidad}")
