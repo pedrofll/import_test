@@ -267,6 +267,42 @@ def obtener_o_crear_categoria_con_imagen(nombre_cat, parent_id=0):
         return 0, ""
 
 
+def _token_sin_letras_es_decorativo(tok: str) -> bool:
+    """Detecta tokens iniciales decorativos como 1️⃣, 1), •, emojis, etc."""
+    if not tok:
+        return False
+
+    t = str(tok).strip()
+    if not t:
+        return True
+
+    # quita invisibles y marcas típicas de keycap/emoji para inspeccionar el token
+    base = re.sub(r"[\u200b-\u200f\u2060\ufeff\ufe0e\ufe0f\u20e3]", "", t)
+    base = re.sub(r"^[\W_]+|[\W_]+$", "", base)
+
+    # si ya contiene letras, no es un prefijo decorativo
+    if any(ch.isalpha() for ch in base):
+        return False
+
+    # token vacío o extremadamente corto tras limpiar -> decorativo
+    if not base or len(base) <= 1:
+        return True
+
+    # numeración corta pura al inicio: "1", "2"
+    if re.fullmatch(r"[0-9]+", base) and len(base) <= 2:
+        return True
+
+    # numeraciones envueltas o con signos: "(1)", "1)", "1.", "01-"
+    if t != base and re.fullmatch(r"[0-9]+", base) and len(base) <= 3:
+        return True
+
+    # secuencias muy cortas sin letras y con símbolos/emoji
+    if t != base and len(base) <= 3:
+        return True
+
+    return False
+
+
 def limpiar_prefijo_nombre(s: str) -> str:
     """Limpia prefijos de numeración/emoji típicos de mensajes de Telegram.
 
@@ -281,10 +317,10 @@ def limpiar_prefijo_nombre(s: str) -> str:
 
     s = str(s).strip()
     patrones = [
-        r"^\s*[0-9]\ufe0f?\u20e3\s*",   # 1️⃣ 2️⃣ 3️⃣ ...
-        r"^\s*\(?\d+\)?[.)]\s*",     # 1. 1) (1)
-        r"^\s*[•·▪▫◦►▶-]+\s*",               # bullets comunes
-        r"^[^\w]+",                             # resto de símbolos/emojis al inicio
+        r"^\s*[0-9]\ufe0f?\u20e3\s*",    # 1️⃣ 2️⃣ 3️⃣ ...
+        r"^\s*\(?\d+\)?[.)]\s*",      # 1. 1) (1)
+        r"^\s*[•·▪▫◦►▶-]+\s*",                # bullets comunes
+        r"^[^\w]+",                              # resto de símbolos/emojis al inicio
     ]
 
     anterior = None
@@ -292,6 +328,13 @@ def limpiar_prefijo_nombre(s: str) -> str:
         anterior = s
         for patron in patrones:
             s = re.sub(patron, "", s).strip()
+
+        # segunda capa: elimina tokens iniciales cortos sin letras,
+        # aunque vengan con combinaciones Unicode raras
+        partes = s.split()
+        while len(partes) > 1 and _token_sin_letras_es_decorativo(partes[0]):
+            partes = partes[1:]
+        s = " ".join(partes).strip()
 
     return s
 
