@@ -267,6 +267,35 @@ def obtener_o_crear_categoria_con_imagen(nombre_cat, parent_id=0):
         return 0, ""
 
 
+def limpiar_prefijo_nombre(s: str) -> str:
+    """Limpia prefijos de numeración/emoji típicos de mensajes de Telegram.
+
+    Ejemplos que elimina al inicio:
+    - 1️⃣ OnePlus Nord CE 5 5G
+    - 1. OnePlus Nord CE 5 5G
+    - 1) OnePlus Nord CE 5 5G
+    - • OnePlus Nord CE 5 5G
+    """
+    if not s:
+        return ""
+
+    s = str(s).strip()
+    patrones = [
+        r"^\s*[0-9]\ufe0f?\u20e3\s*",   # 1️⃣ 2️⃣ 3️⃣ ...
+        r"^\s*\(?\d+\)?[.)]\s*",     # 1. 1) (1)
+        r"^\s*[•·▪▫◦►▶-]+\s*",               # bullets comunes
+        r"^[^\w]+",                             # resto de símbolos/emojis al inicio
+    ]
+
+    anterior = None
+    while s != anterior:
+        anterior = s
+        for patron in patrones:
+            s = re.sub(patron, "", s).strip()
+
+    return s
+
+
 def extraer_datos(texto):
     t_clean = texto.replace("**", "").replace("`", "").strip()
     lineas = [l.strip() for l in t_clean.split("\n") if l.strip()]
@@ -295,13 +324,13 @@ def extraer_datos(texto):
 
     partes_nombre = []
     for linea in lineas:
-        cand = re.sub(r"^[^\w]+", "", linea).strip()
+        cand = limpiar_prefijo_nombre(linea)
         if _es_parte_de_nombre(cand):
             partes_nombre.append(cand)
         elif partes_nombre:
             break
 
-    nombre = " ".join(partes_nombre).strip()
+    nombre = limpiar_prefijo_nombre(" ".join(partes_nombre)).strip()
     if not nombre:
         return None
 
@@ -461,11 +490,13 @@ async def main():
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 10}).json()
         existe = False
         for prod_existente in check_exists:
-            if prod_existente["name"].strip().lower() == nombre.strip().lower():
+            nombre_existente_normalizado = limpiar_prefijo_nombre(prod_existente["name"]).strip().lower()
+            nombre_nuevo_normalizado = limpiar_prefijo_nombre(nombre).strip().lower()
+            if nombre_existente_normalizado == nombre_nuevo_normalizado:
                 metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
                 if metas_existentes.get("importado_de") == "Telegram_Chinabay":
                     print(f"⏭️ El producto '{nombre}' ya existe. Saltando...")
-                    summary_ignorados.append({"nombre": nombre, "id": prod_existente["id"]})
+                    summary_ignorados.append({"nombre": prod_existente["name"], "id": prod_existente["id"]})
                     existe = True
                     break
         if existe:
