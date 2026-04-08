@@ -31,6 +31,8 @@ AFF_MEDIAMARKT = os.getenv("AFF_MEDIAMARKT", "").strip()
 AFF_POWERPLANET = os.getenv("AFF_POWERPLANET", "").strip()
 AFF_GSHOPPER = os.getenv("AFF_GSHOPPER", "").strip()
 AFF_TRADINGSENZHEN = os.getenv("AFF_TRADINGSENZHEN", "").strip()
+# ✅ NUEVO: DHGate
+AFF_DHGATE = os.getenv("AFF_DHGATE", "").strip()
 
 summary_creados = []
 summary_eliminados = []
@@ -60,7 +62,6 @@ def _append_log(s: str) -> None:
         pass
 
 
-
 def _url_fingerprint(u: str) -> str:
     """Devuelve una huella corta para identificar la fuente sin revelar la URL."""
     try:
@@ -70,6 +71,7 @@ def _url_fingerprint(u: str) -> str:
         return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()[:10]
     except Exception:
         return ""
+
 
 def _safe_filename_from_url(u: str) -> str:
     """Devuelve solo el nombre de fichero (último segmento) sin dominio ni query."""
@@ -81,6 +83,8 @@ def _safe_filename_from_url(u: str) -> str:
         return path.split("/")[-1] if path else ""
     except Exception:
         return ""
+
+
 def print(*args, sep=" ", end="\n", file=None, flush=False):
     # consola
     import builtins as _b
@@ -226,6 +230,10 @@ def construir_url_con_mi_afiliado(fuente: str, url_base: str) -> str:
             if not aff.startswith("?") and not aff.startswith("&"):
                 aff = "?" + aff
         return unir_afiliado(base, aff)
+    # ✅ NUEVO: DHGate
+    if f == "dhgate":
+        base = (url_base or "").split("?")[0]
+        return unir_afiliado(base, AFF_DHGATE)
     return url_base
 
 
@@ -266,7 +274,7 @@ def extraer_datos(texto):
         return None
 
     nombre = ""
-    # Nombre del producto: puede venir partido en varias líneas (p.ej. "Xiaomi 17" + "PRO MAX")
+
     def _es_parte_de_nombre(s: str) -> bool:
         if not s:
             return False
@@ -274,7 +282,6 @@ def extraer_datos(texto):
         low = s_str.lower()
         if "http" in low or "www." in low:
             return False
-        # En Telegram, los campos suelen venir como "Precio:", "Cupón:", "Link:", etc.
         if ":" in s_str:
             return False
         if re.search(r"\b\d+[\.,]?\d*\s*€\b", s_str):
@@ -282,32 +289,27 @@ def extraer_datos(texto):
         for k in ("precio", "cup", "cupón", "cupon", "link", "ram", "rom", "cn version", "eu version", "visita", "síguenos", "siguenos", "follow"):
             if low.startswith(k):
                 return False
-        # Línea vacía/solo símbolos
         if re.match(r"^[\W_]+$", s_str):
             return False
         return True
 
     partes_nombre = []
     for linea in lineas:
-        # Limpia bullets/emojis al inicio, pero conserva el resto tal cual
         cand = re.sub(r"^[^\w]+", "", linea).strip()
         if _es_parte_de_nombre(cand):
             partes_nombre.append(cand)
         elif partes_nombre:
-            # ya tenemos nombre y hemos encontrado el siguiente bloque de info
             break
 
     nombre = " ".join(partes_nombre).strip()
     if not nombre:
         return None
 
-
     # descartar tablets
     if any(x in nombre.upper() for x in ["PAD", "IPAD", "TAB"]):
         return "SKIP_TABLET"
 
-    # Regla especial: iQOO (Vivo) — si empieza por "IQ" y no lleva "Vivo" delante,
-    # forzamos marca/categoría Vivo.
+    # Regla especial: iQOO (Vivo)
     try:
         _parts = nombre.split()
         _first_raw = _parts[0] if _parts else ""
@@ -318,7 +320,6 @@ def extraer_datos(texto):
                 nombre = "Vivo " + " ".join(_parts)
     except Exception:
         pass
-
 
     # RAM / ROM
     gigas = re.findall(r"(\d+)\s*GB", t_clean, re.I)
@@ -372,6 +373,9 @@ def detectar_fuente_por_url(url: str) -> str:
         return "Phone House"
     if "tradingshenzhen.com" in u:
         return "TradingShenzhen"
+    # ✅ NUEVO: DHGate
+    if "dhgate.com" in u:
+        return "Dhgate"
     return "Tienda"
 
 
@@ -386,8 +390,6 @@ def expandir_url(url: str) -> str:
 
 
 def enviar_email(asunto: str, cuerpo: str) -> None:
-    # Opcional: si quieres email, implementa aquí (SMTP / API).
-    # Evitamos NameError si no está configurado.
     try:
         _ = asunto, cuerpo
     except Exception:
@@ -425,33 +427,19 @@ async def gestionar_obsoletos():
 async def main():
     log_bloque_inicio()
 
-    # Fuente de datos (CONFIDENCIAL): se obtiene desde variable de entorno (GitHub Secret).
-
-
     url_canal = os.getenv("TEL_SOURCE_URL", "").strip()
-
-
     if not url_canal:
-
-
         print("❌ Fuente no configurada (TEL_SOURCE_URL).")
-
-
         return
-
 
     print(f"📥 ORIGEN DATOS: Telegram (web) | TEL_SOURCE_URL: SI | src_hash={_url_fingerprint(url_canal)}")
 
-
     headers = {"User-Agent": "Mozilla/5.0"}
-
-
     response = requests.get(url_canal, headers=headers, timeout=20)
     soup = BeautifulSoup(response.text, "html.parser")
     mensajes = soup.find_all("div", class_="tgme_widget_message")
     print(f"Mensajes Telegram detectados: {len(mensajes)}")
     if len(mensajes) == 0:
-        # Señal clara de que la fuente NO es el HTML de Telegram (o está bloqueado/cambia markup)
         titulo = (soup.title.string.strip() if soup.title and soup.title.string else "")
         print("⚠️ AVISO: No se detectan bloques tgme_widget_message. La fuente puede NO ser Telegram Web o el HTML ha cambiado/bloqueado.")
         if titulo:
@@ -483,7 +471,6 @@ async def main():
         if existe:
             continue
 
-        # --- PROCESO DE CREACIÓN SI NO EXISTE ---
         precio_original = calcular_precio_original(precio_actual, 1.20)
 
         # enlaces del mensaje (evitar t.me)
@@ -509,6 +496,12 @@ async def main():
         url_oferta = acortar_url(url_sin_acortar_con_mi_afiliado) if url_sin_acortar_con_mi_afiliado else ""
 
         enviado_desde = "España" if fuente in ["Aliexpress", "Amazon", "powerplanet", "Fnac", "MediaMarkt", "Phone House"] else "China"
+        if enviado_desde == "España":
+            enviado_desde_tg = "🇪🇸 España"
+        elif enviado_desde == "Europa":
+            enviado_desde_tg = "🇪🇺 Europa"
+        else:
+            enviado_desde_tg = "🇨🇳 China"
 
         # categorías
         marca = nombre.split(" ")[0]
@@ -560,10 +553,10 @@ async def main():
                 {"key": "enlace_de_compra_importado", "value": enlace_de_compra_importado},
                 {"key": "url_oferta_sin_acortar", "value": url_oferta_sin_acortar},
                 {"key": "url_importada_sin_afiliado", "value": url_importada_sin_afiliado},
-                # ✅ AQUÍ va siempre la URL completa con tu afiliado (sin '...')
                 {"key": "url_sin_acortar_con_mi_afiliado", "value": url_sin_acortar_con_mi_afiliado},
                 {"key": "url_oferta", "value": url_oferta},
                 {"key": "enviado_desde", "value": enviado_desde},
+                {"key": "enviado_desde_tg", "value": enviado_desde_tg},
                 {"key": "importado_de", "value": "Telegram_Chinabay"},
                 {"key": "fecha", "value": hoy_dt.strftime("%Y-%m-%d")},
             ],
@@ -595,7 +588,6 @@ async def main():
         await asyncio.sleep(15)
 
     await gestionar_obsoletos()
-
 
     # --- RESUMEN FINAL ---
     hoy_fmt2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -631,6 +623,7 @@ async def main():
         enviar_email(f"Reporte {hoy_fmt2}", resumen_txt)
     except Exception:
         pass
+
 
 if __name__ == "__main__":
     asyncio.run(main())
