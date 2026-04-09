@@ -1036,6 +1036,283 @@ def find_matching_variant(variants, nombre: str, capacidad: str, memoria: str):
     return None
 
 
+
+
+def fetch_cap_ram_map_from_buy_page(buy_url: str, session: requests.Session):
+    """Lee la buy page por requests para mapear capacidad -> RAM sin entrar con Selenium."""
+    out = {}
+    try:
+        if not buy_url:
+            return out
+        r = session.get(buy_url, headers=HEADERS, timeout=30)
+        if r.status_code != 200 or not r.text:
+            return out
+        soup = BeautifulSoup(r.text, 'html.parser')
+        txt = normalize_spaces(soup.get_text(' '))
+        for m in re.finditer(r'(\d{2,4}\s*(?:GB|TB))\s*[\|｜/+]+\s*(\d{1,2}\s*GB)', txt, flags=re.I):
+            cap = parse_capacidad_desde_texto(m.group(1))
+            ram = parse_memoria_desde_texto(m.group(2))
+            if cap and ram and cap.upper() not in out:
+                out[cap.upper()] = ram.upper()
+    except Exception:
+        return out
+    return out
+
+
+def extract_name_from_card_text(card_text: str) -> str:
+    lines = [normalize_spaces(x) for x in (card_text or '').splitlines() if normalize_spaces(x)]
+    for ln in lines:
+        low = ln.lower()
+        if not low.startswith('galaxy '):
+            continue
+        if any(x in low for x in ['tab', 'watch', 'buds', 'book', 'ring']):
+            continue
+        if re.search(r'\b\d+\s*(?:gb|tb)\b', low, flags=re.I):
+            continue
+        if '€' in low or 'comprar' in low or 'comparar' in low or 'información' in low or 'informacion' in low:
+            continue
+        return normalizar_nombre_samsung(ln)
+
+    m = re.search(r'\bGalaxy\s+(?:S|A|Z|M)[A-Za-z0-9+ ]{0,28}', card_text or '', flags=re.I)
+    return normalizar_nombre_samsung(m.group(0)) if m else ''
+
+
+def extract_price_from_card_text(card_text: str) -> int:
+    vals = [v for v in parse_eur_all(card_text or '') if 100 <= v <= 5000]
+    if not vals:
+        return 0
+    return max(vals)
+
+
+def extract_selected_capacity_from_card(card) -> str:
+    from selenium.webdriver.common.by import By
+
+    candidates = []
+    try:
+        els = card.find_elements(By.XPATH, ".//*[(self::button or self::a or self::label or self::span or self::div)]")
+    except Exception:
+        return ''
+
+    for idx, el in enumerate(els):
+        try:
+            txt = normalize_spaces(el.text)
+        except Exception:
+            continue
+        if not re.fullmatch(r'\d+\s*(?:GB|TB)', txt or '', flags=re.I):
+            continue
+        cap = parse_capacidad_desde_texto(txt)
+        if not cap:
+            continue
+
+        score = 0
+        for attr in ('class', 'aria-selected', 'aria-checked', 'aria-pressed', 'data-selected', 'data-current', 'tabindex'):
+            try:
+                v = (el.get_attribute(attr) or '').strip().lower()
+            except Exception:
+                v = ''
+            if attr in ('aria-selected', 'aria-checked', 'aria-pressed') and v == 'true':
+                score += 10
+            if attr == 'tabindex' and v == '0':
+                score += 2
+            if any(k in v for k in ['selected', 'active', 'current', 'checked', 'focus', 'on']):
+                score += 5
+
+        candidates.append((score, idx, cap))
+
+    if not candidates:
+        return ''
+
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    # Si no hay un estado explícito, en Samsung suele venir seleccionada la última visible.
+    return candidates[-1][2]
+
+
+def extract_card_image(card, base_url: str) -> str:
+    from selenium.webdriver.common.by import By
+
+    try:
+        imgs = card.find_elements(By.XPATH, ".//img")
+    except Exception:
+        imgs = []
+
+    for img in imgs:
+        for attr in ('src', 'data-src', 'data-original', 'data-lazy-src'):
+            try:
+                v = (img.get_attribute(attr) or '').strip()
+            except Exception:
+                v = ''
+            if not v:
+                continue
+            low = v.lower()
+            if 'logo' in low or 'icon' in low or 'sprite' in low:
+                continue
+            return abs_url(base_url, v)
+    return ''
+
+
+def extract_urls_from_card(card, listing_url: str, nombre: str):
+    from selenium.webdriver.common.by import By
+
+    detail_url = ''
+    buy_url = ''
+    try:
+        links = card.find_elements(By.XPATH, ".//a[@href]")
+    except Exception:
+        links = []
+
+    for a in links:
+        try:
+            href = normalize_spaces(a.get_attribute('href') or '')
+            txt = normalize_spaces(a.text)
+        except Exception:
+            continue
+        if not href:
+            continue
+        href_n = normalize_product_url(href)
+        txt_low = txt.lower()
+        if '/buy/' in href_n.lower() or 'comprar' in txt_low:
+            buy_url = href_n
+        elif 'más información' in txt_low or 'mas información' in txt_low or 'mas informacion' in txt_low or 'información del producto' in txt_low:
+            detail_url = href_n
+        elif is_candidate_product_url(href_n):
+            detail_url = href_n
+
+    if not buy_url and detail_url:
+        buy_url = derive_buy_url(detail_url, nombre)
+    if not detail_url and buy_url:
+        detail_url = re.sub(r'/buy/?$', '/', buy_url, flags=re.I)
+        detail_url = normalize_product_url(detail_url)
+    if not buy_url:
+        buy_url = listing_url
+    if not detail_url:
+        detail_url = buy_url
+    return detail_url, buy_url
+
+
+def extract_products_from_listing_cards(listing_url: str, source_label: str, session: requests.Session):
+    """Fast path: extrae producto(s) desde la card visible del listado principal.
+
+    La landing de Samsung ya muestra al menos el nombre, la capacidad seleccionada,
+    el precio y los enlaces Comprar/Más información, así que evitamos entrar con
+    Selenium en la ficha para estos datos. La buy page solo se consulta por requests
+    para completar el mapeo capacidad -> RAM cuando haga falta.
+    """
+    from selenium.webdriver.common.by import By
+
+    productos_por_clave = {}
+    driver = get_driver()
+    try:
+        print(f"🪄 Fast-path Samsung: leyendo cards del listado {mask_url(listing_url)}", flush=True)
+        driver.set_page_load_timeout(45)
+        driver.get(listing_url)
+        time.sleep(3)
+        dismiss_overlays(driver)
+        scroll_page(driver, rounds=10)
+
+        buy_controls = driver.find_elements(By.XPATH, "//*[self::a or self::button][contains(normalize-space(.), 'Comprar')]")
+        cards = []
+        seen = set()
+
+        for ctl in buy_controls:
+            node = ctl
+            for _ in range(8):
+                try:
+                    node = node.find_element(By.XPATH, './..')
+                except Exception:
+                    break
+                try:
+                    txt = normalize_spaces(node.text)
+                except Exception:
+                    txt = ''
+                if not txt or len(txt) < 20 or len(txt) > 1400:
+                    continue
+                if 'Galaxy' not in txt or '€' not in txt or 'Comprar' not in txt:
+                    continue
+                if not re.search(r'\b\d+\s*(?:GB|TB)\b', txt, flags=re.I):
+                    continue
+                sig = f"{int(node.location.get('x', 0))}:{int(node.location.get('y', 0))}:{int(node.size.get('width', 0))}:{int(node.size.get('height', 0))}"
+                if sig in seen:
+                    break
+                seen.add(sig)
+                cards.append(node)
+                break
+
+        print(f"✅ Cards Samsung detectadas en listing: {len(cards)}", flush=True)
+
+        for idx, card in enumerate(cards, start=1):
+            try:
+                card_text = card.text or ''
+            except Exception:
+                continue
+
+            nombre = extract_name_from_card_text(card_text)
+            if not nombre or should_skip_by_name(nombre):
+                continue
+
+            capacidad = extract_selected_capacity_from_card(card)
+            if not capacidad:
+                capacidad = parse_capacidad_desde_texto(card_text)
+
+            precio_actual = extract_price_from_card_text(card_text)
+            if not capacidad or precio_actual <= 0:
+                print(f"⚠️ Card Samsung sin capacidad/precio usable ({idx}).", flush=True)
+                continue
+
+            detail_url, buy_url = extract_urls_from_card(card, listing_url, nombre)
+            cap_ram_map = fetch_cap_ram_map_from_buy_page(buy_url, session) if buy_url else {}
+            memoria = cap_ram_map.get(capacidad.upper(), '')
+            if not memoria and len(cap_ram_map) == 1:
+                memoria = list(cap_ram_map.values())[0]
+            if not memoria:
+                print(f"⚠️ Card Samsung sin RAM visible para {nombre} {capacidad}. Se intentará fallback amplio.", flush=True)
+                continue
+
+            precio_original = calcular_precio_original(precio_actual)
+            img = extract_card_image(card, listing_url)
+            url_base = (buy_url or detail_url or listing_url).split('?')[0]
+            key = source_key(nombre, memoria, capacidad, FUENTE)
+
+            remoto = {
+                'nombre': nombre,
+                'memoria': memoria,
+                'capacidad': capacidad,
+                'precio_actual': int(precio_actual),
+                'precio_original': int(precio_original),
+                'img': img,
+                'url_imp': url_base,
+                'url_oferta_sin_acortar': url_base,
+                'url_importada_sin_afiliado': url_base,
+                'buy_url': buy_url,
+                'enviado_desde': ENVIADO_DESDE,
+                'enviado_desde_tg': ENVIADO_DESDE_TG,
+                'fecha': datetime.now().strftime('%d/%m/%Y'),
+                'version': VERSION,
+                'fuente': FUENTE,
+                'codigo_descuento': CODIGO_DESCUENTO_DEFAULT,
+                'origen_pagina': source_label,
+                'origen_listado': listing_url,
+                'source_key': key,
+                'model_code': '',
+            }
+
+            if key in productos_por_clave:
+                prev = productos_por_clave[key]
+                summary_duplicados.append(f"{nombre} {capacidad} {memoria}")
+                if int(remoto['precio_actual']) < int(prev.get('precio_actual', 10**9)):
+                    productos_por_clave[key] = remoto
+            else:
+                productos_por_clave[key] = remoto
+
+    except Exception as e:
+        print(f"⚠️ Fast-path Samsung listing falló: {e}", flush=True)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+    return list(productos_por_clave.values())
+
 # --------------------------
 # EXTRACCIÓN REMOTA
 # --------------------------
@@ -1050,6 +1327,21 @@ def obtener_datos_remotos():
 
     discovered = []
     seen_discovered = set()
+
+    # Fast path: si la landing ya muestra la card visible con precio/capacidad,
+    # extraemos directamente desde ahí sin entrar en la ficha.
+    if SAMSUNG_ONLY_NUEVO:
+        try:
+            productos_listing = extract_products_from_listing_cards(START_URL, 'listing-nuevo', session)
+            if productos_listing:
+                print("✅ Samsung fast-path desde listing principal completado.", flush=True)
+                print("", flush=True)
+                print("📊 RESUMEN EXTRACCIÓN SAMSUNG:", flush=True)
+                print(f"   URLs descubiertas: 1 (listing principal)", flush=True)
+                print(f"   Productos únicos válidos: {len(productos_listing)}", flush=True)
+                return productos_listing
+        except Exception as e:
+            print(f"⚠️ Error en fast-path Samsung desde listing: {e}", flush=True)
 
     # Discovery 1: enlaces marcados como 'Nuevo' en la landing.
     if SAMSUNG_ONLY_NUEVO:
