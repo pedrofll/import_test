@@ -1,44 +1,59 @@
-name: Import PowerPlanet
+name: Import samsung
 
 on:
-  workflow_dispatch: {}
   schedule:
-    # GitHub cron es UTC. Para clavar 16:00 Europe/Madrid todo el año (CET/CEST),
-    # lanzamos a 14:00 UTC y filtramos por hora local.
-    - cron: "0 14 * * *"
+    - cron: "00 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: "scraper-samsung"
+  cancel-in-progress: true
 
 jobs:
-  import:
+  ejecutar-scraper:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Descargar código
+        uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Configurar Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Instalar librerías
         run: |
-          pip install --upgrade pip
-          pip install requests beautifulsoup4 pillow woocommerce
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 woocommerce lxml pillow
+          python -m pip install --upgrade pip
+          pip install selenium Pillow woocommerce requests beautifulsoup4
 
-      - name: Gate to 16:00 Europe/Madrid
+      - name: Mostrar archivos del repositorio
         run: |
-          HOUR=$(TZ=Europe/Madrid date +%H)
-          echo "Madrid hour: $HOUR"
-          if [ "$HOUR" != "16" ]; then
-            echo "Not 16:00 in Madrid. Skipping."
-            exit 0
-          fi
+          echo ">>> LISTADO DE ARCHIVOS:"
+          ls -R .
 
-      - name: Run importer
+      - name: Ejecutar Script Samsung
         env:
           WP_URL: ${{ secrets.WP_URL }}
           WP_KEY: ${{ secrets.WP_KEY }}
           WP_SECRET: ${{ secrets.WP_SECRET }}
-          WP_USER: ${{ secrets.WP_USER }}
-          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+          PHONEHOUSE_URL: ${{ secrets.SOURCE_URL_PHONEHOUSE }}
+          AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
+          SOURCE_URL_PHONEHOUSE: ${{ secrets.SOURCE_URL_PHONEHOUSE }}
         run: |
-          python samsung.py --max-products 0 --sleep 0.7 --timeout 25 --status publish --jsonl powerplanet.jsonl
+          echo ">>> EJECUTANDO samsung.py..."
+          python -u samsung.py
 
+      - name: Borrar historiales antiguos
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 6
