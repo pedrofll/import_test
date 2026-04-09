@@ -40,5 +40,5 @@ jobs:
           WP_USER: ${{ secrets.WP_USER }}
           WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
         run: |
-          python powerplanet.py --max-products 0 --sleep 0.7 --timeout 25 --status publish --jsonl powerplanet.jsonl
+          python samsung.py --max-products 0 --sleep 0.7 --timeout 25 --status publish --jsonl powerplanet.jsonl
 
