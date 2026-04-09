@@ -73,6 +73,9 @@ ID_AFILIADO_AMAZON = os.environ.get("AFF_AMAZON", "")
 ID_AFILIADO_FNAC = os.environ.get("AFF_FNAC", "")
 ID_AFILIADO_XIAOMI_STORE = os.environ.get("AFF_XIAOMI_STORE", "")
 ID_AFILIADO_ELCORTEINGLES = os.environ.get("AFF_ELCORTEINGLES", "")
+ID_AFILIADO_PHONE_HOUSE = os.environ.get("AFF_PHONEHOUSE", "")
+if ID_AFILIADO_PHONE_HOUSE and not ID_AFILIADO_PHONE_HOUSE.startswith("?") and not ID_AFILIADO_PHONE_HOUSE.startswith("&"):
+    ID_AFILIADO_PHONE_HOUSE = "?" + ID_AFILIADO_PHONE_HOUSE
 
 # Acumuladores globales
 summary_creados = []
@@ -544,6 +547,8 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{aff}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
+                    elif fuente == "Phone House" and ID_AFILIADO_PHONE_HOUSE:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_PHONE_HOUSE}"
                     elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
                     elif fuente == "El Corte Inglés" and ID_AFILIADO_ELCORTEINGLES:
@@ -726,6 +731,8 @@ def obtener_datos_remotos():
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{aff}"
                     elif fuente == "Amazon" and ID_AFILIADO_AMAZON:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_AMAZON}"
+                    elif fuente == "Phone House" and ID_AFILIADO_PHONE_HOUSE:
+                        url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_PHONE_HOUSE}"
                     elif fuente == "Xiaomi Store" and ID_AFILIADO_XIAOMI_STORE:
                         url_sin_acortar_con_mi_afiliado = f"{url_importada_sin_afiliado}{ID_AFILIADO_XIAOMI_STORE}"
                     elif fuente == "El Corte Inglés" and ID_AFILIADO_ELCORTEINGLES:
