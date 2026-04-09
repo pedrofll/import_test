@@ -46,6 +46,13 @@ VERSION = "Versión Global"
 CODIGO_DESCUENTO_DEFAULT = "OFERTA: PROMO."
 OBJETIVO = 120
 
+SAMSUNG_ONLY_NUEVO = os.getenv("SAMSUNG_ONLY_NUEVO", "1").strip().lower() in {"1", "true", "yes", "si", "sí"}
+SAMSUNG_ENABLE_DOM_DISCOVERY = os.getenv("SAMSUNG_ENABLE_DOM_DISCOVERY", "0").strip().lower() in {"1", "true", "yes", "si", "sí"}
+try:
+    SAMSUNG_MAX_DISCOVERED = int(os.getenv("SAMSUNG_MAX_DISCOVERED", "24"))
+except Exception:
+    SAMSUNG_MAX_DISCOVERED = 24
+
 AFF_RAW = os.environ.get("AFF_SAMSUNG", "").strip()
 if AFF_RAW and not AFF_RAW.startswith("?") and not AFF_RAW.startswith("&"):
     AFF_RAW = "?" + AFF_RAW
@@ -467,7 +474,7 @@ def is_candidate_product_url(url: str) -> bool:
 
         if len(segs) == 1:
             slug = segs[0]
-            if slug in {'all-smartphones', 'smartphones', 'galaxy-a', 'galaxy-s', 'galaxy-z'}:
+            if slug in {'all-smartphones', 'smartphones', 'galaxy-smartphones', 'galaxy-a', 'galaxy-s', 'galaxy-z'}:
                 return False
             return slug.startswith('galaxy-')
 
@@ -561,6 +568,46 @@ def descubrir_urls_producto_sitemap(session: requests.Session):
             return
 
     _walk(sitemap_root, 0)
+    return urls
+
+
+def descubrir_urls_nuevo(session: requests.Session, landing_url: str = START_URL):
+    urls = set()
+    try:
+        r = session.get(landing_url, headers=HEADERS, timeout=30)
+        if r.status_code != 200 or not r.text:
+            return urls
+        soup = BeautifulSoup(r.text, 'html.parser')
+
+        for a in soup.find_all('a', href=True):
+            href = normalize_spaces(a.get('href') or '')
+            if not href:
+                continue
+
+            badge_text = []
+            try:
+                badge_text.extend([normalize_spaces(x.get_text(' ', strip=True)) for x in a.select('.badge-icon, [class*=badge]')])
+            except Exception:
+                pass
+            anchor_text = normalize_spaces(a.get_text(' ', strip=True))
+            joined = normalize_spaces(' '.join([anchor_text] + badge_text)).lower()
+            if 'nuevo' not in joined:
+                continue
+
+            candidate = abs_url(landing_url, href)
+            candidate = re.sub(r'/(buy|specs|compare)/?$', '/', candidate, flags=re.I)
+            candidate = normalize_product_url(candidate)
+
+            if not is_candidate_product_url(candidate):
+                continue
+
+            low = candidate.lower()
+            if any(x in low for x in ['galaxy-tab', 'galaxy-watch', 'galaxy-buds', 'galaxy-ring', 'galaxy-book']):
+                continue
+            urls.add(candidate)
+    except Exception:
+        return urls
+
     return urls
 
 # --------------------------
@@ -1004,40 +1051,67 @@ def obtener_datos_remotos():
     discovered = []
     seen_discovered = set()
 
-    # Discovery 1: sitemap (más estable que la landing renderizada).
-    try:
-        sitemap_urls = descubrir_urls_producto_sitemap(session)
-        print(f"Discovery sitemap Samsung -> URLs detectadas: {len(sitemap_urls)}", flush=True)
-        for u in sorted(sitemap_urls):
-            if u in seen_discovered:
-                continue
-            seen_discovered.add(u)
-            discovered.append((u, 'sitemap', 'https://www.samsung.com/es/sitemap.xml'))
-    except Exception as e:
-        print(f"⚠️ Error en discovery por sitemap Samsung: {e}", flush=True)
-
-    # Discovery 2: DOM renderizado del listado principal y páginas de apoyo.
-    for label, listing_url in LISTING_URLS:
+    # Discovery 1: enlaces marcados como 'Nuevo' en la landing.
+    if SAMSUNG_ONLY_NUEVO:
         try:
-            print("-" * 60, flush=True)
-            print(f"Escaneando listado Samsung: {mask_url(listing_url)}", flush=True)
-            html = get_rendered_html(listing_url)
-            urls = descubrir_urls_producto(html, listing_url)
-            print(f"✅ URLs de producto detectadas en DOM: {len(urls)}", flush=True)
-            for u in sorted(urls):
+            nuevo_urls = descubrir_urls_nuevo(session, START_URL)
+            print(f"Discovery Samsung 'Nuevo' -> URLs detectadas: {len(nuevo_urls)}", flush=True)
+            for u in sorted(nuevo_urls):
                 if u in seen_discovered:
                     continue
                 seen_discovered.add(u)
-                discovered.append((u, label, listing_url))
+                discovered.append((u, 'nuevo', START_URL))
+            if discovered:
+                print("Discovery Samsung limitado a enlaces marcados como 'Nuevo'.", flush=True)
         except Exception as e:
-            print(f"❌ Error leyendo listado Samsung {mask_url(listing_url)}: {e}", flush=True)
+            print(f"⚠️ Error en discovery Samsung 'Nuevo': {e}", flush=True)
+
+    # Discovery 2: sitemap como fallback si no hubo nuevos detectados.
+    if not discovered:
+        try:
+            sitemap_urls = descubrir_urls_producto_sitemap(session)
+            print(f"Discovery sitemap Samsung -> URLs detectadas: {len(sitemap_urls)}", flush=True)
+            for u in sorted(sitemap_urls):
+                if u in seen_discovered:
+                    continue
+                seen_discovered.add(u)
+                discovered.append((u, 'sitemap', 'https://www.samsung.com/es/sitemap.xml'))
+        except Exception as e:
+            print(f"⚠️ Error en discovery por sitemap Samsung: {e}", flush=True)
+
+    # Discovery 3: DOM renderizado solo si no hemos encontrado nada o si se fuerza expresamente.
+    if discovered and not SAMSUNG_ENABLE_DOM_DISCOVERY:
+        print("DOM discovery Samsung omitido: ya hay URLs suficientes para procesar.", flush=True)
+    else:
+        for label, listing_url in LISTING_URLS:
+            try:
+                print("-" * 60, flush=True)
+                print(f"Escaneando listado Samsung: {mask_url(listing_url)}", flush=True)
+                html = get_rendered_html(listing_url)
+                urls = descubrir_urls_producto(html, listing_url)
+                print(f"✅ URLs de producto detectadas en DOM: {len(urls)}", flush=True)
+                for u in sorted(urls):
+                    if u in seen_discovered:
+                        continue
+                    seen_discovered.add(u)
+                    discovered.append((u, label, listing_url))
+            except Exception as e:
+                print(f"❌ Error leyendo listado Samsung {mask_url(listing_url)}: {e}", flush=True)
+
+    if SAMSUNG_MAX_DISCOVERED > 0 and len(discovered) > SAMSUNG_MAX_DISCOVERED:
+        print(
+            f"✂️ Discovery Samsung recortado a {SAMSUNG_MAX_DISCOVERED} URLs (de {len(discovered)} detectadas).",
+            flush=True,
+        )
+        discovered = discovered[:SAMSUNG_MAX_DISCOVERED]
 
     productos_por_clave = {}
 
-    for url, label, listing_url in discovered:
+    total_discovered = len(discovered)
+    for idx, (url, label, listing_url) in enumerate(discovered, start=1):
         try:
             print("-" * 60, flush=True)
-            print(f"🔎 Inspeccionando: {mask_url(url)}", flush=True)
+            print(f"🔎 Inspeccionando [{idx}/{total_discovered}]: {mask_url(url)}", flush=True)
             info = extract_detail_info(url, label, listing_url, session)
             if not info:
                 continue
@@ -1152,7 +1226,11 @@ def obtener_datos_remotos():
             print(f"❌ ERROR extrayendo Samsung desde {mask_url(url)}: {e}", flush=True)
             summary_fallidos.append({'nombre': url, 'error': str(e)})
 
+        if idx % 25 == 0:
+            print(f"⏱️ Progreso Samsung: {idx}/{total_discovered} URLs revisadas | productos válidos: {len(productos_por_clave)}", flush=True)
+
         if len(productos_por_clave) >= OBJETIVO:
+            print(f"🎯 Objetivo alcanzado ({OBJETIVO}). Se detiene el discovery remoto.", flush=True)
             break
 
     productos = list(productos_por_clave.values())
