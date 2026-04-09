@@ -335,13 +335,26 @@ def derive_buy_url(detail_url: str, nombre: str) -> str:
 
 def normalize_product_url(url: str) -> str:
     try:
-        u = urllib.parse.urlsplit(url)
-        clean = f"{u.scheme}://{u.netloc}{u.path}"
-        clean = re.sub(r"/+", "/", clean.replace("https:/", "https://"))
-        return clean.rstrip("/") + "/"
+        raw = (url or '').strip()
+        if not raw:
+            return ''
+        if raw.startswith('//'):
+            raw = 'https:' + raw
+
+        u = urllib.parse.urlsplit(raw)
+        scheme = u.scheme or 'https'
+        netloc = u.netloc
+        path = re.sub(r'/+', '/', u.path or '/')
+
+        if netloc:
+            clean = urllib.parse.urlunsplit((scheme, netloc, path, '', ''))
+            return clean.rstrip('/') + '/'
+
+        if not path.startswith('/'):
+            path = '/' + path
+        return path.rstrip('/') + '/'
     except Exception:
         return url
-
 
 # --------------------------
 # SELENIUM
@@ -470,21 +483,85 @@ def descubrir_urls_producto(html: str, base_url: str):
     soup = BeautifulSoup(html, 'html.parser')
     urls = set()
 
-    for a in soup.find_all('a', href=True):
-        href = (a.get('href') or '').strip()
-        if not href:
-            continue
-        url = normalize_product_url(abs_url(base_url, href))
+    def _push(candidate: str):
+        if not candidate:
+            return
+        url = normalize_product_url(abs_url(base_url, candidate))
         if is_candidate_product_url(url):
             urls.add(url)
 
-    for m in re.finditer(r'https://www\.samsung\.com/es/smartphones/[^"\'\s<>]+', html, flags=re.I):
-        url = normalize_product_url(m.group(0))
-        if is_candidate_product_url(url):
-            urls.add(url)
+    # 1) Enlaces normales.
+    for a in soup.find_all('a', href=True):
+        href = (a.get('href') or '').strip()
+        if href:
+            _push(href)
+
+    # 2) Atributos data-* y onclick, frecuentes en Samsung/AEM.
+    for el in soup.find_all(True):
+        try:
+            for k, v in (el.attrs or {}).items():
+                if k == 'href':
+                    continue
+                vals = v if isinstance(v, list) else [v]
+                for val in vals:
+                    s = normalize_spaces(str(val))
+                    if '/es/smartphones/' not in s.lower() and 'https://www.samsung.com/es/smartphones/' not in s.lower():
+                        continue
+                    for m in re.finditer(r'https://www\.samsung\.com/es/smartphones/[^"\'\s<>)]+', s, flags=re.I):
+                        _push(m.group(0))
+                    for m in re.finditer(r'/es/smartphones/[^"\'\s<>)]+', s, flags=re.I):
+                        _push(m.group(0))
+        except Exception:
+            pass
+
+    # 3) Regex sobre el HTML completo, incluyendo rutas relativas o escapadas.
+    patterns = [
+        r'https://www\.samsung\.com/es/smartphones/[^"\'\s<>]+',
+        r'/es/smartphones/[^"\'\s<>]+',
+        r'\/es\/smartphones\/[^"\'\s<>]+',
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, html, flags=re.I):
+            raw = m.group(0).replace('\\/', '/')
+            _push(raw)
 
     return urls
 
+
+def descubrir_urls_producto_sitemap(session: requests.Session):
+    sitemap_root = 'https://www.samsung.com/es/sitemap.xml'
+    urls = set()
+    visited = set()
+
+    def _walk(sitemap_url: str, depth: int = 0):
+        if depth > 2 or sitemap_url in visited:
+            return
+        visited.add(sitemap_url)
+        try:
+            r = session.get(sitemap_url, headers=HEADERS, timeout=30)
+            if r.status_code != 200 or not r.text:
+                return
+            soup = BeautifulSoup(r.text, 'xml')
+            locs = [normalize_spaces(loc.get_text(' ', strip=True)) for loc in soup.find_all('loc')]
+            for loc in locs:
+                low = loc.lower()
+                if not loc:
+                    continue
+                if low.endswith('.xml'):
+                    if any(k in low for k in ['sitemap', 'smartphone', 'mobile', '/es/']):
+                        _walk(loc, depth + 1)
+                    continue
+                if '/es/smartphones/' not in low:
+                    continue
+                loc = re.sub(r'/(buy|specs|compare)/?$', '/', loc, flags=re.I)
+                loc = normalize_product_url(loc)
+                if is_candidate_product_url(loc):
+                    urls.add(loc)
+        except Exception:
+            return
+
+    _walk(sitemap_root, 0)
+    return urls
 
 # --------------------------
 # EXTRACCIÓN DETALLE / SPECS
@@ -927,13 +1004,26 @@ def obtener_datos_remotos():
     discovered = []
     seen_discovered = set()
 
+    # Discovery 1: sitemap (más estable que la landing renderizada).
+    try:
+        sitemap_urls = descubrir_urls_producto_sitemap(session)
+        print(f"Discovery sitemap Samsung -> URLs detectadas: {len(sitemap_urls)}", flush=True)
+        for u in sorted(sitemap_urls):
+            if u in seen_discovered:
+                continue
+            seen_discovered.add(u)
+            discovered.append((u, 'sitemap', 'https://www.samsung.com/es/sitemap.xml'))
+    except Exception as e:
+        print(f"⚠️ Error en discovery por sitemap Samsung: {e}", flush=True)
+
+    # Discovery 2: DOM renderizado del listado principal y páginas de apoyo.
     for label, listing_url in LISTING_URLS:
         try:
             print("-" * 60, flush=True)
             print(f"Escaneando listado Samsung: {mask_url(listing_url)}", flush=True)
             html = get_rendered_html(listing_url)
             urls = descubrir_urls_producto(html, listing_url)
-            print(f"✅ URLs de producto detectadas: {len(urls)}", flush=True)
+            print(f"✅ URLs de producto detectadas en DOM: {len(urls)}", flush=True)
             for u in sorted(urls):
                 if u in seen_discovered:
                     continue
