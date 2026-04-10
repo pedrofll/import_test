@@ -52,6 +52,7 @@ jobs:
           AFF_XIAOMI_STORE: ${{ secrets.AFF_XIAOMI_STORE }}
           AFF_ELCORTEINGLES: ${{ secrets.AFF_ELCORTEINGLES }}
           AFF_PHONEHOUSE: ${{ secrets.AFF_PHONEHOUSE }}
+          AFF_SAMSUNG: ${{ secrets.AFF_SAMSUNG }}
           
 
         run: python compras.py
