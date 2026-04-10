@@ -136,11 +136,7 @@ def acortar_url(url_larga: str) -> str:
 
 
 def unir_afiliado(url_base: str, aff: str) -> str:
-    """
-    Concatena AFF_SAMSUNG sin romper la URL base.
-    Resultado esperado:
-    https://www.samsung.com/es/smartphones/galaxy-s26/?sv1=...
-    """
+    """Une AFF_SAMSUNG sin generar /?/? ni dobles interrogaciones."""
     base = (url_base or "").strip().strip('"').strip("'")
     aff = (aff or "").strip().strip('"').strip("'")
     if not base or not aff:
@@ -148,17 +144,18 @@ def unir_afiliado(url_base: str, aff: str) -> str:
     if aff.lower().startswith("http"):
         return aff
 
-    # Limpieza muy agresiva del afiliado para evitar /?/? o variantes raras.
     aff = aff.replace("&amp;", "&")
+    # elimina prefijos raros tipo /? , ?? , && , /&
     aff = re.sub(r'^[\s/]+', '', aff)
-    aff = re.sub(r'^[?&]+', '', aff)
+    aff = re.sub(r'^[?&/]+', '', aff)
     aff = re.sub(r'^[\s/]+', '', aff)
 
     u = urllib.parse.urlsplit(base)
     scheme = u.scheme or "https"
     netloc = u.netloc
     path = (u.path or "").split("?")[0].rstrip("/") + "/"
-    return urllib.parse.urlunsplit((scheme, netloc, path, aff, ""))
+    query = aff
+    return urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
 
 
 def normalizar_nombre_samsung(nombre: str) -> str:
@@ -637,10 +634,19 @@ def extract_card_price_info(text: str, fallback_price: int = 0):
     if vals:
         plausible = vals
         if fallback_price > 0:
-            floor = max(150, int(fallback_price * 0.60))
-            plausible = [v for v in vals if v >= floor] or vals
+            low = max(150, int(fallback_price * 0.45))
+            high = max(5000, int(fallback_price * 1.35))
+            plausible = [v for v in vals if low <= v <= high] or vals
+
+        # actual: el menor importe plausible, pero no dejes que suba mucho sobre el fallback
         current = min(plausible)
+        if fallback_price > 0 and current > int(fallback_price * 1.05):
+            current = fallback_price
+
+        # original: un precio superior al actual y razonable respecto al fallback
         bigger = [v for v in plausible if v > current]
+        if fallback_price > 0:
+            bigger = [v for v in bigger if v <= int(max(fallback_price, current) * 1.35)] or bigger
         if bigger:
             original = max(bigger)
 
