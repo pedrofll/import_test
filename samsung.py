@@ -1131,47 +1131,60 @@ def obtener_imagen_categoria(cache_categorias, cat_id):
     return ''
 
 
-def actualizar_imagen_categoria(cache_categorias, cat_id, img_src):
-    if not cat_id or not img_src:
-        return False
-    if obtener_imagen_categoria(cache_categorias, cat_id):
-        return False
+def _norm_image_ref(url: str) -> str:
+    u = normalize_spaces(url)
+    if not u:
+        return ''
     try:
-        res = wcapi.put(f'products/categories/{cat_id}', {'image': {'src': img_src}}).json()
-        for i, c in enumerate(cache_categorias):
-            if c.get('id') == cat_id:
-                cache_categorias[i] = res
-                break
-        return True
+        p = urllib.parse.urlsplit(u)
+        return f"{p.netloc}{p.path}".lower().rstrip('/')
     except Exception:
+        return u.lower().rstrip('/')
+
+
+def _is_brand_like_image(url: str) -> bool:
+    low = _norm_image_ref(url)
+    if not low:
         return False
+    filename = low.rsplit('/', 1)[-1]
+    tokens = ['logo', 'marca', 'brand', 'placeholder', 'default', 'logo_marca', 'samsung_logo_marca']
+    return any(tok in filename for tok in tokens)
+
+
+def seleccionar_imagen_subcategoria(cache_categorias, id_padre, id_hijo):
+    """Usa SOLO la imagen propia de la subcategoría exacta.
+
+    Nunca usa la imagen del padre, ni logos de marca, ni imágenes clonadas del padre.
+    Si la subcategoría no tiene una imagen válida, devuelve ''.
+    """
+    if not id_hijo:
+        return ''
+    img_hijo = obtener_imagen_categoria(cache_categorias, id_hijo)
+    if not img_hijo:
+        return ''
+    img_padre = obtener_imagen_categoria(cache_categorias, id_padre)
+    if _is_brand_like_image(img_hijo):
+        return ''
+    if img_padre and _norm_image_ref(img_hijo) == _norm_image_ref(img_padre):
+        return ''
+    return img_hijo
 
 
 # --------------------------
 # WOO: SINCRONIZACIÓN
 # --------------------------
 
-def _norm_import_id(v: str) -> str:
-    return (v or '').strip().rstrip('/')
-
-
 def cargar_locales_samsung():
     locales = []
     page = 1
-    target_import = _norm_import_id(ID_IMPORTACION)
     while True:
         try:
             res = wcapi.get('products', params={'per_page': 100, 'page': page, 'status': 'any'}).json()
             if not res or 'message' in res:
                 break
             for p in res:
-                meta = {
-                    m['key']: str(m.get('value', ''))
-                    for m in p.get('meta_data', [])
-                    if isinstance(m, dict) and m.get('key')
-                }
-                imp = _norm_import_id(meta.get('importado_de', ''))
-                if imp == target_import:
+                meta = {m['key']: str(m.get('value', '')) for m in p.get('meta_data', []) if isinstance(m, dict) and m.get('key')}
+                if meta.get('importado_de', '').rstrip('/') == ID_IMPORTACION.rstrip('/'):
                     locales.append({'id': p['id'], 'nombre': p.get('name', ''), 'meta': meta})
             if len(res) < 100:
                 break
@@ -1201,41 +1214,10 @@ def sincronizar(remotos):
     print(f"📦 Productos Samsung existentes en la web: {len(locales)}", flush=True)
     print(f"📦 Productos remotos Samsung a procesar: {len(remotos)}", flush=True)
 
-    remote_by_key = {}
-    for r in remotos:
-        k = r.get('source_key') or source_key(r.get('nombre', ''), r.get('memoria', ''), r.get('capacidad', ''), r.get('fuente', FUENTE))
-        if not k:
-            continue
-        if k not in remote_by_key:
-            remote_by_key[k] = r
-        else:
-            try:
-                if int(r.get('precio_actual', 10**9)) < int(remote_by_key[k].get('precio_actual', 10**9)):
-                    remote_by_key[k] = r
-            except Exception:
-                pass
+    remote_by_key = {r['source_key']: r for r in remotos}
+    local_by_key = {build_local_key(l): l for l in locales}
 
-    local_groups = {}
-    for l in locales:
-        k = build_local_key(l)
-        local_groups.setdefault(k, []).append(l)
-
-    for k, group in list(local_groups.items()):
-        if len(group) <= 1:
-            continue
-        keeper = group[0]
-        for extra in group[1:]:
-            try:
-                wcapi.delete(f"products/{extra['id']}", params={'force': True})
-                summary_eliminados.append({'nombre': extra['nombre'], 'id': extra['id']})
-                print(f"🗑️ ELIMINADO (duplicado local) -> {extra['nombre']} (ID: {extra['id']})", flush=True)
-            except Exception as e:
-                print(f"❌ Error eliminando duplicado local {extra['nombre']}: {e}", flush=True)
-                summary_fallidos.append({'nombre': extra['nombre'], 'id': extra['id'], 'error': str(e)})
-        local_groups[k] = [keeper]
-
-    local_by_key = {k: v[0] for k, v in local_groups.items()}
-
+    # 1) Obsoletos
     for key, local in local_by_key.items():
         if key in remote_by_key:
             continue
@@ -1247,16 +1229,9 @@ def sincronizar(remotos):
             print(f"❌ Error eliminando obsoleto {local['nombre']}: {e}", flush=True)
             summary_fallidos.append({'nombre': local['nombre'], 'id': local['id'], 'error': str(e)})
 
+    # 2) Crear / actualizar
     for r in remotos:
         try:
-            r_key = r.get('source_key') or source_key(r.get('nombre', ''), r.get('memoria', ''), r.get('capacidad', ''), r.get('fuente', FUENTE))
-            if not r_key:
-                continue
-
-            url_base = (r.get('url_importada_sin_afiliado') or r.get('url_imp') or '').strip().split('?')[0]
-            url_con_afiliado = f"{url_base}{AFF_RAW}" if AFF_RAW else url_base
-            url_oferta = acortar_url(url_con_afiliado)
-
             print("-" * 60, flush=True)
             print(f"Detectado {r.get('nombre', '(sin nombre)')}", flush=True)
             print(f"1) Nombre: {r.get('nombre', '')}", flush=True)
@@ -1267,22 +1242,24 @@ def sincronizar(remotos):
             print(f"6) Precio actual: {r.get('precio_actual', 0)}", flush=True)
             print(f"7) Precio original: {r.get('precio_original', 0)}", flush=True)
             print(f"8) Código de descuento: {r.get('codigo_descuento', CODIGO_DESCUENTO_DEFAULT)}", flush=True)
-            print(f"9) URL Imagen: {r.get('img', '')}", flush=True)
+            url_base = (r.get('url_importada_sin_afiliado') or r.get('url_imp') or '').strip().split('?')[0]
+            url_con_afiliado = unir_afiliado(url_base, AFF_RAW) if AFF_RAW else url_base
+            url_oferta = acortar_url(url_con_afiliado)
+
+            match = local_by_key.get(r['source_key'])
+            id_padre, id_hijo = resolver_jerarquia(r['nombre'], cache_categorias)
+            img_final_producto = seleccionar_imagen_subcategoria(cache_categorias, id_padre, id_hijo)
+
+            print(f"9) URL Imagen: {img_final_producto}", flush=True)
             print(f"10) Enlace Importado: {mask_url(r.get('url_imp', ''))}", flush=True)
             print(f"11) Enlace Expandido: {mask_url(r.get('url_oferta_sin_acortar', ''))}", flush=True)
-            print(f"12) URL importada sin afiliado: {mask_url(url_base)}", flush=True)
+            print(f"12) URL importada sin afiliado: {mask_url(r.get('url_importada_sin_afiliado', ''))}", flush=True)
             print(f"13) URL sin acortar con mi afiliado: {mask_url(url_con_afiliado)}", flush=True)
             print(f"14) URL acortada con mi afiliado: {url_oferta}", flush=True)
             print(f"15) Enviado desde: {r.get('enviado_desde', ENVIADO_DESDE)}", flush=True)
-            print(f"15) Importado de: {ID_IMPORTACION}", flush=True)
-            print("16) Encolado para comparar con base de datos...", flush=True)
+            print(f"16) Importado de: {ID_IMPORTACION}", flush=True)
+            print("17) Encolado para comparar con base de datos...", flush=True)
             print("-" * 60, flush=True)
-
-            match = local_by_key.get(r_key)
-            id_padre, id_hijo = resolver_jerarquia(r['nombre'], cache_categorias)
-
-            img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
-            img_final_producto = img_subcat or ''
 
             if match:
                 meta = match['meta']
@@ -1297,17 +1274,17 @@ def sincronizar(remotos):
 
                 old_actual = _num_meta('precio_actual')
                 old_original = _num_meta('precio_original')
-
-                if int(r.get('precio_actual', 0) or 0) != old_actual:
-                    cambios.append(f"precio_actual ({old_actual} -> {r['precio_actual']})")
+                if int(r['precio_actual']) != old_actual:
+                    cambios.append(f"precio_actual: {old_actual}€ -> {r['precio_actual']}€")
                     payload['sale_price'] = str(r['precio_actual'])
                     payload['meta_data'].append({'key': 'precio_actual', 'value': str(r['precio_actual'])})
 
-                if int(r.get('precio_original', 0) or 0) != old_original:
-                    cambios.append(f"precio_original ({old_original} -> {r['precio_original']})")
+                if int(r['precio_original']) != old_original:
+                    cambios.append(f"precio_original: {old_original}€ -> {r['precio_original']}€")
                     payload['regular_price'] = str(r['precio_original'])
                     payload['meta_data'].append({'key': 'precio_original', 'value': str(r['precio_original'])})
 
+                # Otros metadatos, por si cambian.
                 compare_meta = {
                     'codigo_de_descuento': r.get('codigo_descuento', CODIGO_DESCUENTO_DEFAULT),
                     'enviado_desde': r.get('enviado_desde', ENVIADO_DESDE),
@@ -1318,15 +1295,17 @@ def sincronizar(remotos):
                     'url_oferta': url_oferta,
                     'url_importada_sin_afiliado': url_base,
                     'url_oferta_sin_acortar': r.get('url_oferta_sin_acortar', url_base),
-                    '_odm_source_key': r_key,
-                    '_odm_source_model_code': r.get('model_code', ''),
-                    '_odm_source_listing': r.get('origen_listado', ''),
-                    '_odm_source_page': r.get('origen_pagina', ''),
                 }
                 for k, v in compare_meta.items():
                     if str(meta.get(k, '')) != str(v):
-                        cambios.append(f"{k} ({meta.get(k, '')} -> {v})")
+                        cambios.append(f"{k}: {meta.get(k, '')} -> {v}")
                         payload['meta_data'].append({'key': k, 'value': v})
+
+                current_img_meta = str(meta.get('imagen_producto', '') or '')
+                if current_img_meta != str(img_final_producto):
+                    cambios.append(f"imagen_producto: {current_img_meta} -> {img_final_producto}")
+                    payload['meta_data'].append({'key': 'imagen_producto', 'value': img_final_producto})
+                    payload['images'] = ([{'src': img_final_producto}] if img_final_producto else [])
 
                 if cambios:
                     wcapi.put(f"products/{match['id']}", payload)
@@ -1337,6 +1316,7 @@ def sincronizar(remotos):
                     print(f"⏭️ SIN CAMBIOS -> {r['nombre']} (ID: {match['id']})", flush=True)
                 continue
 
+            # CREAR
             data = {
                 'name': r['nombre'],
                 'type': 'simple',
@@ -1362,9 +1342,9 @@ def sincronizar(remotos):
                     {'key': 'url_importada_sin_afiliado', 'value': url_base},
                     {'key': 'url_sin_acortar_con_mi_afiliado', 'value': url_con_afiliado},
                     {'key': 'url_oferta', 'value': url_oferta},
-                    {'key': 'imagen_producto', 'value': img_final_producto},
+                    {'key': 'imagen_producto', 'value': r.get('img', '')},
                     {'key': 'version', 'value': r.get('version', VERSION)},
-                    {'key': '_odm_source_key', 'value': r_key},
+                    {'key': '_odm_source_key', 'value': r['source_key']},
                     {'key': '_odm_source_model_code', 'value': r.get('model_code', '')},
                     {'key': '_odm_source_listing', 'value': r.get('origen_listado', '')},
                     {'key': '_odm_source_page', 'value': r.get('origen_pagina', '')},
@@ -1382,11 +1362,15 @@ def sincronizar(remotos):
                         new_id = prod.get('id')
                         summary_creados.append({'nombre': r['nombre'], 'id': new_id})
                         print(f"✅ CREADO -> {r['nombre']} (ID: {new_id})", flush=True)
+
                         try:
                             permalink = prod.get('permalink', '')
                             if permalink:
                                 url_short = acortar_url(permalink)
-                                wcapi.put(f"products/{new_id}", {'meta_data': [{'key': 'url_post_acortada', 'value': url_short}]})
+                                wcapi.put(
+                                    f"products/{new_id}",
+                                    {'meta_data': [{'key': 'url_post_acortada', 'value': url_short}]},
+                                )
                         except Exception:
                             pass
                         creado = True
@@ -1433,6 +1417,7 @@ def sincronizar(remotos):
         else:
             print(f"- {item}", flush=True)
     print("============================================================", flush=True)
+
 
 def main():
     remotos = obtener_datos_remotos()
