@@ -13,18 +13,14 @@ from woocommerce import API
 # ============================================================
 #  SAMSUNG SCRAPER (LISTING-ONLY + WC SYNC)
 # ============================================================
-# Reglas operativas aplicadas:
-#  - Solo se lee la página principal:
-#      https://www.samsung.com/es/smartphones/all-smartphones/
-#  - NO se navega a fichas de producto para descubrir productos.
-#  - La URL de compra real puede salir de JSON-LD con modelCode, pero:
-#      * enlace_de_compra_importado  => URL base SIN /buy/?...
-#      * url_importada_sin_afiliado  => URL base SIN /buy/?...
-#      * url_oferta_sin_acortar      => URL expandida/original (si existe buy+modelCode)
-#      * url_sin_acortar_con_mi_afiliado => URL base + AFF_SAMSUNG
-#  - La imagen del producto NO se sube desde Samsung.
-#    Se usa la imagen que ya exista en la subcategoría/categoría del producto.
-#  - La RAM se resuelve principalmente con mapa local por nombre+capacidad.
+# Reglas operativas:
+#  - Solo lee https://www.samsung.com/es/smartphones/all-smartphones/
+#  - No descubre productos desde fichas; usa cards visibles + JSON-LD del listing.
+#  - La URL base importada se guarda SIN /buy/?...
+#  - La URL expandida conserva el enlace real del boton Comprar (si existe).
+#  - El afiliado usa AFF_SAMSUNG sobre la URL base.
+#  - La imagen del producto usa SOLO la imagen existente en la subcategoria exacta.
+#    Si la subcategoria no existe o no tiene imagen propia, no se pone ninguna.
 # ============================================================
 
 DEFAULT_START_URL = "https://www.samsung.com/es/smartphones/all-smartphones/"
@@ -68,9 +64,9 @@ summary_fallidos = []
 summary_duplicados = []
 
 EURO_AMOUNT_RE = r"(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d{1,5}(?:[\.,]\d{1,2})?)\s*€"
+CAP_RE = re.compile(r"\b(64|128|256|512|1024)\s*GB\b|\b(1|2)\s*TB\b", re.I)
 
-# Fallback local de RAM por nombre+capacidad.
-# Se usa para NO tener que entrar en las páginas de producto.
+# Mapa de RAM verificado con la documentacion oficial actual de Samsung ES.
 RAM_BY_NAME_CAP = {
     ("Samsung Galaxy S26", "256GB"): "12GB",
     ("Samsung Galaxy S26", "512GB"): "12GB",
@@ -84,10 +80,25 @@ RAM_BY_NAME_CAP = {
     ("Samsung Galaxy Z Fold7", "1TB"): "16GB",
     ("Samsung Galaxy Z Flip7", "256GB"): "12GB",
     ("Samsung Galaxy Z Flip7", "512GB"): "12GB",
+    ("Samsung Galaxy Z Flip7 FE", "128GB"): "8GB",
+    ("Samsung Galaxy Z Flip7 FE", "256GB"): "8GB",
+    ("Samsung Galaxy S25", "128GB"): "12GB",
+    ("Samsung Galaxy S25", "256GB"): "12GB",
+    ("Samsung Galaxy S25", "512GB"): "12GB",
+    ("Samsung Galaxy S25+", "256GB"): "12GB",
+    ("Samsung Galaxy S25+", "512GB"): "12GB",
+    ("Samsung Galaxy S25 Ultra", "256GB"): "12GB",
+    ("Samsung Galaxy S25 Ultra", "512GB"): "12GB",
+    ("Samsung Galaxy S25 Ultra", "1TB"): "12GB",
+    ("Samsung Galaxy S25 FE", "128GB"): "8GB",
+    ("Samsung Galaxy S25 FE", "256GB"): "8GB",
+    ("Samsung Galaxy S25 FE", "512GB"): "8GB",
     ("Samsung Galaxy A57 5G", "512GB"): "12GB",
     ("Samsung Galaxy A37 5G", "256GB"): "8GB",
+    ("Samsung Galaxy A26 5G", "256GB"): "8GB",
     ("Samsung Galaxy A17 5G", "256GB"): "8GB",
     ("Samsung Galaxy A17", "256GB"): "8GB",
+    ("Samsung Galaxy A16", "256GB"): "8GB",
     ("Samsung Galaxy S25 Edge", "512GB"): "12GB",
 }
 
@@ -182,29 +193,74 @@ def should_skip_by_name(nombre: str) -> bool:
     return any(x in u for x in [" TAB", "IPAD", " PAD"]) or u.startswith("TAB ")
 
 
+def is_generic_name(nombre: str) -> bool:
+    t = normalizar_nombre_samsung(nombre)
+    base = t.replace("Samsung ", "")
+    generic = {
+        "Galaxy",
+        "Galaxy A",
+        "Galaxy S",
+        "Galaxy Z",
+        "Samsung Galaxy",
+        "Samsung Galaxy A",
+        "Samsung Galaxy S",
+        "Samsung Galaxy Z",
+    }
+    return (not t) or (t in generic) or (base in generic)
+
+
 def normalizar_nombre_samsung(nombre: str) -> str:
     t = normalize_spaces(nombre)
     if not t:
         return ""
+
     t = re.sub(r"\bExclusivo Online\b", "", t, flags=re.I)
+    t = re.sub(r"\bComprar\b.*$", "", t, flags=re.I)
+    t = re.sub(r"\b(64|128|256|512|1024)\s*GB\b", "", t, flags=re.I)
+    t = re.sub(r"\b(1|2)\s*TB\b", "", t, flags=re.I)
     t = normalize_spaces(t)
+
     if t.lower().startswith("samsung "):
         t = t[len("Samsung "):]
+    if not t.lower().startswith("galaxy "):
+        t = "Galaxy " + t
+
     words = []
-    for w in t.split():
-        if re.search(r"\d", w) and re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", w):
-            w = "".join(ch.upper() if ch.isalpha() else ch for ch in w)
-        elif w.lower() in {"gb", "tb"}:
-            w = w.upper()
-        elif w in {"+"}:
-            pass
+    for raw in t.split():
+        low = raw.lower()
+        if low == "galaxy":
+            words.append("Galaxy")
+        elif low in {"z", "s", "a"}:
+            words.append(low.upper())
+        elif low == "fe":
+            words.append("FE")
+        elif low == "5g":
+            words.append("5G")
+        elif re.fullmatch(r"s\d+\+?", low):
+            words.append(raw[0].upper() + raw[1:])
+        elif re.fullmatch(r"a\d+", low):
+            words.append(raw[0].upper() + raw[1:])
+        elif re.fullmatch(r"fold\d+", low):
+            words.append("Fold" + raw[len("fold"):])
+        elif re.fullmatch(r"flip\d+", low):
+            words.append("Flip" + raw[len("flip"):])
+        elif low in {"ultra", "edge", "plus"}:
+            words.append(low.title())
+        elif re.fullmatch(r"\d+(gb|tb)", low):
+            num = re.match(r"\d+", low).group(0)
+            unit = low[len(num):].upper()
+            words.append(num + unit)
         else:
-            w = w[:1].upper() + w[1:]
-        words.append(w)
+            words.append(raw[:1].upper() + raw[1:])
+
     out = normalize_spaces(" ".join(words))
     if not out.lower().startswith("galaxy "):
-        out = f"Galaxy {out}"
-    return normalize_spaces(f"Samsung {out}")
+        out = "Galaxy " + out
+    return normalize_spaces("Samsung " + out)
+
+
+def limpiar_nombre_para_categoria(nombre: str) -> str:
+    return normalize_spaces(nombre)
 
 
 def parse_capacidad_desde_texto(txt: str) -> str:
@@ -223,7 +279,6 @@ def source_key(nombre: str, memoria: str, capacidad: str, fuente: str = FUENTE) 
 
 
 def canonical_samsung_import_url(url: str) -> str:
-    """Convierte buy URL de Samsung a URL base sin /buy/?..."""
     try:
         raw = normalize_spaces(url)
         if not raw or raw.lower().startswith("javascript"):
@@ -238,20 +293,44 @@ def canonical_samsung_import_url(url: str) -> str:
         return (url or "").strip()
 
 
-def item_name_key(nombre: str) -> str:
-    t = normalizar_nombre_samsung(nombre).lower()
-    t = t.replace("samsung ", "")
-    t = t.replace("exclusivo online", "")
-    t = normalize_spaces(t)
-    return t
+def extraer_model_code(url: str) -> str:
+    try:
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        vals = q.get("modelCode") or q.get("modelcode") or []
+        if vals:
+            return vals[0].strip().upper()
+    except Exception:
+        pass
+    m = re.search(r"\bSM-[A-Z0-9]+\b", url or "", flags=re.I)
+    return m.group(0).upper() if m else ""
 
 
-def resolve_memory(nombre: str, capacidad: str) -> str:
-    return RAM_BY_NAME_CAP.get((normalizar_nombre_samsung(nombre), capacidad), "")
+def infer_memoria_samsung_desde_listing(nombre: str, capacidad: str) -> str:
+    return RAM_BY_NAME_CAP.get((normalizar_nombre_samsung(nombre), (capacidad or "").upper()), "")
+
+
+def clean_image_ref(url: str) -> str:
+    try:
+        if not url:
+            return ""
+        u = urllib.parse.urlsplit(url)
+        return f"{u.netloc}{u.path}".lower().rstrip("/")
+    except Exception:
+        return (url or "").lower().split("?")[0].rstrip("/")
+
+
+def same_image_ref(url_a: str, url_b: str) -> bool:
+    a = clean_image_ref(url_a)
+    b = clean_image_ref(url_b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return a.split("/")[-1] == b.split("/")[-1]
 
 
 # --------------------------
-# SELENIUM (solo para renderizar listing principal)
+# SELENIUM (solo listing principal)
 # --------------------------
 
 def get_driver():
@@ -263,7 +342,7 @@ def get_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1440,3000")
+    opts.add_argument("--window-size=1440,2800")
     opts.add_argument(
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -274,33 +353,33 @@ def get_driver():
 def dismiss_overlays(driver):
     from selenium.webdriver.common.by import By
 
-    xpaths = [
+    candidates = [
         "//button[contains(., 'Aceptar')]",
         "//button[contains(., 'Acepto')]",
         "//button[contains(., 'Aceptar todo')]",
         "//button[contains(., 'OK')]",
         "//button[contains(., 'Continuar')]",
-        "//a[contains(., 'IR A SAMSUNG.COM')]",
-        "//button[contains(., 'MÁS TARDE')]",
-        "//button[contains(., 'MAS TARDE')]",
         "//button[contains(., 'Sí')]",
+        "//button[contains(., 'MAS TARDE')]",
+        "//button[contains(., 'MÁS TARDE')]",
+        "//a[contains(., 'IR A SAMSUNG.COM')]",
     ]
     for _ in range(3):
-        for xp in xpaths:
+        for xp in candidates:
             try:
                 els = driver.find_elements(By.XPATH, xp)
                 for el in els[:3]:
                     if el.is_displayed():
                         try:
                             driver.execute_script("arguments[0].click();", el)
-                            time.sleep(0.8)
+                            time.sleep(0.5)
                         except Exception:
                             pass
             except Exception:
                 pass
 
 
-def scroll_page(driver, rounds: int = 20):
+def scroll_page(driver, rounds: int = 12):
     last_h = 0
     stable = 0
     for _ in range(rounds):
@@ -313,301 +392,375 @@ def scroll_page(driver, rounds: int = 20):
             else:
                 stable = 0
             last_h = h
-            if stable >= 3:
+            if stable >= 2:
                 break
         except Exception:
             break
-
-
-def get_rendered_html(url: str) -> str:
-    driver = get_driver()
-    try:
-        driver.set_page_load_timeout(45)
-        driver.get(url)
-        time.sleep(3)
-        dismiss_overlays(driver)
-        scroll_page(driver)
-        return driver.page_source
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
 
 
 # --------------------------
 # PARSEO JSON-LD DEL LISTING
 # --------------------------
 
-def iter_dicts(obj):
-    if isinstance(obj, dict):
-        yield obj
-        for v in obj.values():
-            yield from iter_dicts(v)
-    elif isinstance(obj, list):
-        for x in obj:
-            yield from iter_dicts(x)
-
-
-def extract_jsonld_products(html: str):
+def parse_jsonld_listing_items(html: str):
+    soup = BeautifulSoup(html, "html.parser")
     out = []
-    seen = set()
-    for m in re.finditer(r"<script[^>]*type=['\"]application/ld\+json['\"][^>]*>(.*?)</script>", html, flags=re.I | re.S):
-        raw = (m.group(1) or "").strip()
+
+    def _iter_nodes(data):
+        if isinstance(data, dict):
+            yield data
+            for v in data.values():
+                yield from _iter_nodes(v)
+        elif isinstance(data, list):
+            for v in data:
+                yield from _iter_nodes(v)
+
+    for sc in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+        raw = (sc.string or sc.get_text() or "").strip()
         if not raw:
             continue
         try:
             data = json.loads(raw)
         except Exception:
             continue
-        for node in iter_dicts(data):
-            t = node.get("@type")
-            if isinstance(t, list):
-                t = " ".join(str(x) for x in t)
-            t = str(t or "")
-            if "Product" not in t:
+        nodes = list(_iter_nodes(data))
+        for node in nodes:
+            if not isinstance(node, dict):
                 continue
-            name = normalize_spaces(node.get("name") or "")
-            if not name:
+            if str(node.get("@type") or "") != "Product":
                 continue
-            buy_url = normalize_spaces(node.get("url") or "")
-            if not buy_url:
-                offers = node.get("offers") or {}
-                if isinstance(offers, dict):
-                    buy_url = normalize_spaces(offers.get("url") or "")
-            image = node.get("image") or ""
-            if isinstance(image, list) and image:
-                image = image[0]
-            image = abs_url(START_URL, str(image)) if image else ""
+            name = normalizar_nombre_samsung(node.get("name") or "")
+            url = abs_url(START_URL, str(node.get("url") or "").strip())
+            image = abs_url(START_URL, str(node.get("image") or "").strip())
             offers = node.get("offers") or {}
             price = 0
             if isinstance(offers, dict):
                 price = parse_eur_num(str(offers.get("price") or ""))
-            key = (item_name_key(name), buy_url, price)
+            if not name:
+                continue
+            out.append({
+                "name": name,
+                "price": price,
+                "buy_url": url,
+                "base_url": canonical_samsung_import_url(url),
+                "image": image,
+                "model_code": extraer_model_code(url),
+            })
+
+    dedup = {}
+    for item in out:
+        key = (item["name"], item["price"], item["buy_url"])
+        dedup[key] = item
+    return list(dedup.values())
+
+
+# --------------------------
+# CARD EXTRACTION
+# --------------------------
+
+def collect_listing_card_roots(driver):
+    from selenium.webdriver.common.by import By
+
+    roots = []
+    seen = set()
+    try:
+        buy_els = driver.find_elements(By.XPATH, "//*[self::a or self::button][contains(normalize-space(.), 'Comprar')]")
+    except Exception:
+        buy_els = []
+
+    for btn in buy_els:
+        try:
+            if not btn.is_displayed():
+                continue
+        except Exception:
+            continue
+
+        current = btn
+        chosen = None
+        for _ in range(12):
+            try:
+                current = current.find_element(By.XPATH, "./..")
+            except Exception:
+                break
+            txt = normalize_spaces(getattr(current, "text", "") or "")
+            if not txt:
+                continue
+            if "Galaxy" not in txt or "€" not in txt:
+                continue
+            if not CAP_RE.search(txt):
+                continue
+            chosen = current
+            break
+
+        if not chosen:
+            continue
+
+        try:
+            txt = normalize_spaces(chosen.text)
+            key = normalize_spaces(txt[:220]).lower()
             if key in seen:
                 continue
             seen.add(key)
-            out.append({
-                "raw_name": name,
-                "clean_name": normalizar_nombre_samsung(name),
-                "buy_url": buy_url,
-                "import_url": canonical_samsung_import_url(buy_url),
-                "image": image,
-                "price": price,
-                "exclusive": "exclusivo online" in name.lower(),
-            })
+            roots.append(chosen)
+        except Exception:
+            pass
+    return roots
+
+
+def card_lines(card):
+    try:
+        raw = card.text or ""
+    except Exception:
+        raw = ""
+    out = []
+    for line in raw.splitlines():
+        line = normalize_spaces(line)
+        if line:
+            out.append(line)
     return out
 
 
-# --------------------------
-# PARSEO DE CARDS DEL LISTING
-# --------------------------
-
-def is_selected_candidate(tag) -> bool:
-    try:
-        cur = tag
-        for _ in range(3):
-            if cur is None:
-                break
-            attrs = []
-            for v in cur.attrs.values():
-                if isinstance(v, list):
-                    attrs.extend(str(x) for x in v)
-                else:
-                    attrs.append(str(v))
-            attr_txt = " ".join(attrs).lower()
-            if cur.get("aria-selected") == "true":
-                return True
-            if cur.get("aria-pressed") == "true":
-                return True
-            if cur.get("aria-current") == "true":
-                return True
-            if cur.get("data-selected") == "true":
-                return True
-            if any(x in attr_txt for x in [
-                "selected", "is-selected", "active", "is-active",
-                "current", "checked", "focus", "on",
-            ]):
-                return True
-            if cur.find("input", checked=True):
-                return True
-            cur = cur.parent
-    except Exception:
-        pass
-    return False
-
-
-def extract_name_from_block(block) -> str:
-    # prioridad: headings / tags cortos con 'Galaxy'
+def extract_title_from_card(card):
+    lines = card_lines(card)
     candidates = []
-    for tag in block.find_all(["h1", "h2", "h3", "h4", "h5", "strong", "b", "span", "a", "div"], limit=200):
-        txt = normalize_spaces(tag.get_text(" ", strip=True))
-        if "Galaxy" not in txt:
+    for line in lines:
+        if "Galaxy" not in line:
             continue
-        if len(txt) < 6 or len(txt) > 90:
+        if "Comprar" in line:
             continue
-        if "Comprar" in txt or "Más información" in txt or "Comparar" in txt:
+        if "€" in line:
             continue
-        if "€" in txt:
+        if len(line) > 90:
             continue
-        candidates.append(txt)
-    candidates = [c for c in candidates if re.search(r"\bGalaxy\b", c, flags=re.I)]
-    candidates = sorted(candidates, key=lambda x: (len(x), x))
+        candidates.append(line)
     if candidates:
-        # preferimos nombres sin basura posterior
-        for c in candidates:
-            if re.search(r"Galaxy\s+(S|Z|A)", c, flags=re.I):
-                return c
         return candidates[0]
-    txt = normalize_spaces(block.get_text(" ", strip=True))
-    m = re.search(r"(Galaxy\s+[A-Za-z0-9+\- ]{2,60})", txt, flags=re.I)
-    return m.group(1).strip() if m else ""
+
+    text = normalize_spaces(" ".join(lines))
+    m = re.search(
+        r"((?:Samsung\s+)?Galaxy\s+(?:Z\s+)?(?:Flip\d+|Fold\d+|S\d+\+?|A\d+)(?:\s+Ultra|\s+Edge|\s+FE)?(?:\s+5G)?)",
+        text,
+        flags=re.I,
+    )
+    return normalize_spaces(m.group(1)) if m else ""
 
 
-
-def extract_selected_capacity(block) -> str:
-    caps = []
-    for tag in block.find_all(["button", "a", "li", "span", "div", "label"], limit=300):
-        txt = normalize_spaces(tag.get_text(" ", strip=True))
-        cap = parse_capacidad_desde_texto(txt)
-        if not cap:
-            continue
-        if len(txt) > 30:
-            continue
-        score = 0
-        if is_selected_candidate(tag):
-            score += 10
-        # preferimos textos "limpios" (solo capacidad)
-        if re.fullmatch(r"(64|128|256|512|1024)\s*GB|(1|2)\s*TB", txt, flags=re.I):
-            score += 3
-        caps.append((score, txt, cap))
-    if not caps:
-        return ""
-    caps.sort(key=lambda x: (x[0], -len(x[1])), reverse=True)
-    if caps[0][0] > 0:
-        return caps[0][2]
-    # fallback muy conservador: primer texto corto con capacidad
-    return caps[0][2]
+def extract_selected_capacity_from_card(card):
+    lines = card_lines(card)
+    for line in lines:
+        cap = parse_capacidad_desde_texto(line)
+        if cap:
+            return cap
+    text = normalize_spaces(" ".join(lines))
+    return parse_capacidad_desde_texto(text)
 
 
-
-def extract_prices_from_block(block):
-    text = normalize_spaces(block.get_text(" ", strip=True))
-    current = 0
-    original = 0
-
-    m_antes = re.search(r"Antes\s*([\d\.,]+)\s*€", text, flags=re.I)
-    if m_antes:
-        original = parse_eur_num(m_antes.group(1))
-
-    current_candidates = []
-    for tag in block.find_all(["span", "div", "p", "strong", "b"], limit=400):
-        txt = normalize_spaces(tag.get_text(" ", strip=True))
-        if "€" not in txt:
-            continue
-        if "/mes" in txt.lower():
-            continue
-        vals = parse_eur_all(txt)
-        if not vals:
-            continue
-        score = 0
-        if "antes" in txt.lower():
-            score -= 8
-        if "ahorra" in txt.lower():
-            score -= 6
-        if "dto" in txt.lower() or "descuento" in txt.lower():
-            score -= 5
-        if len(vals) == 1:
-            score += 2
-        if len(txt) <= 20:
-            score += 2
-        current_candidates.append((score, vals[0], txt))
-    current_candidates.sort(key=lambda x: x[0], reverse=True)
-    for score, val, txt in current_candidates:
-        if score >= 0:
-            current = val
-            break
-    if current == 0:
-        vals = parse_eur_all(text)
-        vals = [v for v in vals if v > 0]
-        if vals:
-            current = vals[0]
-    if original == 0:
-        # busca elementos tachados
-        for tag in block.find_all(["s", "del"], limit=20):
-            vals = parse_eur_all(tag.get_text(" ", strip=True))
-            if vals:
-                original = vals[0]
-                break
-    if original == 0 and current:
-        vals = parse_eur_all(text)
-        bigger = [v for v in vals if v > current]
-        if bigger:
-            original = max(bigger)
-    if original == 0 and current:
-        original = calcular_precio_original(current)
-    return int(current or 0), int(original or 0)
+def extract_card_price_info(card):
+    text = normalize_spaces(" ".join(card_lines(card)))
+    prices = [v for v in parse_eur_all(text) if v >= 50]
+    if not prices:
+        return 0, 0
+    cur = min(prices)
+    orig = max(prices)
+    if orig < cur:
+        orig = cur
+    if orig == cur:
+        orig = calcular_precio_original(cur)
+    return cur, orig
 
 
+def extract_buy_url_from_card(card):
+    from selenium.webdriver.common.by import By
 
-def extract_coupon_from_block(block) -> str:
-    text = normalize_spaces(block.get_text(" ", strip=True))
-    m = re.search(r"(?:c[oó]digo|cup[oó]n)\s*:?\s*([A-Z0-9]{4,20})", text, flags=re.I)
-    if m:
-        return m.group(1).upper()
-    return CODIGO_DESCUENTO_DEFAULT
-
-
-
-def find_card_blocks(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    blocks = []
-    seen = set()
-    buy_nodes = []
-    for node in soup.find_all(string=re.compile(r"^\s*Comprar\s*$", flags=re.I)):
-        if node and node.parent is not None:
-            buy_nodes.append(node.parent)
-    for node in buy_nodes:
-        cur = node
-        chosen = None
-        for _ in range(8):
-            cur = getattr(cur, "parent", None)
-            if cur is None:
-                break
-            txt = normalize_spaces(cur.get_text(" ", strip=True))
-            if "Galaxy" not in txt:
-                continue
-            if "€" not in txt:
-                continue
-            chosen = cur
-            break
-        if chosen is None:
-            continue
-        sig = hash(str(chosen)[:3000])
-        if sig in seen:
-            continue
-        seen.add(sig)
-        blocks.append(chosen)
-    return blocks
+    # Prioridad: enlaces reales del boton comprar.
+    xpaths = [
+        ".//*[@href]",
+        ".//*[@data-href]",
+        ".//*[@data-url]",
+        ".//*[@onclick]",
+    ]
+    for xp in xpaths:
+        try:
+            els = card.find_elements(By.XPATH, xp)
+        except Exception:
+            els = []
+        for el in els:
+            candidates = []
+            for attr in ("href", "data-href", "data-url", "onclick"):
+                try:
+                    v = (el.get_attribute(attr) or "").strip()
+                except Exception:
+                    v = ""
+                if v:
+                    candidates.append(v)
+            for v in candidates:
+                m = re.search(r'https://www\.samsung\.com/es/smartphones/[^"\'\s]+', v, flags=re.I)
+                if m:
+                    return abs_url(START_URL, m.group(0))
+                if "/es/smartphones/" in v:
+                    return abs_url(START_URL, v)
+    return ""
 
 
+# --------------------------
+# JSON-LD MATCHING
+# --------------------------
 
-def match_jsonld_item(card_raw_name: str, clean_name: str, current_price: int, json_items):
-    key = item_name_key(clean_name)
-    card_exclusive = "exclusivo online" in (card_raw_name or "").lower()
-    candidates = [x for x in json_items if item_name_key(x.get("clean_name") or x.get("raw_name") or "") == key]
+def item_name_key(nombre: str) -> str:
+    t = normalizar_nombre_samsung(nombre).lower()
+    t = t.replace("samsung ", "")
+    t = t.replace("exclusivo online", "")
+    return normalize_spaces(t)
+
+
+def select_jsonld_match(card_name: str, current_price: int, items):
+    if not items:
+        return None
+
+    key = item_name_key(card_name)
+    candidates = [it for it in items if item_name_key(it["name"]) == key]
+    if not candidates and is_generic_name(card_name):
+        if current_price > 0:
+            candidates = list(items)
+
     if not candidates:
         return None
-    same_exclusive = [x for x in candidates if bool(x.get("exclusive")) == card_exclusive]
-    if same_exclusive:
-        candidates = same_exclusive
-    if current_price:
-        candidates = sorted(candidates, key=lambda x: abs(int(x.get("price") or 0) - int(current_price)))
+
+    if current_price > 0:
+        candidates = sorted(candidates, key=lambda it: abs(int(it.get("price") or 0) - current_price))
     return candidates[0]
 
 
 # --------------------------
-# WOO CATEGORÍAS / IMAGENES
+# EXTRACCION PRINCIPAL
+# --------------------------
+
+def extract_products_from_main_listing(listing_url: str):
+    driver = get_driver()
+    productos = []
+    seen_keys = set()
+
+    try:
+        print(f"🪄 Samsung listing-only: leyendo solo la página principal {mask_url(listing_url)}", flush=True)
+        driver.set_page_load_timeout(45)
+        driver.get(listing_url)
+        time.sleep(3)
+        dismiss_overlays(driver)
+        scroll_page(driver, rounds=14)
+        dismiss_overlays(driver)
+        time.sleep(1)
+
+        html = driver.page_source
+        jsonld_items = parse_jsonld_listing_items(html)
+        print(f"✅ Items JSON-LD Samsung detectados: {len(jsonld_items)}", flush=True)
+
+        roots = collect_listing_card_roots(driver)
+        print(f"✅ Cards Samsung detectadas en listing: {len(roots)}", flush=True)
+
+        for card in roots:
+            raw_title = extract_title_from_card(card)
+            nombre = normalizar_nombre_samsung(raw_title)
+            capacidad = extract_selected_capacity_from_card(card)
+            precio_actual, precio_original = extract_card_price_info(card)
+            buy_url = extract_buy_url_from_card(card)
+
+            jsonld_match = select_jsonld_match(nombre, precio_actual, jsonld_items)
+            if (not nombre or is_generic_name(nombre)) and jsonld_match:
+                nombre = jsonld_match["name"]
+            if not buy_url and jsonld_match:
+                buy_url = jsonld_match.get("buy_url", "")
+            if precio_actual <= 0 and jsonld_match and int(jsonld_match.get("price") or 0) > 0:
+                precio_actual = int(jsonld_match["price"])
+                precio_original = precio_original or calcular_precio_original(precio_actual)
+
+            nombre = normalizar_nombre_samsung(nombre)
+            if not nombre or is_generic_name(nombre):
+                continue
+            if should_skip_by_name(nombre):
+                continue
+            if not capacidad:
+                print(f"⚠️ Card Samsung sin capacidad visible para {nombre}. Se ignora.", flush=True)
+                continue
+            if precio_actual <= 0:
+                print(f"⚠️ Card Samsung sin precio usable para {nombre} {capacidad}. Se ignora.", flush=True)
+                continue
+
+            memoria = infer_memoria_samsung_desde_listing(nombre, capacidad)
+            if not memoria:
+                print(f"⚠️ Card Samsung sin RAM resoluble para {nombre} {capacidad}. Se ignora.", flush=True)
+                continue
+
+            url_expandida = buy_url or ""
+            url_base = canonical_samsung_import_url(url_expandida)
+            model_code = extraer_model_code(url_expandida)
+            url_afiliada = unir_afiliado(url_base, AFF_SAMSUNG) if url_base else ""
+            url_corta = acortar_url(url_afiliada) if url_afiliada else ""
+
+            key = source_key(nombre, memoria, capacidad, FUENTE)
+            if key in seen_keys:
+                summary_duplicados.append(f"{nombre} {capacidad} {memoria}")
+                continue
+            seen_keys.add(key)
+
+            productos.append({
+                "nombre": nombre,
+                "memoria": memoria,
+                "capacidad": capacidad,
+                "precio_actual": int(precio_actual),
+                "precio_original": int(precio_original or calcular_precio_original(precio_actual)),
+                "img": "",
+                "url_imp": url_base,
+                "url_oferta_sin_acortar": url_expandida,
+                "url_importada_sin_afiliado": url_base,
+                "url_sin_acortar_con_mi_afiliado": url_afiliada,
+                "url_oferta": url_corta,
+                "enviado_desde": ENVIADO_DESDE,
+                "enviado_desde_tg": ENVIADO_DESDE_TG,
+                "fecha": datetime.now().strftime("%d/%m/%Y"),
+                "version": VERSION,
+                "fuente": FUENTE,
+                "codigo_descuento": CODIGO_DESCUENTO_DEFAULT,
+                "origen_pagina": "1",
+                "origen_listado": listing_url,
+                "source_key": key,
+                "model_code": model_code,
+            })
+    except Exception as e:
+        print(f"❌ Error renderizando listing Samsung: {e}", flush=True)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+    return productos
+
+
+def obtener_datos_remotos():
+    print("", flush=True)
+    print("--- FASE 1: ESCANEANDO SAMSUNG ---", flush=True)
+    print(f"URL base: {mask_url(START_URL)}", flush=True)
+
+    remotos = extract_products_from_main_listing(START_URL)
+    productos = []
+    by_key = {}
+    for r in remotos:
+        key = r["source_key"]
+        if key in by_key:
+            summary_duplicados.append(f"{r['nombre']} {r['capacidad']} {r['memoria']}")
+            if int(r.get("precio_actual", 10**9)) < int(by_key[key].get("precio_actual", 10**9)):
+                by_key[key] = r
+        else:
+            by_key[key] = r
+    productos = list(by_key.values())
+
+    print("📊 RESUMEN EXTRACCIÓN SAMSUNG:", flush=True)
+    print("   URLs descubiertas: 1 (listing principal)", flush=True)
+    print(f"   Productos únicos válidos: {len(productos)}", flush=True)
+    return productos
+
+
+# --------------------------
+# WOO: CATEGORIAS / IMAGENES
 # --------------------------
 
 def obtener_todas_las_categorias():
@@ -625,141 +778,62 @@ def obtener_todas_las_categorias():
     return categorias
 
 
+def find_category(cache_categorias, name: str, parent_id: int):
+    name_norm = normalize_spaces(name).lower()
+    for cat in cache_categorias:
+        if normalize_spaces(cat.get("name", "")).lower() == name_norm and int(cat.get("parent") or 0) == int(parent_id or 0):
+            return cat
+    return None
+
 
 def resolver_jerarquia(nombre_completo, cache_categorias):
     palabras = (nombre_completo or "").split()
     nombre_padre = palabras[0] if palabras else "Otros"
-    nombre_hijo = nombre_completo
+    nombre_hijo = limpiar_nombre_para_categoria(nombre_completo)
 
-    id_cat_padre = None
-    id_cat_hijo = None
+    padre = find_category(cache_categorias, nombre_padre, 0)
+    if not padre:
+        padre = wcapi.post("products/categories", {"name": nombre_padre}).json()
+        cache_categorias.append(padre)
+    id_padre = int(padre.get("id") or 0)
 
-    for cat in cache_categorias:
-        if cat.get("name", "").lower() == nombre_padre.lower() and cat.get("parent") == 0:
-            id_cat_padre = cat.get("id")
-            break
-    if not id_cat_padre:
-        res = wcapi.post("products/categories", {"name": nombre_padre}).json()
-        id_cat_padre = res.get("id")
-        cache_categorias.append(res)
+    hijo = find_category(cache_categorias, nombre_hijo, id_padre)
+    if not hijo:
+        hijo = wcapi.post("products/categories", {"name": nombre_hijo, "parent": id_padre}).json()
+        cache_categorias.append(hijo)
+    id_hijo = int(hijo.get("id") or 0)
 
-    for cat in cache_categorias:
-        if cat.get("name", "").lower() == nombre_hijo.lower() and cat.get("parent") == id_cat_padre:
-            id_cat_hijo = cat.get("id")
-            break
-    if not id_cat_hijo:
-        res = wcapi.post("products/categories", {"name": nombre_hijo, "parent": id_cat_padre}).json()
-        id_cat_hijo = res.get("id")
-        cache_categorias.append(res)
-
-    return id_cat_padre, id_cat_hijo
+    return id_padre, id_hijo
 
 
-
-def obtener_imagen_categoria(cache_categorias, cat_id):
-    if not cat_id:
+def image_of_category(cat: dict) -> str:
+    if not cat:
         return ""
-    for c in cache_categorias:
-        if c.get("id") == cat_id:
-            img = c.get("image") or {}
-            return img.get("src") or ""
-    return ""
+    img = cat.get("image") or {}
+    return (img.get("src") or "").strip()
+
+
+def obtener_imagen_subcategoria_exacta(cache_categorias, id_padre: int, nombre_hijo: str) -> str:
+    padre = None
+    hijo = None
+    for cat in cache_categorias:
+        if int(cat.get("id") or 0) == int(id_padre or 0):
+            padre = cat
+            break
+    hijo = find_category(cache_categorias, nombre_hijo, id_padre)
+    if not hijo:
+        return ""
+    img_hijo = image_of_category(hijo)
+    if not img_hijo:
+        return ""
+    img_padre = image_of_category(padre)
+    if img_padre and same_image_ref(img_hijo, img_padre):
+        return ""
+    return img_hijo
 
 
 # --------------------------
-# FASE 1: EXTRACCIÓN REMOTA
-# --------------------------
-
-def obtener_datos_remotos():
-    print("--- FASE 1: ESCANEANDO SAMSUNG ---", flush=True)
-    print(f"URL base: {mask_url(START_URL)}", flush=True)
-    print(f"🪄 Samsung listing-only: leyendo solo la página principal {mask_url(START_URL)}", flush=True)
-
-    try:
-        html = get_rendered_html(START_URL)
-    except Exception as e:
-        print(f"❌ Error renderizando listing Samsung: {e}", flush=True)
-        return []
-
-    json_items = extract_jsonld_products(html)
-    print(f"✅ Items JSON-LD Samsung detectados: {len(json_items)}", flush=True)
-
-    blocks = find_card_blocks(html)
-    print(f"✅ Cards Samsung detectadas en listing: {len(blocks)}", flush=True)
-
-    hoy = datetime.now().strftime("%d/%m/%Y")
-    productos_por_clave = {}
-
-    for block in blocks:
-        try:
-            raw_name = extract_name_from_block(block)
-            if not raw_name:
-                continue
-            clean_name = normalizar_nombre_samsung(raw_name)
-            if should_skip_by_name(clean_name):
-                continue
-
-            capacidad = extract_selected_capacity(block)
-            if not capacidad:
-                print(f"⚠️ Card Samsung sin capacidad resoluble para {clean_name}. Se ignora.", flush=True)
-                continue
-
-            precio_actual, precio_original = extract_prices_from_block(block)
-            if precio_actual <= 0:
-                print(f"⚠️ Card Samsung sin precio usable para {clean_name} {capacidad}. Se ignora.", flush=True)
-                continue
-
-            memoria = resolve_memory(clean_name, capacidad)
-            if not memoria:
-                print(f"⚠️ Card Samsung sin RAM resoluble para {clean_name} {capacidad}. Se ignora.", flush=True)
-                continue
-
-            coupon = extract_coupon_from_block(block)
-            matched = match_jsonld_item(raw_name, clean_name, precio_actual, json_items)
-            expanded_url = matched.get("buy_url", "") if matched else ""
-            import_url = canonical_samsung_import_url(expanded_url)
-            affiliate_url = unir_afiliado(import_url, AFF_SAMSUNG) if import_url else ""
-            short_url = acortar_url(affiliate_url) if affiliate_url else ""
-
-            key = source_key(clean_name, memoria, capacidad, FUENTE)
-            if key in productos_por_clave:
-                summary_duplicados.append(f"{clean_name} {capacidad} {memoria}".strip())
-                continue
-
-            productos_por_clave[key] = {
-                "nombre": clean_name,
-                "memoria": memoria,
-                "capacidad": capacidad,
-                "precio_actual": int(precio_actual),
-                "precio_original": int(precio_original or 0),
-                "img": "",  # NO subir imagen remota; se resolverá desde la categoría Woo.
-                "fecha": hoy,
-                "fuente": FUENTE,
-                "version": VERSION,
-                "codigo_descuento": coupon,
-                "enviado_desde": ENVIADO_DESDE,
-                "enviado_desde_tg": ENVIADO_DESDE_TG,
-                "enlace_de_compra_importado": import_url,
-                "url_oferta_sin_acortar": expanded_url,
-                "url_importada_sin_afiliado": import_url,
-                "url_sin_acortar_con_mi_afiliado": affiliate_url,
-                "url_oferta": short_url,
-                "importado_de": ID_IMPORTACION,
-                "source_key": key,
-            }
-        except Exception as e:
-            summary_fallidos.append({"nombre": "(listing)", "error": str(e)})
-            print(f"⚠️ Error procesando card Samsung: {e}", flush=True)
-
-    productos = list(productos_por_clave.values())
-    print("📊 RESUMEN EXTRACCIÓN SAMSUNG:", flush=True)
-    print(f"   URLs descubiertas: 1 (listing principal)", flush=True)
-    print(f"   Productos únicos válidos: {len(productos)}", flush=True)
-    return productos
-
-
-# --------------------------
-# FASE 2: SINCRONIZACIÓN WC
+# WOO: SINCRONIZACION
 # --------------------------
 
 def cargar_locales_samsung():
@@ -771,13 +845,13 @@ def cargar_locales_samsung():
             if not res or "message" in res:
                 break
             for p in res:
-                meta = {m.get("key"): str(m.get("value", "")) for m in p.get("meta_data", []) if isinstance(m, dict)}
+                meta = {
+                    m["key"]: str(m.get("value", ""))
+                    for m in p.get("meta_data", [])
+                    if isinstance(m, dict) and m.get("key")
+                }
                 if meta.get("importado_de", "").rstrip("/") == ID_IMPORTACION.rstrip("/"):
-                    locales.append({
-                        "id": p.get("id"),
-                        "nombre": p.get("name", ""),
-                        "meta": meta,
-                    })
+                    locales.append({"id": p["id"], "nombre": p.get("name", ""), "meta": meta})
             if len(res) < 100:
                 break
             page += 1
@@ -786,113 +860,121 @@ def cargar_locales_samsung():
     return locales
 
 
-
-def sync_key_from_meta(nombre: str, meta: dict) -> str:
+def build_local_key(local):
+    meta = local.get("meta", {})
+    if meta.get("_odm_source_key"):
+        return meta["_odm_source_key"]
     return source_key(
-        nombre,
+        local.get("nombre", ""),
         meta.get("memoria", ""),
         meta.get("capacidad", ""),
         meta.get("fuente", FUENTE),
     )
 
 
-
 def sincronizar(remotos):
     print("--- FASE 2: SINCRONIZANDO SAMSUNG ---", flush=True)
     cache_categorias = obtener_todas_las_categorias()
     locales = cargar_locales_samsung()
-
     print(f"📦 Productos Samsung existentes en la web: {len(locales)}", flush=True)
     print(f"📦 Productos remotos Samsung a procesar: {len(remotos)}", flush=True)
 
-    remotos_by_key = {r["source_key"]: r for r in remotos}
-    locales_by_key = {sync_key_from_meta(l["nombre"], l["meta"]): l for l in locales}
+    remote_by_key = {r["source_key"]: r for r in remotos}
+    local_by_key = {build_local_key(l): l for l in locales}
 
-    # Eliminados / actualizados / ignorados
-    for key, local in locales_by_key.items():
-        remote = remotos_by_key.get(key)
-        if not remote:
-            try:
-                wcapi.delete(f"products/{local['id']}", params={"force": True})
-                summary_eliminados.append({"nombre": local["nombre"], "id": local["id"]})
-                print(f"🗑️ ELIMINADO -> {local['nombre']} (ID: {local['id']})", flush=True)
-            except Exception as e:
-                summary_fallidos.append({"nombre": local["nombre"], "id": local["id"], "error": str(e)})
+    # Obsoletos
+    for key, local in local_by_key.items():
+        if key in remote_by_key:
             continue
-
-        meta = local["meta"]
-        cambios = []
-        payload = {"meta_data": []}
-
-        def _meta_append(k, v):
-            payload["meta_data"].append({"key": k, "value": v})
-
         try:
-            if int(float(meta.get("precio_actual", 0) or 0)) != int(remote["precio_actual"]):
-                cambios.append(f"precio_actual ({meta.get('precio_actual')} -> {remote['precio_actual']})")
-                payload["sale_price"] = str(remote["precio_actual"])
-                _meta_append("precio_actual", str(remote["precio_actual"]))
-        except Exception:
-            pass
-        try:
-            if int(float(meta.get("precio_original", 0) or 0)) != int(remote["precio_original"]):
-                cambios.append(f"precio_original ({meta.get('precio_original')} -> {remote['precio_original']})")
-                payload["regular_price"] = str(remote["precio_original"])
-                _meta_append("precio_original", str(remote["precio_original"]))
-        except Exception:
-            pass
+            wcapi.delete(f"products/{local['id']}", params={"force": True})
+            summary_eliminados.append({"nombre": local["nombre"], "id": local["id"]})
+            print(f"🗑️ ELIMINADO (obsoleto) -> {local['nombre']} (ID: {local['id']})", flush=True)
+        except Exception as e:
+            print(f"❌ Error eliminando obsoleto {local['nombre']}: {e}", flush=True)
+            summary_fallidos.append({"nombre": local["nombre"], "id": local["id"], "error": str(e)})
 
-        for k in [
-            "url_oferta_sin_acortar",
-            "url_importada_sin_afiliado",
-            "url_sin_acortar_con_mi_afiliado",
-            "url_oferta",
-            "enlace_de_compra_importado",
-        ]:
-            if str(meta.get(k, "")) != str(remote.get(k, "")):
-                cambios.append(f"{k} actualizado")
-                _meta_append(k, remote.get(k, ""))
-
-        if cambios:
-            try:
-                wcapi.put(f"products/{local['id']}", payload)
-                summary_actualizados.append({"nombre": local["nombre"], "id": local["id"], "cambios": cambios})
-                print(f"🔄 ACTUALIZADO -> {local['nombre']} (ID: {local['id']})", flush=True)
-            except Exception as e:
-                summary_fallidos.append({"nombre": local["nombre"], "id": local["id"], "error": str(e)})
-        else:
-            summary_ignorados.append({"nombre": local["nombre"], "id": local["id"]})
-
-    # Creaciones nuevas
-    for key, r in remotos_by_key.items():
-        if key in locales_by_key:
-            continue
+    for r in remotos:
         try:
             id_padre, id_hijo = resolver_jerarquia(r["nombre"], cache_categorias)
-            img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
-            img_padre = obtener_imagen_categoria(cache_categorias, id_padre)
-            img_final = img_subcat or img_padre or ""
+            img_final_producto = obtener_imagen_subcategoria_exacta(cache_categorias, id_padre, limpiar_nombre_para_categoria(r["nombre"]))
 
             print("-" * 60, flush=True)
-            print(f"Detectado {r.get('nombre','(sin nombre)')}", flush=True)
-            print(f"1) Nombre: {r.get('nombre','')}", flush=True)
-            print(f"2) Memoria: {r.get('memoria','')}", flush=True)
-            print(f"3) Capacidad: {r.get('capacidad','')}", flush=True)
-            print(f"4) Versión: {r.get('version','')}", flush=True)
-            print(f"5) Fuente: {r.get('fuente','')}", flush=True)
-            print(f"6) Precio actual: {r.get('precio_actual',0)}", flush=True)
-            print(f"7) Precio original: {r.get('precio_original',0)}", flush=True)
-            print(f"8) Código de descuento: {r.get('codigo_descuento','')}", flush=True)
-            print(f"9) URL Imagen: {img_final or '(vacía)'}", flush=True)
-            print(f"10) Enlace Importado: {r.get('enlace_de_compra_importado','')}", flush=True)
-            print(f"11) Enlace Expandido: {r.get('url_oferta_sin_acortar','')}", flush=True)
-            print(f"12) URL importada sin afiliado: {r.get('url_importada_sin_afiliado','')}", flush=True)
-            print(f"13) URL sin acortar con mi afiliado: {r.get('url_sin_acortar_con_mi_afiliado','')}", flush=True)
-            print(f"14) URL acortada con mi afiliado: {r.get('url_oferta','')}", flush=True)
-            print(f"15) Enviado desde: {r.get('enviado_desde','')}", flush=True)
-            print(f"15) Importado de: {r.get('importado_de','')}", flush=True)
-            print(f"16) Encolado para comparar con base de datos...", flush=True)
+            print(f"Detectado {r.get('nombre', '(sin nombre)')}", flush=True)
+            print(f"1) Nombre: {r.get('nombre', '')}", flush=True)
+            print(f"2) Memoria: {r.get('memoria', '')}", flush=True)
+            print(f"3) Capacidad: {r.get('capacidad', '')}", flush=True)
+            print(f"4) Versión: {r.get('version', VERSION)}", flush=True)
+            print(f"5) Fuente: {r.get('fuente', FUENTE)}", flush=True)
+            print(f"6) Precio actual: {r.get('precio_actual', 0)}", flush=True)
+            print(f"7) Precio original: {r.get('precio_original', 0)}", flush=True)
+            print(f"8) Código de descuento: {r.get('codigo_descuento', CODIGO_DESCUENTO_DEFAULT)}", flush=True)
+            print(f"9) URL Imagen: {img_final_producto}", flush=True)
+            print(f"10) Enlace Importado: {r.get('url_imp', '')}", flush=True)
+            print(f"11) Enlace Expandido: {r.get('url_oferta_sin_acortar', '')}", flush=True)
+            print(f"12) URL importada sin afiliado: {r.get('url_importada_sin_afiliado', '')}", flush=True)
+            print(f"13) URL sin acortar con mi afiliado: {r.get('url_sin_acortar_con_mi_afiliado', '')}", flush=True)
+            print(f"14) URL acortada con mi afiliado: {r.get('url_oferta', '')}", flush=True)
+            print(f"15) Enviado desde: {r.get('enviado_desde', ENVIADO_DESDE)}", flush=True)
+            print(f"15) Importado de: {ID_IMPORTACION}", flush=True)
+            print("16) Encolado para comparar con base de datos...", flush=True)
             print("-" * 60, flush=True)
+
+            match = local_by_key.get(r["source_key"])
+            categories_payload = [{"id": id_padre}, {"id": id_hijo}] if id_hijo else ([{"id": id_padre}] if id_padre else [])
+
+            if match:
+                meta = match["meta"]
+                cambios = []
+                payload = {"meta_data": []}
+
+                def _num_meta(k):
+                    try:
+                        return int(round(float(meta.get(k, 0) or 0)))
+                    except Exception:
+                        return 0
+
+                old_actual = _num_meta("precio_actual")
+                old_original = _num_meta("precio_original")
+                if int(r["precio_actual"]) != old_actual:
+                    cambios.append(f"precio_actual: {old_actual}€ -> {r['precio_actual']}€")
+                    payload["sale_price"] = str(r["precio_actual"])
+                    payload["meta_data"].append({"key": "precio_actual", "value": str(r["precio_actual"])})
+
+                if int(r["precio_original"]) != old_original:
+                    cambios.append(f"precio_original: {old_original}€ -> {r['precio_original']}€")
+                    payload["regular_price"] = str(r["precio_original"])
+                    payload["meta_data"].append({"key": "precio_original", "value": str(r["precio_original"])})
+
+                compare_meta = {
+                    "codigo_de_descuento": r.get("codigo_descuento", CODIGO_DESCUENTO_DEFAULT),
+                    "enviado_desde": r.get("enviado_desde", ENVIADO_DESDE),
+                    "enviado_desde_tg": r.get("enviado_desde_tg", ENVIADO_DESDE_TG),
+                    "version": r.get("version", VERSION),
+                    "imagen_producto": img_final_producto,
+                    "url_sin_acortar_con_mi_afiliado": r.get("url_sin_acortar_con_mi_afiliado", ""),
+                    "url_oferta": r.get("url_oferta", ""),
+                    "url_importada_sin_afiliado": r.get("url_importada_sin_afiliado", ""),
+                    "url_oferta_sin_acortar": r.get("url_oferta_sin_acortar", ""),
+                    "enlace_de_compra_importado": r.get("url_imp", ""),
+                }
+                for k, v in compare_meta.items():
+                    if str(meta.get(k, "")) != str(v):
+                        cambios.append(f"{k}: {meta.get(k, '')} -> {v}")
+                        payload["meta_data"].append({"key": k, "value": v})
+
+                if str(meta.get("imagen_producto", "")) != str(img_final_producto):
+                    payload["images"] = [{"src": img_final_producto}] if img_final_producto else []
+
+                if cambios:
+                    payload["categories"] = categories_payload
+                    wcapi.put(f"products/{match['id']}", payload)
+                    summary_actualizados.append({"nombre": r["nombre"], "id": match["id"], "cambios": cambios})
+                    print(f"🔄 ACTUALIZADO -> {r['nombre']} (ID: {match['id']})", flush=True)
+                else:
+                    summary_ignorados.append({"nombre": r["nombre"], "id": match["id"]})
+                    print(f"⏭️ SIN CAMBIOS -> {r['nombre']} (ID: {match['id']})", flush=True)
+                continue
 
             data = {
                 "name": r["nombre"],
@@ -900,30 +982,34 @@ def sincronizar(remotos):
                 "status": "publish",
                 "regular_price": str(r["precio_original"]),
                 "sale_price": str(r["precio_actual"]),
-                "categories": [{"id": id_padre}, {"id": id_hijo}] if id_hijo else ([{"id": id_padre}] if id_padre else []),
-                # Solo usamos la imagen que YA existe en la categoría.
-                "images": [{"src": img_final}] if img_final else [],
+                "categories": categories_payload,
                 "meta_data": [
                     {"key": "nombre_movil_final", "value": r["nombre"]},
-                    {"key": "importado_de", "value": r["importado_de"]},
+                    {"key": "importado_de", "value": ID_IMPORTACION},
                     {"key": "fecha", "value": r["fecha"]},
                     {"key": "memoria", "value": r["memoria"]},
                     {"key": "capacidad", "value": r["capacidad"]},
-                    {"key": "fuente", "value": r["fuente"]},
+                    {"key": "fuente", "value": FUENTE},
                     {"key": "precio_actual", "value": str(r["precio_actual"])},
                     {"key": "precio_original", "value": str(r["precio_original"])},
-                    {"key": "codigo_de_descuento", "value": r["codigo_descuento"]},
-                    {"key": "enlace_de_compra_importado", "value": r["enlace_de_compra_importado"]},
-                    {"key": "url_oferta_sin_acortar", "value": r["url_oferta_sin_acortar"]},
-                    {"key": "url_importada_sin_afiliado", "value": r["url_importada_sin_afiliado"]},
-                    {"key": "url_sin_acortar_con_mi_afiliado", "value": r["url_sin_acortar_con_mi_afiliado"]},
-                    {"key": "url_oferta", "value": r["url_oferta"]},
-                    {"key": "enviado_desde", "value": r["enviado_desde"]},
-                    {"key": "enviado_desde_tg", "value": r["enviado_desde_tg"]},
-                    {"key": "imagen_producto", "value": img_final},
-                    {"key": "version", "value": r["version"]},
+                    {"key": "codigo_de_descuento", "value": r.get("codigo_descuento", CODIGO_DESCUENTO_DEFAULT)},
+                    {"key": "enviado_desde", "value": ENVIADO_DESDE},
+                    {"key": "enviado_desde_tg", "value": ENVIADO_DESDE_TG},
+                    {"key": "enlace_de_compra_importado", "value": r.get("url_imp", "")},
+                    {"key": "url_oferta_sin_acortar", "value": r.get("url_oferta_sin_acortar", "")},
+                    {"key": "url_importada_sin_afiliado", "value": r.get("url_importada_sin_afiliado", "")},
+                    {"key": "url_sin_acortar_con_mi_afiliado", "value": r.get("url_sin_acortar_con_mi_afiliado", "")},
+                    {"key": "url_oferta", "value": r.get("url_oferta", "")},
+                    {"key": "imagen_producto", "value": img_final_producto},
+                    {"key": "version", "value": r.get("version", VERSION)},
+                    {"key": "_odm_source_key", "value": r["source_key"]},
+                    {"key": "_odm_source_model_code", "value": r.get("model_code", "")},
+                    {"key": "_odm_source_listing", "value": r.get("origen_listado", "")},
+                    {"key": "_odm_source_page", "value": r.get("origen_pagina", "")},
                 ],
             }
+            if img_final_producto:
+                data["images"] = [{"src": img_final_producto}]
 
             intentos = 0
             creado = False
@@ -933,13 +1019,15 @@ def sincronizar(remotos):
                     res = wcapi.post("products", data)
                     if res.status_code in (200, 201):
                         prod = res.json()
-                        summary_creados.append({"nombre": r["nombre"], "id": prod.get("id")})
-                        print(f"✅ CREADO -> {r['nombre']} (ID: {prod.get('id')})", flush=True)
+                        new_id = prod.get("id")
+                        summary_creados.append({"nombre": r["nombre"], "id": new_id})
+                        print(f"✅ CREADO -> {r['nombre']} (ID: {new_id})", flush=True)
                         try:
-                            url_short = acortar_url(prod.get("permalink", ""))
-                            if url_short:
+                            permalink = prod.get("permalink", "")
+                            if permalink:
+                                url_short = acortar_url(permalink)
                                 wcapi.put(
-                                    f"products/{prod.get('id')}",
+                                    f"products/{new_id}",
                                     {"meta_data": [{"key": "url_post_acortada", "value": url_short}]},
                                 )
                         except Exception:
@@ -949,16 +1037,18 @@ def sincronizar(remotos):
                         body_preview = (res.text or "").replace("\n", " ")[:250]
                         print(f"⚠️ Woo error {res.status_code}: {body_preview}", flush=True)
                 except Exception as e:
-                    print(f"⚠️ Excepción Woo: {e}", flush=True)
-                if not creado and intentos < 10:
+                    print(f"⚠️ Excepción Woo creando Samsung: {e}", flush=True)
+
+                if (not creado) and (intentos < 10):
                     time.sleep(15)
 
             if not creado:
-                summary_fallidos.append({"nombre": r["nombre"], "error": "NO SE PUDO CREAR"})
+                summary_fallidos.append({"nombre": r["nombre"], "error": "No se pudo crear en WooCommerce"})
                 print(f"❌ NO SE PUDO CREAR: {r['nombre']}", flush=True)
+
         except Exception as e:
-            summary_fallidos.append({"nombre": r.get("nombre", "desconocido"), "error": str(e)})
-            print(f"❌ ERROR en {r.get('nombre','?')}: {e}", flush=True)
+            print(f"❌ ERROR sincronizando Samsung {r.get('nombre', '?')}: {e}", flush=True)
+            summary_fallidos.append({"nombre": r.get('nombre', '?'), "error": str(e)})
 
     hoy_fmt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print("\n============================================================", flush=True)
@@ -976,12 +1066,25 @@ def sincronizar(remotos):
     print(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}", flush=True)
     for item in summary_ignorados:
         print(f"- {item['nombre']} (ID: {item['id']})", flush=True)
+    print(f"\ne) DUPLICADOS DETECTADOS: {len(summary_duplicados)}", flush=True)
+    for item in sorted(set(summary_duplicados)):
+        print(f"- {item}", flush=True)
+    print(f"\nf) FALLIDOS: {len(summary_fallidos)}", flush=True)
+    for item in summary_fallidos[:50]:
+        if isinstance(item, dict):
+            print(f"- {item.get('nombre', '?')}: {item.get('error', '')}", flush=True)
+        else:
+            print(f"- {item}", flush=True)
     print("============================================================", flush=True)
 
 
-if __name__ == "__main__":
+def main():
     remotos = obtener_datos_remotos()
     if remotos:
         sincronizar(remotos)
     else:
-        print("No se han obtenido productos remotos de Samsung.")
+        print("No se han obtenido productos remotos de Samsung.", flush=True)
+
+
+if __name__ == "__main__":
+    main()
