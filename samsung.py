@@ -119,16 +119,22 @@ def normalizar_nombre_samsung(nombre: str) -> str:
         return ""
     if t.lower().startswith("samsung "):
         t = t[len("Samsung "):]
+    t = re.sub(r"\s+Exclusivo\s+Online\b", "", t, flags=re.I)
     out = []
     for w in t.split():
-        if re.search(r"\d", w) and re.search(r"[A-Za-z]", w):
+        wl = w.lower()
+        if wl in {"gb", "tb"}:
+            w2 = w.upper()
+        elif re.fullmatch(r"[A-Za-z]+\d+", w):
+            w2 = w[:1].upper() + w[1:].lower()
+        elif re.fullmatch(r"\d+[A-Za-z]+", w):
             w2 = "".join(ch.upper() if ch.isalpha() else ch for ch in w)
-        elif w.lower() in {"gb", "tb"}:
+        elif len(w) <= 2 and w.isalpha():
             w2 = w.upper()
         else:
             w2 = w[:1].upper() + w[1:]
         out.append(w2)
-    base = " ".join(out)
+    base = normalize_spaces(" ".join(out))
     return normalize_spaces(f"Samsung {base}")
 
 
@@ -402,11 +408,112 @@ def extract_urls_from_card(card, base_url: str):
         if not href:
             continue
         href = abs_url(base_url, href)
-        if "Comprar" in txt and not buy_url:
+        if href.lower().startswith("javascript"):
+            href = ""
+        if "Comprar" in txt and href and not buy_url:
             buy_url = href
-        elif ("Más información" in txt or "Ficha" in txt) and not info_url:
+        elif ("Más información" in txt or "Ficha" in txt) and href and not info_url:
             info_url = href
     return info_url, buy_url
+
+
+def _base_buy_path(detail_url: str, meta_buy_url: str, listing_url: str) -> str:
+    if meta_buy_url and '/buy/' in meta_buy_url:
+        return meta_buy_url.split('?')[0]
+    if detail_url:
+        d = detail_url.rstrip('/')
+        if d.endswith('/buy'):
+            return d
+        return d + '/buy/'
+    return abs_url(listing_url, '/es/smartphones/all-smartphones/')
+
+
+def extract_buy_url_and_model_code_from_card(card, listing_url: str, meta: dict):
+    detail_url = meta.get("detail_url") or ""
+    meta_buy_url = meta.get("buy_url") or ""
+    info_url, buy_url_dom = extract_urls_from_card(card, listing_url)
+    try:
+        card_html = card.parent.execute_script("return arguments[0].outerHTML;", card) or ""
+    except Exception:
+        card_html = ""
+
+    candidates = []
+    if buy_url_dom and not buy_url_dom.lower().startswith("javascript"):
+        candidates.append(buy_url_dom)
+    if info_url and "/buy/" in info_url:
+        candidates.append(info_url)
+
+    full_url_re = re.compile(r"https?://www\.samsung\.com/es/smartphones/[^\"'\s>]+/buy/\?modelCode=([A-Z0-9\-]+)", re.I)
+    rel_url_re = re.compile(r"/es/smartphones/[^\"'\s>]+/buy/\?modelCode=([A-Z0-9\-]+)", re.I)
+    for m in full_url_re.finditer(card_html):
+        candidates.append(m.group(0))
+    for m in rel_url_re.finditer(card_html):
+        candidates.append(abs_url(listing_url, m.group(0)))
+
+    model_code = ""
+    mc_re = re.compile(r"(?:modelCode|modelcode|data-modelcode|data-model-code|model-code|sku|pimcode)[^A-Z0-9\-]*(SM-[A-Z0-9]+)", re.I)
+    for m in mc_re.finditer(card_html):
+        mc = (m.group(1) or "").upper()
+        if mc:
+            model_code = mc
+            break
+
+    if not model_code:
+        for c in candidates:
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(c).query)
+                mc = (q.get("modelCode") or [""])[0].upper()
+                if mc:
+                    model_code = mc
+                    break
+            except Exception:
+                pass
+
+    if not candidates and meta_buy_url:
+        candidates.append(meta_buy_url)
+        if not model_code:
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(meta_buy_url).query)
+                model_code = (q.get("modelCode") or [""])[0].upper()
+            except Exception:
+                pass
+
+    buy_url = ""
+    for c in candidates:
+        if c and not c.lower().startswith("javascript"):
+            buy_url = c
+            break
+
+    base_buy = _base_buy_path(detail_url, meta_buy_url, listing_url)
+    if model_code and (not buy_url or buy_url.lower().startswith("javascript") or "modelCode=" not in buy_url):
+        buy_url = f"{base_buy}?modelCode={model_code}"
+    elif not buy_url and meta_buy_url:
+        buy_url = meta_buy_url
+
+    return buy_url, model_code
+
+def resolver_memoria_desde_buy_url(buy_url: str, capacidad: str) -> str:
+    if not buy_url or buy_url.lower().startswith('javascript'):
+        return ''
+    try:
+        r = requests.get(buy_url, headers=HEADERS, timeout=25)
+        if r.status_code != 200:
+            return ''
+        html = r.text or ''
+        txt = normalize_spaces(BeautifulSoup(html, 'html.parser').get_text(' '))
+        objetivo = (capacidad or '').upper().replace(' ', '')
+
+        combos = []
+        for m in re.finditer(r'(\d{2,4}\s*GB|\d\s*TB)\s*[\|｜/]\s*(\d{1,2}\s*GB)', txt, flags=re.I):
+            cap = normalize_spaces(m.group(1)).upper().replace(' ', '')
+            ram = normalize_spaces(m.group(2)).upper().replace(' ', '')
+            combos.append((cap, ram))
+        for cap, ram in combos:
+            if cap == objetivo:
+                return ram
+        return ''
+    except Exception:
+        return ''
 
 
 def _candidate_capacity_nodes(card):
@@ -627,13 +734,17 @@ def extract_products_from_listing_cards(listing_url: str, source_label: str):
                 print(f"⚠️ Card Samsung sin precio usable para {nombre} {capacidad}. Se ignora.", flush=True)
                 continue
 
-            _, buy_url_dom = extract_urls_from_card(card, listing_url)
-            buy_url = buy_url_dom or meta.get("buy_url") or meta.get("detail_url") or listing_url
+            buy_url, model_code = extract_buy_url_and_model_code_from_card(card, listing_url, meta)
             img = extract_card_image(card, listing_url) or meta.get("image") or ""
-            model_code = meta.get("model_code") or ""
-            memoria = resolver_ram_desde_listing(nombre, capacidad, model_code)
+            memoria = resolver_memoria_desde_buy_url(buy_url, capacidad)
             if not memoria:
-                print(f"⚠️ Card Samsung sin RAM resoluble desde listing para {nombre} {capacidad}. Se ignora en modo listing-only.", flush=True)
+                memoria = resolver_ram_desde_listing(nombre, capacidad, model_code)
+            if not memoria:
+                print(f"⚠️ Card Samsung sin RAM resoluble para {nombre} {capacidad}. Se ignora.", flush=True)
+                continue
+
+            if not buy_url or buy_url.lower().startswith('javascript'):
+                print(f"⚠️ Card Samsung sin enlace Comprar válido para {nombre} {capacidad}. Se ignora.", flush=True)
                 continue
 
             url_importada_sin_afiliado = buy_url
@@ -844,8 +955,13 @@ def sincronizar(remotos):
             print(f"5) Fuente: {r.get('fuente', FUENTE)}", flush=True)
             print(f"6) Precio actual: {r.get('precio_actual', 0)}", flush=True)
             print(f"7) Precio original: {r.get('precio_original', 0)}", flush=True)
+            match = local_by_key.get(r["source_key"])
+            id_padre, id_hijo = resolver_jerarquia(r["nombre"], cache_categorias)
+            img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
+            img_final_producto = img_subcat or ""
+
             print(f"8) Código de descuento: {r.get('codigo_descuento', CODIGO_DESCUENTO_DEFAULT)}", flush=True)
-            print(f"9) URL Imagen: {r.get('img', '')}", flush=True)
+            print(f"9) URL Imagen: {img_final_producto}", flush=True)
             print(f"10) Enlace Importado: {r.get('url_imp', '')}", flush=True)
             print(f"11) Enlace Expandido: {r.get('url_oferta_sin_acortar', '')}", flush=True)
             print(f"12) URL importada sin afiliado: {r.get('url_importada_sin_afiliado', '')}", flush=True)
@@ -855,15 +971,6 @@ def sincronizar(remotos):
             print(f"15) Importado de: {ID_IMPORTACION}", flush=True)
             print("16) Encolado para comparar con base de datos...", flush=True)
             print("-" * 60, flush=True)
-
-            match = local_by_key.get(r["source_key"])
-            id_padre, id_hijo = resolver_jerarquia(r["nombre"], cache_categorias)
-
-            img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
-            if (not img_subcat) and r.get("img"):
-                actualizar_imagen_categoria(cache_categorias, id_hijo, r["img"])
-                img_subcat = obtener_imagen_categoria(cache_categorias, id_hijo)
-            img_final_producto = img_subcat or r.get("img") or ""
 
             if match:
                 meta = match["meta"]
@@ -893,7 +1000,7 @@ def sincronizar(remotos):
                     "enviado_desde": r.get("enviado_desde", ENVIADO_DESDE),
                     "enviado_desde_tg": r.get("enviado_desde_tg", ENVIADO_DESDE_TG),
                     "version": r.get("version", VERSION),
-                    "imagen_producto": r.get("img", ""),
+                    "imagen_producto": img_final_producto,
                     "url_sin_acortar_con_mi_afiliado": r.get("url_sin_acortar_con_mi_afiliado", ""),
                     "url_oferta": r.get("url_oferta", ""),
                     "url_importada_sin_afiliado": r.get("url_importada_sin_afiliado", ""),
@@ -939,7 +1046,7 @@ def sincronizar(remotos):
                     {"key": "url_importada_sin_afiliado", "value": r.get("url_importada_sin_afiliado", "")},
                     {"key": "url_sin_acortar_con_mi_afiliado", "value": r.get("url_sin_acortar_con_mi_afiliado", "")},
                     {"key": "url_oferta", "value": r.get("url_oferta", "")},
-                    {"key": "imagen_producto", "value": r.get("img", "")},
+                    {"key": "imagen_producto", "value": img_final_producto},
                     {"key": "version", "value": r.get("version", VERSION)},
                     {"key": "_odm_source_key", "value": r["source_key"]},
                     {"key": "_odm_source_model_code", "value": r.get("model_code", "")},
