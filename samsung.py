@@ -280,54 +280,153 @@ RAM_BY_NAME_CAPACITY = {
     ("samsung galaxy s25 ultra", "256GB"): "12GB",
     ("samsung galaxy s25 ultra", "512GB"): "12GB",
     ("samsung galaxy s25 ultra", "1TB"): "12GB",
-    ("samsung galaxy s25 FE", "128GB"): "8GB",
-    ("samsung galaxy s25 FE", "256GB"): "8GB",
-    ("samsung galaxy s25 FE", "512GB"): "8GB",
+    ("samsung galaxy s25 fe", "128GB"): "8GB",
+    ("samsung galaxy s25 fe", "256GB"): "8GB",
+    ("samsung galaxy s25 fe", "512GB"): "8GB",
     ("samsung galaxy s25 edge", "256GB"): "12GB",
     ("samsung galaxy s25 edge", "512GB"): "12GB",
     ("samsung galaxy s24", "128GB"): "8GB",
     ("samsung galaxy s24", "256GB"): "8GB",
     ("samsung galaxy s24+", "256GB"): "12GB",
     ("samsung galaxy s24+", "512GB"): "12GB",
-    ("samsung galaxy s24 FE", "128GB"): "8GB",
-    ("samsung galaxy s24 FE", "256GB"): "8GB",
+    ("samsung galaxy s24 fe", "128GB"): "8GB",
+    ("samsung galaxy s24 fe", "256GB"): "8GB",
     ("samsung galaxy z flip6", "256GB"): "12GB",
     ("samsung galaxy z flip6", "512GB"): "12GB",
     ("samsung galaxy z fold6", "256GB"): "12GB",
     ("samsung galaxy z fold6", "512GB"): "12GB",
     ("samsung galaxy z fold6", "1TB"): "16GB",
-    ("samsung galaxy a57 5G", "128GB"): "8GB",
-    ("samsung galaxy a57 5G", "256GB"): "8GB",
-    ("samsung galaxy a57 5G", "512GB"): "12GB",
-    ("samsung galaxy a56 5G", "128GB"): "8GB",
-    ("samsung galaxy a56 5G", "256GB"): "8GB",
-    ("samsung galaxy a37 5G", "256GB"): "8GB",
-    ("samsung galaxy a36 5G", "128GB"): "8GB",
-    ("samsung galaxy a36 5G", "256GB"): "8GB",
-    ("samsung galaxy a26 5G", "128GB"): "6GB",
-    ("samsung galaxy a26 5G", "256GB"): "8GB",
-    ("samsung galaxy a17 5G", "256GB"): "8GB",
+    ("samsung galaxy a57 5g", "128GB"): "8GB",
+    ("samsung galaxy a57 5g", "256GB"): "8GB",
+    ("samsung galaxy a57 5g", "512GB"): "12GB",
+    ("samsung galaxy a56 5g", "128GB"): "8GB",
+    ("samsung galaxy a56 5g", "256GB"): "8GB",
+    ("samsung galaxy a37 5g", "256GB"): "8GB",
+    ("samsung galaxy a36 5g", "128GB"): "8GB",
+    ("samsung galaxy a36 5g", "256GB"): "8GB",
+    ("samsung galaxy a26 5g", "128GB"): "6GB",
+    ("samsung galaxy a26 5g", "256GB"): "8GB",
+    ("samsung galaxy a17 5g", "256GB"): "8GB",
     ("samsung galaxy a17", "256GB"): "8GB",
     ("samsung galaxy a16", "256GB"): "8GB",
 }
 
 
+def capacity_sort_key(cap: str) -> int:
+    c = (cap or '').upper().strip()
+    m = re.match(r'^(\d+)GB$', c)
+    if m:
+        return int(m.group(1))
+    m = re.match(r'^(\d+)TB$', c)
+    if m:
+        return int(m.group(1)) * 1024
+    return 10**9
+
+
+def known_capacities_for_name(nombre: str):
+    nl = normalize_spaces(nombre).lower()
+    caps = sorted({cap for (n, cap) in RAM_BY_NAME_CAPACITY if n == nl}, key=capacity_sort_key)
+    return caps
+
+
 def resolve_ram_for_listing(nombre: str, capacidad: str, url_hint: str = "") -> str:
-    key = (normalize_spaces(nombre), (capacidad or "").upper())
+    name_low = normalize_spaces(nombre).lower()
+    key = (name_low, (capacidad or '').upper())
     if key in RAM_BY_NAME_CAPACITY:
         return RAM_BY_NAME_CAPACITY[key]
-    name_low = normalize_spaces(nombre).lower()
-    hint_low = (url_hint or "").lower()
-    if "galaxy-z-fold" in hint_low or "z fold" in name_low:
-        return "16GB" if (capacidad or "").upper() == "1TB" else "12GB"
-    if "galaxy-z-flip" in hint_low or "z flip" in name_low:
-        return "8GB" if "flip7 fe" in name_low else "12GB"
-    if " ultra" in name_low:
-        return "16GB" if (capacidad or "").upper() == "1TB" else "12GB"
-    if "s25 edge" in name_low:
-        return "12GB"
-    return ""
+    hint_low = (url_hint or '').lower()
+    if 'galaxy-z-fold' in hint_low or 'z fold' in name_low:
+        return '16GB' if (capacidad or '').upper() == '1TB' else '12GB'
+    if 'galaxy-z-flip' in hint_low or 'z flip' in name_low:
+        return '8GB' if 'flip7 fe' in name_low else '12GB'
+    if ' ultra' in name_low:
+        return '16GB' if (capacidad or '').upper() == '1TB' else '12GB'
+    if 's25 edge' in name_low:
+        return '12GB'
+    return ''
 
+
+def infer_missing_capacities_from_jsonld(items):
+    grouped = {}
+    for it in items:
+        grouped.setdefault(normalize_spaces(it.get('name','')).lower(), []).append(it)
+
+    for _, group in grouped.items():
+        missing = [it for it in group if not it.get('capacidad')]
+        if not missing:
+            continue
+        caps_known = known_capacities_for_name(group[0].get('name',''))
+        if not caps_known:
+            continue
+        explicit = {it.get('capacidad') for it in group if it.get('capacidad')}
+        candidate = [c for c in caps_known if c not in explicit]
+        if len(candidate) != len(missing):
+            continue
+        missing_sorted = sorted(missing, key=lambda x: int(x.get('price') or 0))
+        candidate_sorted = sorted(candidate, key=capacity_sort_key)
+        for it, cap in zip(missing_sorted, candidate_sorted):
+            it['capacidad'] = cap
+
+
+def build_remote_from_jsonld(item, listing_url: str):
+    nombre = item.get('name') or ''
+    if not nombre or should_skip_by_name(nombre):
+        return None
+    capacidad = (item.get('capacidad') or '').upper()
+    if not capacidad:
+        return None
+    detail_url = normalize_detail_base_url(item.get('detail_url') or item.get('expanded_url') or '')
+    buy_url = expanded_from_url(item.get('expanded_url') or detail_url)
+    memoria = resolve_ram_for_listing(nombre, capacidad, detail_url or buy_url)
+    if not memoria:
+        return None
+    precio_actual = int(item.get('price') or 0)
+    if precio_actual <= 0:
+        return None
+    return {
+        'nombre': nombre,
+        'memoria': memoria,
+        'capacidad': capacidad,
+        'precio_actual': precio_actual,
+        'precio_original': precio_actual,
+        'img': '',
+        'url_imp': detail_url,
+        'url_oferta_sin_acortar': buy_url or detail_url,
+        'url_importada_sin_afiliado': detail_url,
+        'buy_url': buy_url or detail_url,
+        'enviado_desde': ENVIADO_DESDE,
+        'enviado_desde_tg': ENVIADO_DESDE_TG,
+        'fecha': datetime.now().strftime('%d/%m/%Y'),
+        'version': VERSION,
+        'fuente': FUENTE,
+        'codigo_descuento': CODIGO_DESCUENTO_DEFAULT,
+        'origen_pagina': '1',
+        'origen_listado': listing_url,
+        'source_key': source_key(nombre, memoria, capacidad, FUENTE),
+        'model_code': item.get('model_code', ''),
+    }
+
+
+def merge_remote(existing: dict, incoming: dict) -> dict:
+    if not existing:
+        return incoming
+    ex_cur = int(existing.get('precio_actual') or 0)
+    in_cur = int(incoming.get('precio_actual') or 0)
+    ex_orig = int(existing.get('precio_original') or 0)
+    in_orig = int(incoming.get('precio_original') or 0)
+    ex_buy = existing.get('url_oferta_sin_acortar', '') or ''
+    in_buy = incoming.get('url_oferta_sin_acortar', '') or ''
+    score_existing = (1 if ex_buy and 'modelCode=' in ex_buy else 0, ex_orig - ex_cur, -ex_cur)
+    score_incoming = (1 if in_buy and 'modelCode=' in in_buy else 0, in_orig - in_cur, -in_cur)
+    if score_incoming > score_existing:
+        base = existing.copy()
+        base.update(incoming)
+        return base
+    return existing
+
+
+# --------------------------
+# SELENIUM
 
 # --------------------------
 # SELENIUM
@@ -496,17 +595,23 @@ def price_pair_from_listing_text(text: str, fallback_price: int = 0):
     vals = dedupe_keep_order(vals)
     current = 0
     original = 0
-    if vals:
+    if vals and fallback_price:
+        lo = max(150, int(fallback_price * 0.55))
+        hi = int(max(fallback_price * 1.7, fallback_price + 400))
+        near = [v for v in vals if lo <= v <= hi]
+        if near:
+            current = min(near)
+            original = max(near)
+    if not current and vals:
         current = min(vals)
         original = max(vals)
-        if original == current:
-            original = 0
     if not current and fallback_price:
         current = fallback_price
+        original = fallback_price
     if current and not original:
-        original = calcular_precio_original(current)
+        original = fallback_price if fallback_price > current else current
     if original and original < current:
-        original = calcular_precio_original(current)
+        original = current
     return int(current or 0), int(original or 0)
 
 
@@ -597,6 +702,7 @@ def extract_listing_products(listing_url: str):
         scroll_page(driver, rounds=20)
         html = driver.page_source
         jsonld_items, jsonld_by_url, jsonld_by_name = extract_jsonld_products(html)
+        infer_missing_capacities_from_jsonld(jsonld_items)
         print(f"✅ Items JSON-LD Samsung detectados: {len(jsonld_items)}", flush=True)
 
         buy_buttons = []
@@ -615,10 +721,9 @@ def extract_listing_products(listing_url: str):
             try:
                 if not btn.is_displayed():
                     continue
-                # subimos por los padres hasta encontrar el bloque más cercano con Galaxy y precio
                 cur = btn
                 container = None
-                for _ in range(8):
+                for _ in range(10):
                     cur = cur.find_element(By.XPATH, "..")
                     txt = normalize_spaces(cur.text)
                     if "galaxy" in txt.lower() and "€" in txt:
@@ -637,10 +742,12 @@ def extract_listing_products(listing_url: str):
         print(f"✅ Cards Samsung detectadas en listing: {len(cards)}", flush=True)
 
         dedup = {}
+
+        # 1) Cards visibles: precio promocional más fiable.
         for card in cards:
             try:
-                text = normalize_spaces(card.text)
-                if not text or "galaxy" not in text.lower():
+                text_card = normalize_spaces(card.text)
+                if not text_card or "galaxy" not in text_card.lower():
                     continue
 
                 nombre = extract_name_from_textblock(card.text)
@@ -654,12 +761,12 @@ def extract_listing_products(listing_url: str):
                 if not match:
                     arr = jsonld_by_name.get(nombre.lower(), [])
                     if arr:
-                        match = arr[0]
+                        match = sorted(arr, key=lambda x: int(x.get('price') or 0))[0]
                 if match:
                     if not detail_url:
-                        detail_url = match.get("detail_url", "")
+                        detail_url = match.get('detail_url', '')
                     if not buy_url:
-                        buy_url = match.get("expanded_url", "")
+                        buy_url = match.get('expanded_url', '')
 
                 detail_url = normalize_detail_base_url(detail_url or buy_url)
                 buy_url = expanded_from_url(buy_url or detail_url)
@@ -668,9 +775,9 @@ def extract_listing_products(listing_url: str):
 
                 capacidad = selected_capacity_from_container(card)
                 if not capacidad:
-                    capacidad = parse_capacidad_desde_texto(detail_url + " " + text)
+                    capacidad = parse_capacidad_desde_texto(detail_url + ' ' + text_card)
                 if not capacidad and match:
-                    capacidad = match.get("capacidad", "")
+                    capacidad = match.get('capacidad', '')
                 if not capacidad:
                     continue
 
@@ -679,50 +786,61 @@ def extract_listing_products(listing_url: str):
                     print(f"⚠️ Card Samsung sin RAM resoluble para {nombre} {capacidad}. Se ignora.", flush=True)
                     continue
 
-                fallback_price = int(match.get("price", 0) or 0) if match else 0
-                precio_actual, precio_original = price_pair_from_listing_text(text, fallback_price=fallback_price)
+                fallback_price = int(match.get('price', 0) or 0) if match else 0
+                precio_actual, precio_original = price_pair_from_listing_text(text_card, fallback_price=fallback_price)
                 if precio_actual <= 0:
                     print(f"⚠️ Card Samsung sin precio usable para {nombre} {capacidad}. Se ignora.", flush=True)
                     continue
 
-                model_code = ""
+                model_code = ''
                 try:
                     qs = urllib.parse.parse_qs(urllib.parse.urlsplit(buy_url).query)
-                    model_code = (qs.get("modelCode") or [""])[0]
+                    model_code = (qs.get('modelCode') or [''])[0]
                 except Exception:
-                    model_code = ""
+                    model_code = ''
                 if not model_code and match:
-                    model_code = match.get("model_code", "")
+                    model_code = match.get('model_code', '')
 
                 key = source_key(nombre, memoria, capacidad, FUENTE)
                 remote = {
-                    "nombre": nombre,
-                    "memoria": memoria,
-                    "capacidad": capacidad,
-                    "precio_actual": int(precio_actual),
-                    "precio_original": int(precio_original),
-                    "img": "",
-                    "url_imp": detail_url,
-                    "url_oferta_sin_acortar": buy_url or detail_url,
-                    "url_importada_sin_afiliado": detail_url,
-                    "buy_url": buy_url or detail_url,
-                    "enviado_desde": ENVIADO_DESDE,
-                    "enviado_desde_tg": ENVIADO_DESDE_TG,
-                    "fecha": datetime.now().strftime("%d/%m/%Y"),
-                    "version": VERSION,
-                    "fuente": FUENTE,
-                    "codigo_descuento": CODIGO_DESCUENTO_DEFAULT,
-                    "origen_pagina": "1",
-                    "origen_listado": listing_url,
-                    "source_key": key,
-                    "model_code": model_code,
+                    'nombre': nombre,
+                    'memoria': memoria,
+                    'capacidad': capacidad,
+                    'precio_actual': int(precio_actual),
+                    'precio_original': int(precio_original),
+                    'img': '',
+                    'url_imp': detail_url,
+                    'url_oferta_sin_acortar': buy_url or detail_url,
+                    'url_importada_sin_afiliado': detail_url,
+                    'buy_url': buy_url or detail_url,
+                    'enviado_desde': ENVIADO_DESDE,
+                    'enviado_desde_tg': ENVIADO_DESDE_TG,
+                    'fecha': datetime.now().strftime('%d/%m/%Y'),
+                    'version': VERSION,
+                    'fuente': FUENTE,
+                    'codigo_descuento': CODIGO_DESCUENTO_DEFAULT,
+                    'origen_pagina': '1',
+                    'origen_listado': listing_url,
+                    'source_key': key,
+                    'model_code': model_code,
                 }
-
                 if key in dedup:
                     summary_duplicados.append(f"{nombre} {capacidad} {memoria}")
-                    prev = dedup[key]
-                    if int(remote["precio_actual"]) < int(prev.get("precio_actual", 10**9)):
-                        dedup[key] = remote
+                    dedup[key] = merge_remote(dedup[key], remote)
+                else:
+                    dedup[key] = remote
+            except Exception:
+                continue
+
+        # 2) JSON-LD: añade productos no visibles en cards si tienen suficiente info.
+        for item in jsonld_items:
+            try:
+                remote = build_remote_from_jsonld(item, listing_url)
+                if not remote:
+                    continue
+                key = remote['source_key']
+                if key in dedup:
+                    dedup[key] = merge_remote(dedup[key], remote)
                 else:
                     dedup[key] = remote
             except Exception:
@@ -736,6 +854,9 @@ def extract_listing_products(listing_url: str):
             pass
     return products
 
+
+# --------------------------
+# EXTRACCIÓN REMOTA
 
 # --------------------------
 # EXTRACCIÓN REMOTA
