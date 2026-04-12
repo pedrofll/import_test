@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from woocommerce import API
 
-SCRIPT_VERSION = "2026-04-08 hotfix-prefijo-v4"
+SCRIPT_VERSION = "2026-04-12 hotfix-isgd-external-v5"
 
 # --- CONFIGURACIÓN ---
 wcapi = API(
@@ -110,12 +110,25 @@ def log_bloque_inicio():
 
 
 def acortar_url(url_larga: str) -> str:
+    """Acorta con is.gd, pero solo acepta respuestas que sean URL válidas.
+    Si is.gd falla y devuelve textos como 'Error: database query failed', conserva la URL larga.
+    """
     if not url_larga:
         return ""
     try:
         url_encoded = urllib.parse.quote(url_larga, safe="")
-        r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=10)
-        return r.text.strip() if r.status_code == 200 else url_larga
+        r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        txt = (r.text or "").strip()
+        if r.status_code != 200:
+            return url_larga
+        if not txt:
+            return url_larga
+        low = txt.lower()
+        if low.startswith("error:") or "database query failed" in low or "please try again" in low:
+            return url_larga
+        if txt.startswith("http://") or txt.startswith("https://"):
+            return txt
+        return url_larga
     except Exception:
         return url_larga
 
@@ -556,21 +569,22 @@ async def main():
         nombre = limpiar_prefijo_nombre(nombre)
         nombre = _normalizar_espacios_nombre(nombre)
 
-        # --- VERIFICACIÓN DE DUPLICADOS ---
-        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 10}).json()
+        # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
+        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
         existe = False
+        producto_existente_match = None
         for prod_existente in check_exists:
             nombre_existente_normalizado = limpiar_prefijo_nombre(prod_existente["name"]).strip().lower()
             nombre_nuevo_normalizado = limpiar_prefijo_nombre(nombre).strip().lower()
-            if nombre_existente_normalizado == nombre_nuevo_normalizado:
-                metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
-                if metas_existentes.get("importado_de") == "Telegram_Chinabay":
-                    print(f"⏭️ El producto '{nombre}' ya existe. Saltando...")
-                    summary_ignorados.append({"nombre": prod_existente["name"], "id": prod_existente["id"]})
-                    existe = True
-                    break
-        if existe:
-            continue
+            metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
+            if (
+                nombre_existente_normalizado == nombre_nuevo_normalizado
+                and str(metas_existentes.get("memoria", "")).strip() == memoria
+                and str(metas_existentes.get("capacidad", "")).strip() == capacidad
+                and metas_existentes.get("importado_de") == "Telegram_Chinabay"
+            ):
+                producto_existente_match = prod_existente
+                break
 
         precio_original = calcular_precio_original(precio_actual, 1.20)
 
@@ -595,6 +609,9 @@ async def main():
 
         # acortar para 'url_oferta'
         url_oferta = acortar_url(url_sin_acortar_con_mi_afiliado) if url_sin_acortar_con_mi_afiliado else ""
+        if url_oferta and not (url_oferta.startswith("http://") or url_oferta.startswith("https://")):
+            print(f"⚠️ Acortador devolvió valor no válido, se conserva URL larga: {url_oferta}")
+            url_oferta = url_sin_acortar_con_mi_afiliado
 
         enviado_desde = "España" if fuente in ["Aliexpress", "Amazon", "powerplanet", "Fnac", "MediaMarkt", "Phone House"] else "China"
         if enviado_desde == "España":
@@ -639,10 +656,12 @@ async def main():
 
         data = {
             "name": nombre,
-            "type": "simple",
+            "type": "external",
             "status": "publish",
             "regular_price": str(precio_original),
             "sale_price": str(precio_actual),
+            "external_url": url_oferta or url_sin_acortar_con_mi_afiliado or url_importada_sin_afiliado,
+            "button_text": f"Comprar en {fuente}",
             "categories": [{"id": id_padre}, {"id": id_hijo}],
             "images": [{"src": imagen_subcategoria}] if imagen_subcategoria else [],
             "meta_data": [
@@ -665,6 +684,43 @@ async def main():
             ],
         }
 
+        if producto_existente_match:
+            exist_id = producto_existente_match["id"]
+            metas_existentes = {m["key"]: m["value"] for m in producto_existente_match.get("meta_data", [])}
+            cambios = []
+
+            if str(metas_existentes.get("precio_actual", "")).strip() != str(precio_actual):
+                cambios.append(f"precio_actual: {metas_existentes.get('precio_actual', '')} -> {precio_actual}")
+            if str(metas_existentes.get("precio_original", "")).strip() != str(precio_original):
+                cambios.append(f"precio_original: {metas_existentes.get('precio_original', '')} -> {precio_original}")
+            if str(metas_existentes.get("url_oferta", "")).strip() != str(url_oferta).strip() and url_oferta:
+                cambios.append("url_oferta")
+            if str(metas_existentes.get("codigo_de_descuento", "")).strip() != str(codigo_de_descuento).strip():
+                cambios.append("codigo_de_descuento")
+            if str(metas_existentes.get("fuente", "")).strip() != str(fuente).strip():
+                cambios.append("fuente")
+
+            if cambios:
+                payload_update = {
+                    "type": "external",
+                    "regular_price": str(precio_original),
+                    "sale_price": str(precio_actual),
+                    "external_url": url_oferta or url_sin_acortar_con_mi_afiliado or url_importada_sin_afiliado,
+                    "button_text": f"Comprar en {fuente}",
+                    "meta_data": data["meta_data"],
+                }
+                try:
+                    wcapi.put(f"products/{exist_id}", payload_update)
+                    print(f"♻️ ACTUALIZADO -> {nombre} (ID: {exist_id}) | Cambios: {', '.join(cambios)}")
+                    summary_actualizados.append({"nombre": nombre, "id": exist_id, "cambios": cambios})
+                except Exception as e:
+                    print(f"❌ Error actualizando {nombre} (ID: {exist_id}): {e}")
+                continue
+            else:
+                print(f"⏭️ El producto '{nombre}' ya existe. Sin cambios.")
+                summary_ignorados.append({"nombre": producto_existente_match["name"], "id": exist_id})
+                continue
+
         # --- CREACIÓN CON REINTENTOS ---
         intentos, max_intentos, creado = 0, 10, False
         while intentos < max_intentos and not creado:
@@ -676,6 +732,8 @@ async def main():
                     new_id = p_res["id"]
                     plink_raw = p_res.get("permalink", "")
                     plink_short = acortar_url(plink_raw) if plink_raw else ""
+                    if not plink_short and plink_raw:
+                        plink_short = plink_raw
                     if plink_short:
                         wcapi.put(f"products/{new_id}", {"meta_data": [{"key": "url_post_acortada", "value": plink_short}]})
                     summary_creados.append({"nombre": nombre, "id": new_id})
@@ -684,8 +742,13 @@ async def main():
                     print(f"14b) URL Post Acortada (WP): {plink_short}")
                     creado = True
                 else:
+                    try:
+                        print(f"❌ Error creando producto intento {intentos}/{max_intentos}: HTTP {res.status_code} | {res.text}")
+                    except Exception:
+                        print(f"❌ Error creando producto intento {intentos}/{max_intentos}: HTTP {getattr(res, 'status_code', 'N/A')}")
                     time.sleep(15)
-            except Exception:
+            except Exception as e:
+                print(f"❌ Excepción creando producto intento {intentos}/{max_intentos}: {e}")
                 time.sleep(15)
 
         await asyncio.sleep(15)
