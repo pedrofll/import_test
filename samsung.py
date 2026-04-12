@@ -143,6 +143,23 @@ def acortar_url(url_larga: str) -> str:
         return url_larga
 
 
+def obtener_precio_real_samsung(detail_url: str):
+    try:
+        buy_url = detail_url.rstrip("/") + "/buy/"
+        r = requests.get(buy_url, headers=HEADERS, timeout=15)
+        html = r.text
+
+        m_actual = re.search(r'digitalData\.product\.model_price\s*=\s*"([^"]+)"', html)
+        m_original = re.search(r'digitalData\.product\.list_price\s*=\s*"([^"]+)"', html)
+
+        precio_actual = parse_eur_num(m_actual.group(1)) if m_actual else 0
+        precio_original = parse_eur_num(m_original.group(1)) if m_original else precio_actual
+
+        return precio_actual, precio_original
+    except Exception:
+        return 0, 0
+
+
 def unir_afiliado(url_base: str, aff: str) -> str:
     """Une AFF_SAMSUNG sin generar /?/? ni dobles interrogaciones."""
     base = (url_base or "").strip().strip('"').strip("'")
@@ -710,6 +727,11 @@ def extract_products_from_main_listing(listing_url: str):
             if precio_actual <= 0:
                 continue
             precio_original = calcular_precio_original(precio_actual)
+
+            precio_real, precio_real_original = obtener_precio_real_samsung(detail_url)
+            if precio_real > 0:
+                precio_actual = precio_real
+                precio_original = precio_real_original if precio_real_original > precio_real else calcular_precio_original(precio_real)
 
             key = source_key(nombre, memoria, capacidad, FUENTE)
             remote = {
