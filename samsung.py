@@ -78,7 +78,10 @@ def parse_eur_num(num_txt: str) -> int:
     if not num_txt:
         return 0
     n = str(num_txt).strip().replace(" ", "")
-    n = n.replace(".", "").replace(",", ".")
+    if "," in n and "." in n:
+        n = n.replace(".", "").replace(",", ".")
+    elif "," in n:
+        n = n.replace(",", ".")
     try:
         return int(round(float(n)))
     except Exception:
