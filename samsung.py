@@ -699,6 +699,16 @@ def extract_products_from_main_listing(listing_url: str):
         jsonld_items = extract_jsonld_products(html)
         print(f"✅ Items JSON-LD Samsung detectados: {len(jsonld_items)}", flush=True)
 
+        stats = {
+            "total": 0,
+            "skip_by_name": 0,
+            "no_capacidad": 0,
+            "no_ram": 0,
+            "sin_precio": 0,
+            "no_detail_url": 0,
+            "validos": 0,
+        }
+
         cards = collect_listing_card_roots(driver)
         print(f"✅ Cards Samsung detectadas en listing: {len(cards)}", flush=True)
 
@@ -707,31 +717,53 @@ def extract_products_from_main_listing(listing_url: str):
         jsonld_by_detail_and_cap = {}
         for item in jsonld_items:
             nombre = item.get("name") or ""
-            if not nombre or should_skip_by_name(nombre):
+            stats["total"] += 1
+
+            print(f"🔍 DETECTADO (RAW): {nombre}", flush=True)
+
+            if not nombre:
+                print("⛔ IGNORADO -> sin nombre", flush=True)
                 continue
+
+            if should_skip_by_name(nombre):
+                stats["skip_by_name"] += 1
+                print(f"⛔ IGNORADO -> {nombre} | motivo=skip_by_name", flush=True)
+                continue
+
             capacidad = (item.get("capacidad") or "").upper()
             if not capacidad:
+                stats["no_capacidad"] += 1
+                print(f"⛔ IGNORADO -> {nombre} | motivo=no_capacidad", flush=True)
                 continue
 
             detail_url = normalize_product_url(item.get("detail_url") or item.get("expanded_url") or "")
             buy_url = abs_url(listing_url, item.get("expanded_url") or "")
             if not detail_url:
+                stats["no_detail_url"] += 1
+                print(f"⛔ IGNORADO -> {nombre} | motivo=no_detail_url", flush=True)
                 continue
 
             memoria = infer_memoria_samsung_desde_listing(nombre, capacidad, detail_url or buy_url)
             if not memoria:
-                print(f"⚠️ Card Samsung sin RAM resoluble para {nombre} {capacidad}. Se ignora.", flush=True)
+                stats["no_ram"] += 1
+                print(f"⛔ IGNORADO -> {nombre} {capacidad} | motivo=no_ram", flush=True)
                 continue
 
             precio_actual = int(item.get("price") or 0)
             if precio_actual <= 0:
+                stats["sin_precio"] += 1
+                print(f"⛔ IGNORADO -> {nombre} | motivo=sin_precio", flush=True)
                 continue
+
             precio_original = calcular_precio_original(precio_actual)
 
             precio_real, precio_real_original = obtener_precio_real_samsung(detail_url)
             if precio_real > 0:
                 precio_actual = precio_real
                 precio_original = precio_real_original if precio_real_original > precio_real else calcular_precio_original(precio_real)
+
+            print(f"✅ VALIDO -> {nombre} {memoria} {capacidad} | precio={precio_actual}", flush=True)
+            stats["validos"] += 1
 
             key = source_key(nombre, memoria, capacidad, FUENTE)
             remote = {
@@ -814,6 +846,11 @@ def extract_products_from_main_listing(listing_url: str):
                             remote["model_code"] = mc
             except Exception:
                 continue
+
+        print("
+📊 DEBUG SAMSUNG:", flush=True)
+        for k, v in stats.items():
+            print(f"{k}: {v}", flush=True)
 
         # limpieza final
         final = []
