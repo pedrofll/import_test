@@ -145,43 +145,43 @@ def extraer_items_next_data(html: str):
         return []
 
 def acortar_url(url):
-    def _es_url_valida(valor):
-        return isinstance(valor, str) and valor.strip().lower().startswith(("http://", "https://"))
+                              
+                                                                                                   
 
     try:
         url_encoded = urllib.parse.quote(url, safe="")
 
-        # 1) is.gd
-        try:
-            r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=8)
-            texto = r.text.strip() if r.status_code == 200 else ""
-            if _es_url_valida(texto):
-                return texto
-        except:
-            pass
+                  
+            
+        r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=8)
+        texto = r.text.strip() if r.status_code == 200 else ""
+        if texto and texto.lower().startswith(("http://", "https://")):
+                            
+               
+                
 
-        # 2) cleanuri
-        try:
-            r = requests.post("https://cleanuri.com/api/v1/shorten", data={"url": url}, timeout=8)
-            if r.status_code == 200:
-                data = r.json()
-                texto = (data.get("result_url") or "").strip()
-                if _es_url_valida(texto):
-                    return texto
-        except:
-            pass
+                     
+            
+                                                                                                  
+                                    
+                               
+                                                              
+                                         
+                                
+               
+                
 
-        # 3) shrtco.de
-        try:
-            r = requests.get(f"https://api.shrtco.de/v2/shorten?url={url_encoded}", timeout=8)
-            if r.status_code == 201 or r.status_code == 200:
-                data = r.json()
-                result = data.get("result") or {}
-                texto = (result.get("full_short_link") or result.get("short_link") or "").strip()
-                if _es_url_valida(texto):
-                    return texto
-        except:
-            pass
+                      
+            
+                                                                                              
+                                                            
+                               
+                                                 
+                                                                                                 
+                                         
+            return texto
+               
+                
 
         return url
     except:
