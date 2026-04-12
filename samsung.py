@@ -847,8 +847,7 @@ def extract_products_from_main_listing(listing_url: str):
             except Exception:
                 continue
 
-        print("
-📊 DEBUG SAMSUNG:", flush=True)
+        print("\n📊 DEBUG SAMSUNG:", flush=True)
         for k, v in stats.items():
             print(f"{k}: {v}", flush=True)
 
