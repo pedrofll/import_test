@@ -148,7 +148,10 @@ def acortar_url(url):
     try:
         url_encoded = urllib.parse.quote(url, safe="")
         r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=8)
-        return r.text.strip() if r.status_code == 200 else url
+        texto = r.text.strip() if r.status_code == 200 else ""
+        if texto and texto.lower().startswith(("http://", "https://")):
+            return texto
+        return url
     except:
         return url
 
