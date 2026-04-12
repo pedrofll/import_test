@@ -248,8 +248,9 @@ def acortar_url(url):
     try:
         api_url = f"https://is.gd/create.php?format=simple&url={quote(url)}"
         r = requests.get(api_url, timeout=10)
-        if r.status_code == 200 and "http" in r.text:
-            return r.text.strip()
+        texto = r.text.strip() if r.status_code == 200 else ""
+        if texto and texto.lower().startswith(("http://", "https://")):
+            return texto
     except:
         pass
     return url
