@@ -7,9 +7,12 @@ import urllib.parse
 import time
 import math
 import hashlib
+import unicodedata
 from bs4 import BeautifulSoup
 from datetime import datetime
 from woocommerce import API
+
+SCRIPT_VERSION = "2026-04-08 hotfix-prefijo-v4"
 
 # --- CONFIGURACIÓN ---
 wcapi = API(
@@ -102,6 +105,7 @@ def print(*args, sep=" ", end="\n", file=None, flush=False):
 def log_bloque_inicio():
     print("\n" + "=" * 80)
     print(f"RUN: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"SCRIPT_VERSION: {SCRIPT_VERSION}")
     print("=" * 80)
 
 
@@ -267,6 +271,98 @@ def obtener_o_crear_categoria_con_imagen(nombre_cat, parent_id=0):
         return 0, ""
 
 
+def _normalizar_espacios_nombre(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+
+def _token_base(tok: str) -> str:
+    """Reduce un token a sus letras/números visibles, quitando marcas Unicode invisibles."""
+    if not tok:
+        return ""
+    out = []
+    for ch in unicodedata.normalize("NFKD", str(tok)):
+        cat = unicodedata.category(ch)
+        if cat in ("Mn", "Me", "Cf"):
+            continue
+        if ch.isalnum():
+            out.append(ch)
+    return "".join(out)
+
+
+def _token_sin_letras_es_decorativo(tok: str) -> bool:
+    """Detecta tokens iniciales decorativos como 1️⃣, 1), •, emojis, etc."""
+    if not tok:
+        return False
+
+    t = str(tok).strip()
+    if not t:
+        return True
+
+    base = _token_base(t)
+    visible = "".join(
+        ch for ch in unicodedata.normalize("NFKD", t)
+        if unicodedata.category(ch) not in ("Mn", "Me", "Cf")
+    ).strip()
+
+    # Si contiene letras reales, no lo tocamos (p.ej. 1MORE, X200, iQOO)
+    if any(ch.isalpha() for ch in base):
+        return False
+
+    # Token vacío o solo símbolos/emoji
+    if not base:
+        return True
+
+    # Numeración corta típica de listas: 1, 2, 01, 10
+    if base.isdigit() and len(base) <= 2:
+        return True
+
+    # Tokens muy cortos sin letras y con símbolos alrededor: (1), 1️⃣, 1., •
+    if len(base) <= 3 and any(not ch.isalnum() for ch in visible):
+        return True
+
+    return False
+
+
+def limpiar_prefijo_nombre(s: str) -> str:
+    """Limpia prefijos de numeración/emoji típicos de mensajes de Telegram."""
+    if not s:
+        return ""
+
+    s = _normalizar_espacios_nombre(s)
+
+    # Quita ruido inicial obvio (balas, emojis, signos) pero sin comerse marcas válidas con letras
+    while s:
+        original = s
+        s = re.sub(r"^[\s\u200b-\u200f\u2060\ufeff]+", "", s)
+        s = re.sub(r"^[•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐]+\s*", "", s)
+        s = re.sub(r"^\(?\d{1,2}\)?[.)-]+\s*", "", s)
+        s = re.sub(r"^[^\w]+", "", s)
+        s = _normalizar_espacios_nombre(s)
+        if s == original:
+            break
+
+    partes = s.split()
+    while len(partes) > 1 and _token_sin_letras_es_decorativo(partes[0]):
+        partes = partes[1:]
+
+    s = _normalizar_espacios_nombre(" ".join(partes))
+
+    # Última red de seguridad: si el primer token sigue sin letras y es muy corto, lo quitamos.
+    partes = s.split()
+    if len(partes) > 1:
+        tok0 = partes[0]
+        base0 = _token_base(tok0)
+        if not any(ch.isalpha() for ch in base0):
+            visible0 = "".join(
+                ch for ch in unicodedata.normalize("NFKD", tok0)
+                if unicodedata.category(ch) not in ("Mn", "Me", "Cf")
+            ).strip()
+            if (not base0) or (base0.isdigit() and len(base0) <= 2) or (len(base0) <= 3 and any(not ch.isalnum() for ch in visible0)):
+                s = _normalizar_espacios_nombre(" ".join(partes[1:]))
+
+    return s
+
+
 def extraer_datos(texto):
     t_clean = texto.replace("**", "").replace("`", "").strip()
     lineas = [l.strip() for l in t_clean.split("\n") if l.strip()]
@@ -295,13 +391,13 @@ def extraer_datos(texto):
 
     partes_nombre = []
     for linea in lineas:
-        cand = re.sub(r"^[^\w]+", "", linea).strip()
+        cand = limpiar_prefijo_nombre(linea)
         if _es_parte_de_nombre(cand):
             partes_nombre.append(cand)
         elif partes_nombre:
             break
 
-    nombre = " ".join(partes_nombre).strip()
+    nombre = limpiar_prefijo_nombre(" ".join(partes_nombre)).strip()
     if not nombre:
         return None
 
@@ -456,16 +552,21 @@ async def main():
             continue
 
         nombre, memoria, capacidad, version, codigo_de_descuento, precio_actual = res_data
+        nombre_raw = nombre
+        nombre = limpiar_prefijo_nombre(nombre)
+        nombre = _normalizar_espacios_nombre(nombre)
 
         # --- VERIFICACIÓN DE DUPLICADOS ---
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 10}).json()
         existe = False
         for prod_existente in check_exists:
-            if prod_existente["name"].strip().lower() == nombre.strip().lower():
+            nombre_existente_normalizado = limpiar_prefijo_nombre(prod_existente["name"]).strip().lower()
+            nombre_nuevo_normalizado = limpiar_prefijo_nombre(nombre).strip().lower()
+            if nombre_existente_normalizado == nombre_nuevo_normalizado:
                 metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
                 if metas_existentes.get("importado_de") == "Telegram_Chinabay":
                     print(f"⏭️ El producto '{nombre}' ya existe. Saltando...")
-                    summary_ignorados.append({"nombre": nombre, "id": prod_existente["id"]})
+                    summary_ignorados.append({"nombre": prod_existente["name"], "id": prod_existente["id"]})
                     existe = True
                     break
         if existe:
@@ -511,6 +612,8 @@ async def main():
         # --- LOGS DETALLADOS (guardados a fichero) ---
         print("# --- LOGS DETALLADOS SOLICITADOS ---")
         print(f"Detectado {nombre}")
+        print(f"0) Nombre RAW parser: {nombre_raw}")
+        print(f"0b) Nombre normalizado final: {nombre}")
         print(f"1) Nombre: {nombre}")
         print(f"2) Memoria: {memoria}")
         print(f"3) Capacidad: {capacidad}")
