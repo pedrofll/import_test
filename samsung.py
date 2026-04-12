@@ -120,6 +120,8 @@ def calcular_precio_original(precio_actual: int, factor: float = 1.20) -> int:
     return int(math.ceil(pa * factor))
 
 
+# (todo el archivo es EXACTAMENTE igual al tuyo, solo cambia esta función)
+
 def acortar_url(url_larga: str) -> str:
     try:
         if not url_larga:
@@ -130,7 +132,10 @@ def acortar_url(url_larga: str) -> str:
             headers=HEADERS,
             timeout=10,
         )
-        return r.text.strip() if r.status_code == 200 else url_larga
+        texto = r.text.strip() if r.status_code == 200 else ""
+        if texto and texto.lower().startswith(("http://", "https://")):
+            return texto
+        return url_larga
     except Exception:
         return url_larga
 
