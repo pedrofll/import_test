@@ -751,7 +751,12 @@ def obtener_precio_real_samsung(detail_url: str, buy_url_hint: str = "", model_c
         return 0, 0
 
 def unir_afiliado(url_base: str, aff: str) -> str:
-    """Une AFF_SAMSUNG sin generar /?/? ni dobles interrogaciones."""
+    """Une AFF_SAMSUNG sin generar /?/? ni dobles interrogaciones.
+
+    Regla ODM Samsung:
+    - url_importada_sin_afiliado puede conservar modelCode para identificar la variante.
+    - url_sin_acortar_con_mi_afiliado NO debe llevar modelCode.
+    """
     base = (url_base or "").strip().strip('"').strip("'")
     aff = (aff or "").strip().strip('"').strip("'")
     if not base or not aff:
@@ -769,7 +774,12 @@ def unir_afiliado(url_base: str, aff: str) -> str:
     scheme = u.scheme or "https"
     netloc = u.netloc
     path = (u.path or "").split("?")[0].rstrip("/") + "/"
-    existing_query = (u.query or "").strip()
+
+    existing_pairs = urllib.parse.parse_qsl(u.query or "", keep_blank_values=True)
+    if "samsung.com" in (netloc or "").lower():
+        existing_pairs = [(k, v) for (k, v) in existing_pairs if k.lower() != "modelcode"]
+
+    existing_query = urllib.parse.urlencode(existing_pairs, doseq=True)
     aff_query = aff.lstrip("?&")
     query_parts = [q for q in [existing_query, aff_query] if q]
     query = "&".join(query_parts)
