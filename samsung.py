@@ -163,13 +163,14 @@ def is_samsung_variant_specific(detail_url: str = "", buy_url_hint: str = "", mo
                 return True
             if cap_token and cap_token in path:
                 return True
-            # Las fichas específicas de Samsung suelen tener un nivel extra bajo /smartphones/...
             if len(segments) >= 4 and "smartphones" in segments:
                 return True
         except Exception:
             continue
     return False
 
+
+SAMSUNG_BUY_VARIANTS_CACHE = {}
 
 
 def sanitize_samsung_buy_url(url: str) -> str:
@@ -194,10 +195,9 @@ def sanitize_samsung_buy_url(url: str) -> str:
         return url
 
 
-
 def build_samsung_buy_url(detail_url: str = "", buy_url_hint: str = "", model_code: str = "") -> str:
     hinted = sanitize_samsung_buy_url(buy_url_hint)
-    if hinted and "modelCode=" in hinted:
+    if hinted and "modelCode=" in hinted and not model_code:
         return hinted
 
     base = normalize_product_url(detail_url or buy_url_hint or "")
@@ -212,9 +212,150 @@ def build_samsung_buy_url(detail_url: str = "", buy_url_hint: str = "", model_co
     return urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
 
 
+def _search_jsonish_field(blob: str, field: str) -> str:
+    m = re.search(rf'"{re.escape(field)}"\s*:\s*"([^\"]*)"', blob, flags=re.I)
+    return m.group(1).strip() if m else ""
 
-def obtener_precio_real_samsung(detail_url: str, buy_url_hint: str = "", model_code: str = "", capacidad: str = ""):
+
+def _extract_samsung_variant_blocks(html: str):
+    seen = set()
+    blocks = []
+
+    object_re = re.compile(r'\{[^{}]{0,5000}"modelCode"\s*:\s*"SM-[A-Z0-9]+"[^{}]{0,5000}\}', re.I | re.S)
+    for m in object_re.finditer(html or ""):
+        blob = m.group(0)
+        mc = _search_jsonish_field(blob, "modelCode").upper()
+        if mc and mc not in seen:
+            seen.add(mc)
+            blocks.append(blob)
+
+    if blocks:
+        return blocks
+
+    pair_re = re.compile(
+        r'"displayName"\s*:\s*"(?P<display>[^\"]+)"(?P<mid>.{0,2000}?)"modelCode"\s*:\s*"(?P<model>SM-[A-Z0-9]+)"(?P<tail>.{0,2000}?)"price"\s*:\s*"?(?P<price>\d+(?:[\.,]\d+)?)"?',
+        re.I | re.S,
+    )
+    for m in pair_re.finditer(html or ""):
+        mc = (m.group("model") or "").upper()
+        if mc and mc not in seen:
+            seen.add(mc)
+            blocks.append(m.group(0))
+    return blocks
+
+
+def get_samsung_buy_variants(detail_url: str = "", buy_url_hint: str = ""):
+    cache_key = normalize_product_url(detail_url or buy_url_hint or "")
+    if cache_key in SAMSUNG_BUY_VARIANTS_CACHE:
+        return SAMSUNG_BUY_VARIANTS_CACHE[cache_key]
+
+    variants = []
     try:
+        buy_url = build_samsung_buy_url(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code="")
+        if not buy_url:
+            SAMSUNG_BUY_VARIANTS_CACHE[cache_key] = []
+            return []
+
+        r = requests.get(buy_url, headers=HEADERS, timeout=20)
+        html = r.text or ""
+        blocks = _extract_samsung_variant_blocks(html)
+
+        seen = set()
+        for blob in blocks:
+            model_code = _search_jsonish_field(blob, "modelCode").upper()
+            if not model_code or model_code in seen:
+                continue
+
+            display_name = _search_jsonish_field(blob, "displayName")
+            english_name = _search_jsonish_field(blob, "englishName")
+            display_text = normalize_spaces(f"{display_name} {english_name}")
+            capacidad, memoria = parse_variant_option_text(display_text)
+
+            price = parse_eur_num(_search_jsonish_field(blob, "price"))
+            promo = parse_eur_num(_search_jsonish_field(blob, "promotionPrice"))
+            list_price = parse_eur_num(_search_jsonish_field(blob, "listPrice"))
+            sale_price = parse_eur_num(_search_jsonish_field(blob, "salePrice"))
+
+            precio_actual = 0
+            precio_original = 0
+
+            if promo > 0 and (price == 0 or promo <= price):
+                precio_actual = promo
+                precio_original = price or list_price or promo
+            elif sale_price > 0 and (price == 0 or sale_price <= price):
+                precio_actual = sale_price
+                precio_original = price or list_price or sale_price
+            elif price > 0:
+                precio_actual = price
+                precio_original = list_price or price
+            elif list_price > 0:
+                precio_actual = list_price
+                precio_original = list_price
+
+            if precio_actual <= 0 and precio_original <= 0:
+                continue
+            if precio_original and precio_actual and precio_original < precio_actual:
+                precio_original = precio_actual
+
+            seen.add(model_code)
+            variants.append({
+                "model_code": model_code,
+                "display_name": display_name,
+                "english_name": english_name,
+                "capacidad": capacidad,
+                "memoria": memoria,
+                "precio_actual": int(precio_actual or 0),
+                "precio_original": int(precio_original or precio_actual or 0),
+                "buy_url": build_samsung_buy_url(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code=model_code),
+            })
+    except Exception:
+        variants = []
+
+    SAMSUNG_BUY_VARIANTS_CACHE[cache_key] = variants
+    return variants
+
+
+def resolve_samsung_variant(detail_url: str = "", buy_url_hint: str = "", capacidad: str = "", memoria: str = "", model_code: str = ""):
+    variants = get_samsung_buy_variants(detail_url=detail_url, buy_url_hint=buy_url_hint)
+    if not variants:
+        return None
+
+    mc = (model_code or "").strip().upper()
+    if mc:
+        exact = [v for v in variants if str(v.get("model_code", "")).upper() == mc]
+        if len(exact) == 1:
+            return exact[0]
+
+    filtered = variants
+    cap = (capacidad or "").strip().upper()
+    ram = (memoria or "").strip().upper()
+    if cap:
+        filtered = [v for v in filtered if str(v.get("capacidad", "")).upper() == cap]
+    if ram:
+        filtered = [v for v in filtered if str(v.get("memoria", "")).upper() == ram]
+    if len(filtered) == 1:
+        return filtered[0]
+
+    if cap:
+        cap_only = [v for v in variants if str(v.get("capacidad", "")).upper() == cap]
+        if len(cap_only) == 1:
+            return cap_only[0]
+
+    return None
+
+
+def obtener_precio_real_samsung(detail_url: str, buy_url_hint: str = "", model_code: str = "", capacidad: str = "", memoria: str = ""):
+    try:
+        variant = resolve_samsung_variant(
+            detail_url=detail_url,
+            buy_url_hint=buy_url_hint,
+            capacidad=capacidad,
+            memoria=memoria,
+            model_code=model_code,
+        )
+        if variant:
+            return int(variant.get("precio_actual") or 0), int(variant.get("precio_original") or 0)
+
         if not is_samsung_variant_specific(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code=model_code, capacidad=capacidad):
             return 0, 0
 
@@ -226,12 +367,12 @@ def obtener_precio_real_samsung(detail_url: str, buy_url_hint: str = "", model_c
         html = r.text
 
         patterns_actual = [
-            r'digitalData\.product\.model_price\s*=\s*"([^"]+)"',
-            r'"model_price"\s*:\s*"([^"]+)"',
+            r'digitalData\.product\.model_price\s*=\s*"([^\"]+)"',
+            r'"model_price"\s*:\s*"([^\"]+)"',
         ]
         patterns_original = [
-            r'digitalData\.product\.list_price\s*=\s*"([^"]+)"',
-            r'"list_price"\s*:\s*"([^"]+)"',
+            r'digitalData\.product\.list_price\s*=\s*"([^\"]+)"',
+            r'"list_price"\s*:\s*"([^\"]+)"',
         ]
 
         m_actual = None
@@ -251,7 +392,6 @@ def obtener_precio_real_samsung(detail_url: str, buy_url_hint: str = "", model_c
         return precio_actual, precio_original
     except Exception:
         return 0, 0
-
 
 def unir_afiliado(url_base: str, aff: str) -> str:
     """Une AFF_SAMSUNG sin generar /?/? ni dobles interrogaciones."""
@@ -853,15 +993,34 @@ def extract_products_from_main_listing(listing_url: str):
 
             precio_original = calcular_precio_original(precio_actual)
 
-            precio_real, precio_real_original = obtener_precio_real_samsung(
+            current_model_code = item.get("model_code", "")
+            resolved_variant = resolve_samsung_variant(
                 detail_url=detail_url,
                 buy_url_hint=buy_url,
-                model_code=item.get("model_code", ""),
                 capacidad=capacidad,
+                memoria=memoria,
+                model_code=current_model_code,
             )
-            if precio_real > 0:
-                precio_actual = precio_real
-                precio_original = precio_real_original if precio_real_original > precio_real else calcular_precio_original(precio_real)
+            if resolved_variant:
+                if int(resolved_variant.get("precio_actual") or 0) > 0:
+                    precio_actual = int(resolved_variant.get("precio_actual") or 0)
+                if int(resolved_variant.get("precio_original") or 0) > 0:
+                    precio_original = int(resolved_variant.get("precio_original") or 0)
+                if (resolved_variant.get("model_code") or "").strip():
+                    current_model_code = resolved_variant.get("model_code") or current_model_code
+                if (resolved_variant.get("buy_url") or "").strip():
+                    buy_url = resolved_variant.get("buy_url") or buy_url
+            else:
+                precio_real, precio_real_original = obtener_precio_real_samsung(
+                    detail_url=detail_url,
+                    buy_url_hint=buy_url,
+                    model_code=current_model_code,
+                    capacidad=capacidad,
+                    memoria=memoria,
+                )
+                if precio_real > 0:
+                    precio_actual = precio_real
+                    precio_original = precio_real_original if precio_real_original > precio_real else calcular_precio_original(precio_real)
 
             print(f"✅ VALIDO -> {nombre} {memoria} {capacidad} | precio={precio_actual}", flush=True)
             stats["validos"] += 1
@@ -869,12 +1028,12 @@ def extract_products_from_main_listing(listing_url: str):
             key = source_key(nombre, memoria, capacidad, FUENTE)
             variant_import_url = (
                 sanitize_samsung_buy_url(buy_url)
-                if is_samsung_variant_specific(
+                if ((resolved_variant and resolved_variant.get("buy_url")) or is_samsung_variant_specific(
                     detail_url=detail_url,
                     buy_url_hint=buy_url,
-                    model_code=item.get("model_code", ""),
+                    model_code=current_model_code,
                     capacidad=capacidad,
-                )
+                ))
                 else detail_url
             )
 
@@ -898,7 +1057,7 @@ def extract_products_from_main_listing(listing_url: str):
                 "origen_pagina": "1",
                 "origen_listado": listing_url,
                 "source_key": key,
-                "model_code": item.get("model_code", ""),
+                "model_code": current_model_code,
             }
             remote_by_key[key] = remote
             jsonld_by_detail_and_cap[(detail_url, capacidad)] = remote
@@ -962,11 +1121,16 @@ def extract_products_from_main_listing(listing_url: str):
                         remote["precio_original"] = max(int(remote.get("precio_original") or 0), calcular_precio_original(remote["precio_actual"]))
                     remote["codigo_descuento"] = codigo
                     if buy_url:
-                        remote["url_oferta_sin_acortar"] = buy_url
-                        remote["buy_url"] = buy_url
                         mc = urllib.parse.parse_qs(urllib.parse.urlsplit(buy_url).query).get("modelCode", [""])[0]
                         if mc:
+                            specific_buy = sanitize_samsung_buy_url(buy_url)
+                            remote["url_oferta_sin_acortar"] = specific_buy
+                            remote["buy_url"] = specific_buy
+                            remote["url_importada_sin_afiliado"] = specific_buy
                             remote["model_code"] = mc
+                        elif not str(remote.get("model_code", "") or "").strip():
+                            remote["url_oferta_sin_acortar"] = buy_url
+                            remote["buy_url"] = buy_url
             except Exception:
                 continue
 
