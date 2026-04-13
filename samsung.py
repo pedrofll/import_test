@@ -113,6 +113,13 @@ def dedupe_keep_order(seq):
     return out
 
 
+def _clip_text(txt: str, limit: int = 160) -> str:
+    t = normalize_spaces(txt or "")
+    if len(t) <= limit:
+        return t
+    return t[: limit - 3].rstrip() + "..."
+
+
 def calcular_precio_original(precio_actual: int, factor: float = 1.20) -> int:
     try:
         pa = int(precio_actual)
@@ -1002,8 +1009,15 @@ def extract_jsonld_products(html: str):
                 "price": price,
                 "expanded_url": expanded,
                 "detail_url": detail_url,
+                "raw_url": raw_url,
                 "image": img,
+                "description": desc,
                 "capacidad": cap,
+                "capacidad_origen": "detectada_en_texto" if cap else "",
+                "capacidad_debug_reason": (
+                    f"extraida_de_url_desc_nombre:{cap}" if cap else "sin_capacidad_en_url_desc_nombre"
+                ),
+                "source_channel": "jsonld_listing",
                 "model_code": model_code,
             })
 
@@ -1017,10 +1031,19 @@ def extract_jsonld_products(html: str):
             continue
         known = known_capacities_for_name(group[0].get("name", ""))
         if not known:
+            for it in missing:
+                it["capacidad_debug_reason"] = "sin_capacidad_en_texto_y_sin_mapa"
             continue
         explicit = {it.get("capacidad") for it in group if it.get("capacidad")}
         remaining = [c for c in known if c not in explicit]
         if len(remaining) != len(missing):
+            reason = (
+                f"sin_capacidad_en_texto; mapa={','.join(known)}; "
+                f"explicit={','.join(sorted([x for x in explicit if x])) or '-'}; "
+                f"missing={len(missing)}; remaining={len(remaining)}"
+            )
+            for it in missing:
+                it["capacidad_debug_reason"] = reason
             continue
         missing_sorted = sorted(missing, key=lambda x: int(x.get("price") or 0))
         def cap_sort(c):
@@ -1028,6 +1051,8 @@ def extract_jsonld_products(html: str):
         remaining_sorted = sorted(remaining, key=cap_sort)
         for it, cap in zip(missing_sorted, remaining_sorted):
             it["capacidad"] = cap
+            it["capacidad_origen"] = "inferida_por_mapa"
+            it["capacidad_debug_reason"] = f"inferida_por_mapa:{cap}"
 
     return out
 
@@ -1297,6 +1322,14 @@ def extract_products_from_main_listing(listing_url: str):
 
         cards = collect_listing_card_roots(driver)
         print(f"✅ Cards Samsung detectadas en listing: {len(cards)}", flush=True)
+        visible_card_names = set()
+        for card in cards:
+            try:
+                nm = extract_title_from_card(normalize_spaces(card.text))
+                if nm:
+                    visible_card_names.add(nm.lower())
+            except Exception:
+                pass
 
         # Base principal: JSON-LD
         remote_by_key = {}
@@ -1306,6 +1339,32 @@ def extract_products_from_main_listing(listing_url: str):
             stats["total"] += 1
 
             print(f"🔍 DETECTADO (RAW): {nombre}", flush=True)
+            try:
+                source_channel = item.get("source_channel") or "jsonld_listing"
+                expanded_url_log = item.get("expanded_url") or item.get("detail_url") or listing_url
+                raw_url_log = item.get("raw_url") or ""
+                desc_log = _clip_text(item.get("description") or "", 180)
+                cap_log = (item.get("capacidad") or "").upper()
+                cap_origin = item.get("capacidad_origen") or "sin_detectar"
+                cap_reason = item.get("capacidad_debug_reason") or ""
+                known_caps_log = ", ".join(known_capacities_for_name(nombre)) or "-"
+                visible_flag = "SI" if nombre.lower() in visible_card_names else "NO"
+                print(
+                    f"   ↳ Ruta búsqueda: canal={source_channel} | listado={mask_url(listing_url)} | expanded={mask_url(expanded_url_log)} | visible_en_cards={visible_flag}",
+                    flush=True,
+                )
+                if raw_url_log:
+                    print(f"   ↳ Raw URL JSON-LD: {raw_url_log}", flush=True)
+                if desc_log:
+                    print(f"   ↳ Descripción JSON-LD: {desc_log}", flush=True)
+                print(
+                    f"   ↳ Capacidad: detectada={cap_log or '-'} | origen={cap_origin} | mapa={known_caps_log}",
+                    flush=True,
+                )
+                if cap_reason:
+                    print(f"   ↳ Motivo capacidad: {cap_reason}", flush=True)
+            except Exception:
+                pass
 
             if not nombre:
                 print("⛔ IGNORADO -> sin nombre", flush=True)
@@ -1739,7 +1798,8 @@ def sincronizar(remotos):
             print(f"14) URL acortada con mi afiliado: {url_oferta}", flush=True)
             print(f"15) Enviado desde: {r.get('enviado_desde', ENVIADO_DESDE)}", flush=True)
             print(f"15) Importado de: {ID_IMPORTACION}", flush=True)
-            print("16) Encolado para comparar con base de datos...", flush=True)
+            print(f"16) Ruta búsqueda origen: canal=jsonld_listing | listado={mask_url(r.get('origen_listado', START_URL))} | pagina={r.get('origen_pagina', '1')}", flush=True)
+            print("17) Encolado para comparar con base de datos...", flush=True)
             print("-" * 60, flush=True)
 
             if match:
