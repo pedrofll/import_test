@@ -154,7 +154,6 @@ def is_samsung_variant_specific(detail_url: str = "", buy_url_hint: str = "", mo
         try:
             u = urllib.parse.urlsplit(raw)
             path = (u.path or "").lower()
-            segments = [s for s in path.split("/") if s]
             query = (u.query or "").lower()
 
             if "modelcode=" in query:
@@ -163,11 +162,10 @@ def is_samsung_variant_specific(detail_url: str = "", buy_url_hint: str = "", mo
                 return True
             if cap_token and cap_token in path:
                 return True
-            if len(segments) >= 4 and "smartphones" in segments:
-                return True
         except Exception:
             continue
     return False
+
 
 
 SAMSUNG_BUY_VARIANTS_CACHE = {}
@@ -225,22 +223,25 @@ def _extract_samsung_variant_blocks(html: str):
     for m in object_re.finditer(html or ""):
         blob = m.group(0)
         mc = _search_jsonish_field(blob, "modelCode").upper()
-        if mc and mc not in seen:
-            seen.add(mc)
+        sig = normalize_spaces(blob)
+        if mc and sig not in seen:
+            seen.add(sig)
             blocks.append(blob)
 
     if blocks:
         return blocks
 
     pair_re = re.compile(
-        r'"displayName"\s*:\s*"(?P<display>[^\"]+)"(?P<mid>.{0,2000}?)"modelCode"\s*:\s*"(?P<model>SM-[A-Z0-9]+)"(?P<tail>.{0,2000}?)"price"\s*:\s*"?(?P<price>\d+(?:[\.,]\d+)?)"?',
+        r'"displayName"\s*:\s*"(?P<display>[^"]+)"(?P<mid>.{0,2000}?)"modelCode"\s*:\s*"(?P<model>SM-[A-Z0-9]+)"(?P<tail>.{0,2000}?)"price"\s*:\s*"?(?P<price>\d+(?:[\.,]\d+)?)"?',
         re.I | re.S,
     )
     for m in pair_re.finditer(html or ""):
-        mc = (m.group("model") or "").upper()
-        if mc and mc not in seen:
-            seen.add(mc)
-            blocks.append(m.group(0))
+        blob = m.group(0)
+        sig = normalize_spaces(blob)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        blocks.append(blob)
     return blocks
 
 
@@ -260,10 +261,10 @@ def get_samsung_buy_variants(detail_url: str = "", buy_url_hint: str = ""):
         html = r.text or ""
         blocks = _extract_samsung_variant_blocks(html)
 
-        seen = set()
+        by_model = {}
         for blob in blocks:
             model_code = _search_jsonish_field(blob, "modelCode").upper()
-            if not model_code or model_code in seen:
+            if not model_code:
                 continue
 
             display_name = _search_jsonish_field(blob, "displayName")
@@ -297,8 +298,7 @@ def get_samsung_buy_variants(detail_url: str = "", buy_url_hint: str = ""):
             if precio_original and precio_actual and precio_original < precio_actual:
                 precio_original = precio_actual
 
-            seen.add(model_code)
-            variants.append({
+            candidate = {
                 "model_code": model_code,
                 "display_name": display_name,
                 "english_name": english_name,
@@ -307,7 +307,38 @@ def get_samsung_buy_variants(detail_url: str = "", buy_url_hint: str = ""):
                 "precio_actual": int(precio_actual or 0),
                 "precio_original": int(precio_original or precio_actual or 0),
                 "buy_url": build_samsung_buy_url(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code=model_code),
-            })
+            }
+
+            existing = by_model.get(model_code)
+            if not existing:
+                by_model[model_code] = candidate
+                continue
+
+            existing_score = int(bool(existing.get("capacidad"))) + int(bool(existing.get("memoria")))
+            candidate_score = int(bool(candidate.get("capacidad"))) + int(bool(candidate.get("memoria")))
+
+            if candidate_score > existing_score:
+                merged = dict(existing)
+                merged.update(candidate)
+                by_model[model_code] = merged
+                existing = by_model[model_code]
+            else:
+                existing = by_model[model_code]
+
+            if not existing.get("display_name") and candidate.get("display_name"):
+                existing["display_name"] = candidate["display_name"]
+            if not existing.get("english_name") and candidate.get("english_name"):
+                existing["english_name"] = candidate["english_name"]
+            if not existing.get("capacidad") and candidate.get("capacidad"):
+                existing["capacidad"] = candidate["capacidad"]
+            if not existing.get("memoria") and candidate.get("memoria"):
+                existing["memoria"] = candidate["memoria"]
+            if int(candidate.get("precio_actual") or 0) > 0:
+                existing["precio_actual"] = int(candidate.get("precio_actual") or 0)
+            if int(candidate.get("precio_original") or 0) > 0:
+                existing["precio_original"] = int(candidate.get("precio_original") or 0)
+
+        variants = list(by_model.values())
     except Exception:
         variants = []
 
@@ -1105,20 +1136,24 @@ def extract_products_from_main_listing(listing_url: str):
                 if not candidates:
                     continue
 
+                variants_catalog = get_samsung_buy_variants(detail_url=detail_url, buy_url_hint=buy_url)
+                multi_variant = len([v for v in variants_catalog if (v.get("capacidad") or v.get("memoria") or v.get("model_code"))]) > 1
+
                 fallback = min([int(r.get("precio_actual") or 0) for r in candidates if int(r.get("precio_actual") or 0) > 0] or [0])
                 cur, orig = extract_card_price_info(text, fallback_price=fallback)
                 codigo = extract_coupon_from_text(text) or CODIGO_DESCUENTO_DEFAULT
 
                 for remote in candidates:
-                    if cur > 0:
+                    if not multi_variant and cur > 0:
                         # No sustituir por un precio claramente peor
                         if fallback and cur > int(fallback * 1.40):
                             continue
                         remote["precio_actual"] = cur
-                    if orig > 0:
-                        remote["precio_original"] = max(orig, remote["precio_actual"] + 1)
-                    else:
-                        remote["precio_original"] = max(int(remote.get("precio_original") or 0), calcular_precio_original(remote["precio_actual"]))
+                    if not multi_variant:
+                        if orig > 0:
+                            remote["precio_original"] = max(orig, remote["precio_actual"] + 1)
+                        else:
+                            remote["precio_original"] = max(int(remote.get("precio_original") or 0), calcular_precio_original(remote["precio_actual"]))
                     remote["codigo_descuento"] = codigo
                     if buy_url:
                         mc = urllib.parse.parse_qs(urllib.parse.urlsplit(buy_url).query).get("modelCode", [""])[0]
@@ -1128,7 +1163,7 @@ def extract_products_from_main_listing(listing_url: str):
                             remote["buy_url"] = specific_buy
                             remote["url_importada_sin_afiliado"] = specific_buy
                             remote["model_code"] = mc
-                        elif not str(remote.get("model_code", "") or "").strip():
+                        elif (not multi_variant) and (not str(remote.get("model_code", "") or "").strip()):
                             remote["url_oferta_sin_acortar"] = buy_url
                             remote["buy_url"] = buy_url
             except Exception:
