@@ -1375,12 +1375,6 @@ def extract_products_from_main_listing(listing_url: str):
                 print(f"⛔ IGNORADO -> {nombre} | motivo=skip_by_name", flush=True)
                 continue
 
-            capacidad = (item.get("capacidad") or "").upper()
-            if not capacidad:
-                stats["no_capacidad"] += 1
-                print(f"⛔ IGNORADO -> {nombre} | motivo=no_capacidad", flush=True)
-                continue
-
             detail_url = normalize_product_url(item.get("detail_url") or item.get("expanded_url") or "")
             buy_url = abs_url(listing_url, item.get("expanded_url") or "")
             if not detail_url:
@@ -1388,21 +1382,57 @@ def extract_products_from_main_listing(listing_url: str):
                 print(f"⛔ IGNORADO -> {nombre} | motivo=no_detail_url", flush=True)
                 continue
 
-            memoria = infer_memoria_samsung_desde_listing(nombre, capacidad, detail_url or buy_url)
+            current_model_code = item.get("model_code", "")
+            capacidad = (item.get("capacidad") or "").upper()
+            memoria = infer_memoria_samsung_desde_listing(nombre, capacidad, detail_url or buy_url) if capacidad else ""
+
+            pre_resolved_variant = None
+            if (not capacidad or not memoria) and current_model_code:
+                pre_resolved_variant = resolve_samsung_variant(
+                    detail_url=detail_url,
+                    buy_url_hint=buy_url,
+                    capacidad=capacidad,
+                    memoria=memoria,
+                    model_code=current_model_code,
+                )
+                if pre_resolved_variant:
+                    capacidad = (pre_resolved_variant.get("capacidad") or capacidad or "").upper()
+                    memoria = (pre_resolved_variant.get("memoria") or memoria or "").upper()
+                    if (pre_resolved_variant.get("model_code") or "").strip():
+                        current_model_code = pre_resolved_variant.get("model_code") or current_model_code
+                    if (pre_resolved_variant.get("buy_url") or "").strip():
+                        buy_url = pre_resolved_variant.get("buy_url") or buy_url
+                    print(
+                        f"   ↳ VARIANTE PRE-RESUELTA POR modelCode: cap={capacidad or '-'} ram={memoria or '-'} model={current_model_code or '-'} pa={int(pre_resolved_variant.get('precio_actual') or 0)} po={int(pre_resolved_variant.get('precio_original') or 0)}",
+                        flush=True,
+                    )
+
+            if not capacidad:
+                stats["no_capacidad"] += 1
+                print(f"⛔ IGNORADO -> {nombre} | motivo=no_capacidad", flush=True)
+                continue
+
+            if not memoria:
+                memoria = infer_memoria_samsung_desde_listing(nombre, capacidad, detail_url or buy_url)
+            if not memoria and pre_resolved_variant:
+                memoria = (pre_resolved_variant.get("memoria") or "").upper()
             if not memoria:
                 stats["no_ram"] += 1
                 print(f"⛔ IGNORADO -> {nombre} {capacidad} | motivo=no_ram", flush=True)
                 continue
 
             precio_actual = int(item.get("price") or 0)
+            if pre_resolved_variant and int(pre_resolved_variant.get("precio_actual") or 0) > 0:
+                precio_actual = int(pre_resolved_variant.get("precio_actual") or 0)
             if precio_actual <= 0:
                 stats["sin_precio"] += 1
                 print(f"⛔ IGNORADO -> {nombre} | motivo=sin_precio", flush=True)
                 continue
 
             precio_original = calcular_precio_original(precio_actual)
+            if pre_resolved_variant and int(pre_resolved_variant.get("precio_original") or 0) > 0:
+                precio_original = int(pre_resolved_variant.get("precio_original") or 0)
 
-            current_model_code = item.get("model_code", "")
             resolved_variant = resolve_samsung_variant(
                 detail_url=detail_url,
                 buy_url_hint=buy_url,
