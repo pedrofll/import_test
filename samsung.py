@@ -143,14 +143,107 @@ def acortar_url(url_larga: str) -> str:
         return url_larga
 
 
-def obtener_precio_real_samsung(detail_url: str):
+def is_samsung_variant_specific(detail_url: str = "", buy_url_hint: str = "", model_code: str = "", capacidad: str = "") -> bool:
+    if (model_code or "").strip():
+        return True
+
+    cap_token = (capacidad or "").lower().replace(" ", "")
+    for raw in [buy_url_hint, detail_url]:
+        if not raw:
+            continue
+        try:
+            u = urllib.parse.urlsplit(raw)
+            path = (u.path or "").lower()
+            segments = [s for s in path.split("/") if s]
+            query = (u.query or "").lower()
+
+            if "modelcode=" in query:
+                return True
+            if re.search(r"\bsm-[a-z0-9]+\b", raw, flags=re.I):
+                return True
+            if cap_token and cap_token in path:
+                return True
+            # Las fichas específicas de Samsung suelen tener un nivel extra bajo /smartphones/...
+            if len(segments) >= 4 and "smartphones" in segments:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+
+def sanitize_samsung_buy_url(url: str) -> str:
+    if not url:
+        return ""
     try:
-        buy_url = detail_url.rstrip("/") + "/buy/"
+        u = urllib.parse.urlsplit(url)
+        scheme = u.scheme or "https"
+        netloc = u.netloc
+        path = (u.path or "").rstrip("/")
+        if not re.search(r"/buy$", path, flags=re.I):
+            path = re.sub(r"/buy$", "", path, flags=re.I).rstrip("/") + "/buy"
+        qs = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+        keep = []
+        for key in ["modelCode", "modelcode"]:
+            for value in qs.get(key, []):
+                if value:
+                    keep.append(("modelCode", value))
+        query = urllib.parse.urlencode(keep, doseq=True)
+        return urllib.parse.urlunsplit((scheme, netloc, path + "/", query, ""))
+    except Exception:
+        return url
+
+
+
+def build_samsung_buy_url(detail_url: str = "", buy_url_hint: str = "", model_code: str = "") -> str:
+    hinted = sanitize_samsung_buy_url(buy_url_hint)
+    if hinted and "modelCode=" in hinted:
+        return hinted
+
+    base = normalize_product_url(detail_url or buy_url_hint or "")
+    if not base:
+        return hinted
+
+    u = urllib.parse.urlsplit(base)
+    scheme = u.scheme or "https"
+    netloc = u.netloc
+    path = re.sub(r"/buy$", "", (u.path or "").rstrip("/"), flags=re.I).rstrip("/") + "/buy/"
+    query = urllib.parse.urlencode({"modelCode": model_code}) if (model_code or "").strip() else ""
+    return urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
+
+
+
+def obtener_precio_real_samsung(detail_url: str, buy_url_hint: str = "", model_code: str = "", capacidad: str = ""):
+    try:
+        if not is_samsung_variant_specific(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code=model_code, capacidad=capacidad):
+            return 0, 0
+
+        buy_url = build_samsung_buy_url(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code=model_code)
+        if not buy_url:
+            return 0, 0
+
         r = requests.get(buy_url, headers=HEADERS, timeout=15)
         html = r.text
 
-        m_actual = re.search(r'digitalData\.product\.model_price\s*=\s*"([^"]+)"', html)
-        m_original = re.search(r'digitalData\.product\.list_price\s*=\s*"([^"]+)"', html)
+        patterns_actual = [
+            r'digitalData\.product\.model_price\s*=\s*"([^"]+)"',
+            r'"model_price"\s*:\s*"([^"]+)"',
+        ]
+        patterns_original = [
+            r'digitalData\.product\.list_price\s*=\s*"([^"]+)"',
+            r'"list_price"\s*:\s*"([^"]+)"',
+        ]
+
+        m_actual = None
+        m_original = None
+        for pat in patterns_actual:
+            m_actual = re.search(pat, html)
+            if m_actual:
+                break
+        for pat in patterns_original:
+            m_original = re.search(pat, html)
+            if m_original:
+                break
 
         precio_actual = parse_eur_num(m_actual.group(1)) if m_actual else 0
         precio_original = parse_eur_num(m_original.group(1)) if m_original else precio_actual
@@ -179,7 +272,10 @@ def unir_afiliado(url_base: str, aff: str) -> str:
     scheme = u.scheme or "https"
     netloc = u.netloc
     path = (u.path or "").split("?")[0].rstrip("/") + "/"
-    query = aff
+    existing_query = (u.query or "").strip()
+    aff_query = aff.lstrip("?&")
+    query_parts = [q for q in [existing_query, aff_query] if q]
+    query = "&".join(query_parts)
     return urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
 
 
@@ -757,7 +853,12 @@ def extract_products_from_main_listing(listing_url: str):
 
             precio_original = calcular_precio_original(precio_actual)
 
-            precio_real, precio_real_original = obtener_precio_real_samsung(detail_url)
+            precio_real, precio_real_original = obtener_precio_real_samsung(
+                detail_url=detail_url,
+                buy_url_hint=buy_url,
+                model_code=item.get("model_code", ""),
+                capacidad=capacidad,
+            )
             if precio_real > 0:
                 precio_actual = precio_real
                 precio_original = precio_real_original if precio_real_original > precio_real else calcular_precio_original(precio_real)
@@ -766,6 +867,17 @@ def extract_products_from_main_listing(listing_url: str):
             stats["validos"] += 1
 
             key = source_key(nombre, memoria, capacidad, FUENTE)
+            variant_import_url = (
+                sanitize_samsung_buy_url(buy_url)
+                if is_samsung_variant_specific(
+                    detail_url=detail_url,
+                    buy_url_hint=buy_url,
+                    model_code=item.get("model_code", ""),
+                    capacidad=capacidad,
+                )
+                else detail_url
+            )
+
             remote = {
                 "nombre": nombre,
                 "memoria": memoria,
@@ -775,7 +887,7 @@ def extract_products_from_main_listing(listing_url: str):
                 "img": "",
                 "url_imp": detail_url,
                 "url_oferta_sin_acortar": buy_url or detail_url,
-                "url_importada_sin_afiliado": detail_url,
+                "url_importada_sin_afiliado": variant_import_url or detail_url,
                 "buy_url": buy_url or detail_url,
                 "enviado_desde": ENVIADO_DESDE,
                 "enviado_desde_tg": ENVIADO_DESDE_TG,
@@ -810,6 +922,12 @@ def extract_products_from_main_listing(listing_url: str):
                     if remote["url_imp"] == detail_url and remote["nombre"].lower() == nombre.lower():
                         candidates.append(remote)
 
+                buy_model_code = urllib.parse.parse_qs(urllib.parse.urlsplit(buy_url).query).get("modelCode", [""])[0]
+                if buy_model_code:
+                    exact = [r for r in candidates if str(r.get("model_code", "")).upper() == buy_model_code.upper()]
+                    if exact:
+                        candidates = exact
+
                 if selected_cap:
                     candidates = [r for r in candidates if r["capacidad"] == selected_cap]
 
@@ -819,6 +937,11 @@ def extract_products_from_main_listing(listing_url: str):
                         key = source_key(nombre, memoria, selected_cap, FUENTE)
                         if key in remote_by_key:
                             candidates = [remote_by_key[key]]
+
+                # Si una card genérica apunta a varias variantes y no hemos podido identificar cuál es,
+                # no debemos pisar el precio de todas con el mismo valor.
+                if len(candidates) > 1 and not selected_cap and not buy_model_code:
+                    continue
 
                 if not candidates:
                     continue
@@ -1070,7 +1193,18 @@ def sincronizar(remotos):
             print(f"7) Precio original: {r.get('precio_original', 0)}", flush=True)
             print(f"8) Codigo de descuento: {r.get('codigo_descuento', CODIGO_DESCUENTO_DEFAULT)}", flush=True)
 
-            url_base = (r.get("url_importada_sin_afiliado") or r.get("url_imp") or "").strip().split("?")[0].rstrip("/")
+            url_importada_raw = (r.get("url_importada_sin_afiliado") or "").strip()
+            if url_importada_raw:
+                url_base = sanitize_samsung_buy_url(url_importada_raw) if "modelCode=" in url_importada_raw else url_importada_raw.rstrip("/")
+            else:
+                url_base = normalize_product_url(r.get("url_imp") or "").rstrip("/")
+                if (r.get("model_code") or "").strip():
+                    url_base = build_samsung_buy_url(
+                        detail_url=r.get("url_imp") or "",
+                        buy_url_hint=r.get("url_oferta_sin_acortar") or r.get("buy_url") or "",
+                        model_code=r.get("model_code") or "",
+                    ).rstrip("/")
+
             url_con_afiliado = unir_afiliado(url_base, AFF_RAW) if AFF_RAW else (url_base.rstrip("/") + "/")
             url_oferta = acortar_url(url_con_afiliado)
 
