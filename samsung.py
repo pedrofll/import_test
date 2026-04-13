@@ -211,9 +211,18 @@ def build_samsung_buy_url(detail_url: str = "", buy_url_hint: str = "", model_co
 
 
 def _search_jsonish_field(blob: str, field: str) -> str:
-    m = re.search(rf'"{re.escape(field)}"\s*:\s*"([^\"]*)"', blob, flags=re.I)
-    return m.group(1).strip() if m else ""
-
+    if not blob:
+        return ""
+    patterns = [
+        rf'"{re.escape(field)}"\s*:\s*"([^\"]*)"',
+        rf"'{re.escape(field)}'\s*:\s*'([^']*)'",
+        rf'"{re.escape(field)}"\s*:\s*([^,\}}\]]+)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, blob, flags=re.I | re.S)
+        if m:
+            return normalize_spaces(str(m.group(1)).strip().strip('"').strip("'"))
+    return ""
 
 def _extract_samsung_variant_blocks(html: str):
     seen = set()
@@ -245,6 +254,52 @@ def _extract_samsung_variant_blocks(html: str):
     return blocks
 
 
+def _extract_json_array_after_key(html: str, key: str):
+    if not html or not key:
+        return None
+    m = re.search(rf'"{re.escape(key)}"\s*:\s*\[', html, flags=re.I)
+    if not m:
+        return None
+    start = html.find("[", m.start())
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(html)):
+        ch = html[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                return html[start:idx + 1]
+    return None
+
+
+def _parse_samsung_buying_options(html: str):
+    arr_txt = _extract_json_array_after_key(html or "", "buyingOptions")
+    if not arr_txt:
+        return []
+    try:
+        data = json.loads(arr_txt)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 def get_samsung_buy_variants(detail_url: str = "", buy_url_hint: str = ""):
     cache_key = normalize_product_url(detail_url or buy_url_hint or "")
     if cache_key in SAMSUNG_BUY_VARIANTS_CACHE:
@@ -259,84 +314,167 @@ def get_samsung_buy_variants(detail_url: str = "", buy_url_hint: str = ""):
 
         r = requests.get(buy_url, headers=HEADERS, timeout=20)
         html = r.text or ""
-        blocks = _extract_samsung_variant_blocks(html)
 
         by_model = {}
-        for blob in blocks:
-            model_code = _search_jsonish_field(blob, "modelCode").upper()
-            if not model_code:
-                continue
+        buying_options = _parse_samsung_buying_options(html)
+        if buying_options:
+            for group in buying_options:
+                if not isinstance(group, dict):
+                    continue
+                option_items = group.get("optionItems") or []
+                if not isinstance(option_items, list):
+                    continue
+                for item in option_items:
+                    if not isinstance(item, dict):
+                        continue
+                    model_code = normalize_spaces(str(item.get("modelCode") or item.get("pimModelCode") or "")).upper()
+                    if not model_code:
+                        continue
 
-            display_name = _search_jsonish_field(blob, "displayName")
-            english_name = _search_jsonish_field(blob, "englishName")
-            display_text = normalize_spaces(f"{display_name} {english_name}")
-            capacidad, memoria = parse_variant_option_text(display_text)
+                    display_name = normalize_spaces(str(item.get("displayName") or ""))
+                    english_name = normalize_spaces(str(item.get("englishName") or ""))
+                    display_text = normalize_spaces(f"{display_name} {english_name}")
+                    capacidad, memoria = parse_variant_option_text(display_text)
 
-            price = parse_eur_num(_search_jsonish_field(blob, "price"))
-            promo = parse_eur_num(_search_jsonish_field(blob, "promotionPrice"))
-            list_price = parse_eur_num(_search_jsonish_field(blob, "listPrice"))
-            sale_price = parse_eur_num(_search_jsonish_field(blob, "salePrice"))
+                    price = parse_eur_num(str(item.get("price") or ""))
+                    promo = parse_eur_num(str(item.get("promotionPrice") or ""))
+                    list_price = parse_eur_num(str(item.get("listPrice") or ""))
+                    sale_price = parse_eur_num(str(item.get("salePrice") or ""))
 
-            precio_actual = 0
-            precio_original = 0
+                    precio_actual = 0
+                    precio_original = 0
+                    if promo > 0 and (price == 0 or promo <= price):
+                        precio_actual = promo
+                        precio_original = price or list_price or promo
+                    elif sale_price > 0 and (price == 0 or sale_price <= price):
+                        precio_actual = sale_price
+                        precio_original = price or list_price or sale_price
+                    elif price > 0:
+                        precio_actual = price
+                        precio_original = list_price or price
+                    elif list_price > 0:
+                        precio_actual = list_price
+                        precio_original = list_price
 
-            if promo > 0 and (price == 0 or promo <= price):
-                precio_actual = promo
-                precio_original = price or list_price or promo
-            elif sale_price > 0 and (price == 0 or sale_price <= price):
-                precio_actual = sale_price
-                precio_original = price or list_price or sale_price
-            elif price > 0:
-                precio_actual = price
-                precio_original = list_price or price
-            elif list_price > 0:
-                precio_actual = list_price
-                precio_original = list_price
+                    if precio_actual <= 0 and precio_original <= 0:
+                        continue
+                    if precio_original and precio_actual and precio_original < precio_actual:
+                        precio_original = precio_actual
 
-            if precio_actual <= 0 and precio_original <= 0:
-                continue
-            if precio_original and precio_actual and precio_original < precio_actual:
-                precio_original = precio_actual
+                    candidate = {
+                        "model_code": model_code,
+                        "display_name": display_name,
+                        "english_name": english_name,
+                        "capacidad": capacidad,
+                        "memoria": memoria,
+                        "precio_actual": int(precio_actual or 0),
+                        "precio_original": int(precio_original or precio_actual or 0),
+                        "buy_url": build_samsung_buy_url(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code=model_code),
+                    }
 
-            candidate = {
-                "model_code": model_code,
-                "display_name": display_name,
-                "english_name": english_name,
-                "capacidad": capacidad,
-                "memoria": memoria,
-                "precio_actual": int(precio_actual or 0),
-                "precio_original": int(precio_original or precio_actual or 0),
-                "buy_url": build_samsung_buy_url(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code=model_code),
-            }
+                    existing = by_model.get(model_code)
+                    if not existing:
+                        by_model[model_code] = candidate
+                        continue
 
-            existing = by_model.get(model_code)
-            if not existing:
-                by_model[model_code] = candidate
-                continue
+                    existing_score = int(bool(existing.get("capacidad"))) + int(bool(existing.get("memoria")))
+                    candidate_score = int(bool(candidate.get("capacidad"))) + int(bool(candidate.get("memoria")))
+                    if candidate_score > existing_score:
+                        merged = dict(existing)
+                        merged.update(candidate)
+                        by_model[model_code] = merged
+                        existing = by_model[model_code]
+                    else:
+                        existing = by_model[model_code]
 
-            existing_score = int(bool(existing.get("capacidad"))) + int(bool(existing.get("memoria")))
-            candidate_score = int(bool(candidate.get("capacidad"))) + int(bool(candidate.get("memoria")))
+                    if not existing.get("display_name") and candidate.get("display_name"):
+                        existing["display_name"] = candidate["display_name"]
+                    if not existing.get("english_name") and candidate.get("english_name"):
+                        existing["english_name"] = candidate["english_name"]
+                    if not existing.get("capacidad") and candidate.get("capacidad"):
+                        existing["capacidad"] = candidate["capacidad"]
+                    if not existing.get("memoria") and candidate.get("memoria"):
+                        existing["memoria"] = candidate["memoria"]
+                    if int(candidate.get("precio_actual") or 0) > 0:
+                        existing["precio_actual"] = int(candidate.get("precio_actual") or 0)
+                    if int(candidate.get("precio_original") or 0) > 0:
+                        existing["precio_original"] = int(candidate.get("precio_original") or 0)
 
-            if candidate_score > existing_score:
-                merged = dict(existing)
-                merged.update(candidate)
-                by_model[model_code] = merged
-                existing = by_model[model_code]
-            else:
-                existing = by_model[model_code]
+        if not by_model:
+            blocks = _extract_samsung_variant_blocks(html)
+            for blob in blocks:
+                model_code = _search_jsonish_field(blob, "modelCode").upper()
+                if not model_code:
+                    continue
 
-            if not existing.get("display_name") and candidate.get("display_name"):
-                existing["display_name"] = candidate["display_name"]
-            if not existing.get("english_name") and candidate.get("english_name"):
-                existing["english_name"] = candidate["english_name"]
-            if not existing.get("capacidad") and candidate.get("capacidad"):
-                existing["capacidad"] = candidate["capacidad"]
-            if not existing.get("memoria") and candidate.get("memoria"):
-                existing["memoria"] = candidate["memoria"]
-            if int(candidate.get("precio_actual") or 0) > 0:
-                existing["precio_actual"] = int(candidate.get("precio_actual") or 0)
-            if int(candidate.get("precio_original") or 0) > 0:
-                existing["precio_original"] = int(candidate.get("precio_original") or 0)
+                display_name = _search_jsonish_field(blob, "displayName")
+                english_name = _search_jsonish_field(blob, "englishName")
+                display_text = normalize_spaces(f"{display_name} {english_name}")
+                capacidad, memoria = parse_variant_option_text(display_text)
+
+                price = parse_eur_num(_search_jsonish_field(blob, "price"))
+                promo = parse_eur_num(_search_jsonish_field(blob, "promotionPrice"))
+                list_price = parse_eur_num(_search_jsonish_field(blob, "listPrice"))
+                sale_price = parse_eur_num(_search_jsonish_field(blob, "salePrice"))
+
+                precio_actual = 0
+                precio_original = 0
+                if promo > 0 and (price == 0 or promo <= price):
+                    precio_actual = promo
+                    precio_original = price or list_price or promo
+                elif sale_price > 0 and (price == 0 or sale_price <= price):
+                    precio_actual = sale_price
+                    precio_original = price or list_price or sale_price
+                elif price > 0:
+                    precio_actual = price
+                    precio_original = list_price or price
+                elif list_price > 0:
+                    precio_actual = list_price
+                    precio_original = list_price
+
+                if precio_actual <= 0 and precio_original <= 0:
+                    continue
+                if precio_original and precio_actual and precio_original < precio_actual:
+                    precio_original = precio_actual
+
+                candidate = {
+                    "model_code": model_code,
+                    "display_name": display_name,
+                    "english_name": english_name,
+                    "capacidad": capacidad,
+                    "memoria": memoria,
+                    "precio_actual": int(precio_actual or 0),
+                    "precio_original": int(precio_original or precio_actual or 0),
+                    "buy_url": build_samsung_buy_url(detail_url=detail_url, buy_url_hint=buy_url_hint, model_code=model_code),
+                }
+
+                existing = by_model.get(model_code)
+                if not existing:
+                    by_model[model_code] = candidate
+                    continue
+
+                existing_score = int(bool(existing.get("capacidad"))) + int(bool(existing.get("memoria")))
+                candidate_score = int(bool(candidate.get("capacidad"))) + int(bool(candidate.get("memoria")))
+                if candidate_score > existing_score:
+                    merged = dict(existing)
+                    merged.update(candidate)
+                    by_model[model_code] = merged
+                    existing = by_model[model_code]
+                else:
+                    existing = by_model[model_code]
+
+                if not existing.get("display_name") and candidate.get("display_name"):
+                    existing["display_name"] = candidate["display_name"]
+                if not existing.get("english_name") and candidate.get("english_name"):
+                    existing["english_name"] = candidate["english_name"]
+                if not existing.get("capacidad") and candidate.get("capacidad"):
+                    existing["capacidad"] = candidate["capacidad"]
+                if not existing.get("memoria") and candidate.get("memoria"):
+                    existing["memoria"] = candidate["memoria"]
+                if int(candidate.get("precio_actual") or 0) > 0:
+                    existing["precio_actual"] = int(candidate.get("precio_actual") or 0)
+                if int(candidate.get("precio_original") or 0) > 0:
+                    existing["precio_original"] = int(candidate.get("precio_original") or 0)
 
         variants = list(by_model.values())
     except Exception:
@@ -351,15 +489,27 @@ def resolve_samsung_variant(detail_url: str = "", buy_url_hint: str = "", capaci
     if not variants:
         return None
 
-    mc = (model_code or "").strip().upper()
-    if mc:
-        exact = [v for v in variants if str(v.get("model_code", "")).upper() == mc]
-        if len(exact) == 1:
-            return exact[0]
-
-    filtered = variants
     cap = (capacidad or "").strip().upper()
     ram = (memoria or "").strip().upper()
+    mc = (model_code or "").strip().upper()
+
+    if cap and ram:
+        exact_cr = [v for v in variants if str(v.get("capacidad", "")).upper() == cap and str(v.get("memoria", "")).upper() == ram]
+        if len(exact_cr) == 1:
+            return exact_cr[0]
+
+    if mc:
+        exact_mc = [v for v in variants if str(v.get("model_code", "")).upper() == mc]
+        if len(exact_mc) == 1:
+            candidate = exact_mc[0]
+            candidate_cap = str(candidate.get("capacidad", "")).upper()
+            candidate_ram = str(candidate.get("memoria", "")).upper()
+            if (cap and candidate_cap and candidate_cap != cap) or (ram and candidate_ram and candidate_ram != ram):
+                pass
+            else:
+                return candidate
+
+    filtered = variants
     if cap:
         filtered = [v for v in filtered if str(v.get("capacidad", "")).upper() == cap]
     if ram:
