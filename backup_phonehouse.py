@@ -195,11 +195,14 @@ def parse_eur_all(txt: str) -> list[int]:
         return 0
 
 def acortar_url(url_larga: str) -> str:
-    """Acorta con is.gd (si falla, devuelve la original)."""
+    """Acorta con is.gd (si falla o devuelve error, usa la original)."""
     try:
         url_encoded = urllib.parse.quote(url_larga, safe="")
         r = requests.get(f"https://is.gd/create.php?format=simple&url={url_encoded}", timeout=10)
-        return r.text.strip() if r.status_code == 200 else url_larga
+        texto = r.text.strip() if r.status_code == 200 else ""
+        if texto and texto.lower().startswith(("http://", "https://")):
+            return texto
+        return url_larga
     except Exception:
         return url_larga
 
