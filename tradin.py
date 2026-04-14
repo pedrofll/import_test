@@ -101,11 +101,31 @@ def construir_clave_producto(producto):
     url_key = construir_clave_url(producto)
     return f"{combo_key}|{url_key}" if url_key else combo_key
 
-def obtener_version(nombre):
+
+def detectar_enviado_desde(titulo_completo):
+    titulo_up = (titulo_completo or '').upper()
+    if "EU WAREHOUSE" in titulo_up or "EU VERSION" in titulo_up:
+        return "Europa"
+    return "China"
+
+
+def obtener_version(nombre, titulo_completo='', enviado_desde=''):
     primera = nombre.split(' ')[0].capitalize()
+    titulo_up = (titulo_completo or '').upper()
+    enviado_norm = (enviado_desde or '').strip().lower()
+
+    if primera == "Oneplus":
+        if "EU WAREHOUSE" in titulo_up:
+            return "Color OS"
+        if "GLOBAL/EU VERSION" in titulo_up or "EU VERSION" in titulo_up:
+            return "OxygenOS"
+        if enviado_norm == "china":
+            return "Color OS"
+        return "Color OS"
+
     mapping = {
         "Xiaomi": "CN (EN/CHN)", "Redmi": "CN (EN/CHN)", "Realme": "CN (EN/CHN)",
-        "Honor": "Multiidioma", "Oneplus": "OxygenOs", "Oppo": "ColorOS Multiidioma",
+        "Honor": "Multiidioma", "Oppo": "ColorOS Multiidioma",
         "Vivo": "OriginOS", "Nubia": "Nebula AIOS", "Motorola": "Original (EN/CHN)"
     }
     return mapping.get(primera, "Global Version")
@@ -172,23 +192,18 @@ def obtener_datos_remotos():
                 if not link_tag or " - " not in link_tag.text:
                     continue
 
-                url_imp = link_tag['href']
                 titulo_completo = link_tag.get_text(" ", strip=True)
+                url_imp = link_tag['href']
                 nombre = titulo_completo.split(" - ")[0].strip()
 
                 if any(k in nombre.upper() for k in ["TAB", "IPAD", "PAD"]):
                     continue
 
-                partes_titulo = [p.strip() for p in titulo_completo.split(" - ") if p.strip()]
-                if len(partes_titulo) < 2:
-                    continue
-
-                specs = partes_titulo[1]
+                specs = titulo_completo.split(" - ")[1].strip()
                 if "/" not in specs:
                     continue
 
-                titulo_upper = titulo_completo.upper()
-                enviado_desde = "Europa" if ("EU WAREHOUSE" in titulo_upper or "EU VERSION" in titulo_upper) else "China"
+                enviado_desde = detectar_enviado_desde(titulo_completo)
                 memoria = specs.split("/")[0].strip()
 
                 cap_raw = specs.split("/")[1].strip().upper()
@@ -223,7 +238,7 @@ def obtener_datos_remotos():
                     "precio_regular": p_reg,
                     "img": img,
                     "url_imp": url_imp,
-                    "version": obtener_version(nombre),
+                    "version": obtener_version(nombre, titulo_completo, enviado_desde),
                     "enviado_desde": enviado_desde,
                     "fecha": hoy,
                     "en_stock": (cantidad != "0"),
@@ -308,7 +323,6 @@ def sincronizar(remotos):
             print(f"5) Precio Actual:   {r['precio_actual']}€")
             print(f"6) Precio Original: {r['precio_regular']}€")
             print(f"7) Enviado desde:   {r['enviado_desde']}")
-            print(f"7.1) Clave Combo:   {construir_clave_combo(r)}")
             print(f"8) Stock Real:      {r['cantidad']}")
             print(f"9) URL Imagen:      {r['img'][:75]}...")
             print(f"10) Enlace Compra:  {r['url_imp']}")
