@@ -173,16 +173,22 @@ def obtener_datos_remotos():
                     continue
 
                 url_imp = link_tag['href']
-                nombre = link_tag.text.split(" - ")[0].strip()
+                titulo_completo = link_tag.get_text(" ", strip=True)
+                nombre = titulo_completo.split(" - ")[0].strip()
 
                 if any(k in nombre.upper() for k in ["TAB", "IPAD", "PAD"]):
                     continue
 
-                specs = link_tag.text.split(" - ")[1].strip()
+                partes_titulo = [p.strip() for p in titulo_completo.split(" - ") if p.strip()]
+                if len(partes_titulo) < 2:
+                    continue
+
+                specs = partes_titulo[1]
                 if "/" not in specs:
                     continue
 
-                enviado_desde = "Europa" if "EU Warehouse" in link_tag.text else "China"
+                titulo_upper = titulo_completo.upper()
+                enviado_desde = "Europa" if ("EU WAREHOUSE" in titulo_upper or "EU VERSION" in titulo_upper) else "China"
                 memoria = specs.split("/")[0].strip()
 
                 cap_raw = specs.split("/")[1].strip().upper()
@@ -302,6 +308,7 @@ def sincronizar(remotos):
             print(f"5) Precio Actual:   {r['precio_actual']}€")
             print(f"6) Precio Original: {r['precio_regular']}€")
             print(f"7) Enviado desde:   {r['enviado_desde']}")
+            print(f"7.1) Clave Combo:   {construir_clave_combo(r)}")
             print(f"8) Stock Real:      {r['cantidad']}")
             print(f"9) URL Imagen:      {r['img'][:75]}...")
             print(f"10) Enlace Compra:  {r['url_imp']}")
