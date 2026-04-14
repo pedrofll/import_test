@@ -72,6 +72,35 @@ def acortar_url(url_larga):
     except:
         return url_larga
 
+
+def normalizar_url_clave(url):
+    url = (url or '').strip()
+    if not url:
+        return ''
+    url = url.split('?')[0].rstrip('/')
+    return url.lower()
+
+
+def construir_clave_combo(producto):
+    return "combo::{nombre}|{memoria}|{capacidad}|{version}|{envio}".format(
+        nombre=(producto.get('nombre', '') or '').strip().lower(),
+        memoria=(producto.get('memoria', '') or '').strip().lower(),
+        capacidad=(producto.get('capacidad', '') or '').strip().lower(),
+        version=(producto.get('version', '') or '').strip().lower(),
+        envio=(producto.get('enviado_desde', '') or '').strip().lower(),
+    )
+
+
+def construir_clave_url(producto):
+    url_key = normalizar_url_clave(producto.get('url_imp', ''))
+    return f"url::{url_key}" if url_key else ''
+
+
+def construir_clave_producto(producto):
+    combo_key = construir_clave_combo(producto)
+    url_key = construir_clave_url(producto)
+    return f"{combo_key}|{url_key}" if url_key else combo_key
+
 def obtener_version(nombre):
     primera = nombre.split(' ')[0].capitalize()
     mapping = {
@@ -126,6 +155,7 @@ def resolver_jerarquia(nombre_completo, cache_categorias):
 # --- FASE 1: SCRAPING ---
 def obtener_datos_remotos():
     total_productos = []
+    productos_unicos = {}
     hoy = datetime.now().strftime("%d/%m/%Y")
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
 
@@ -179,7 +209,7 @@ def obtener_datos_remotos():
                 match_stock = re.search(r'(\d+)', stock_txt)
                 cantidad = match_stock.group(1) if match_stock else ("Disponible" if "in stock" in stock_txt.lower() else "0")
 
-                total_productos.append({
+                producto = {
                     "nombre": nombre,
                     "memoria": memoria,
                     "capacidad": capacidad,
@@ -193,18 +223,39 @@ def obtener_datos_remotos():
                     "en_stock": (cantidad != "0"),
                     "cantidad": cantidad,
                     "pagina": idx
-                })
-        except:
+                }
+
+                total_productos.append(producto)
+
+                clave = construir_clave_producto(producto)
+                existente = productos_unicos.get(clave)
+                if not existente:
+                    productos_unicos[clave] = producto
+                else:
+                    print(f"   ♻️ Duplicado remoto detectado: {nombre} | {memoria} | {capacidad} | páginas {existente['pagina']} y {idx}")
+
+                    # Preferimos la entrada con stock y, si ambas tienen stock, el precio más bajo.
+                    if producto['en_stock'] and not existente['en_stock']:
+                        productos_unicos[clave] = producto
+                    elif producto['en_stock'] == existente['en_stock'] and producto['precio_actual'] < existente['precio_actual']:
+                        productos_unicos[clave] = producto
+        except Exception as e:
+            print(f"   ⚠️ Error escaneando página {idx}: {e}")
             continue
 
+    remotos_unicos = list(productos_unicos.values())
     print(f"   ✅ Total productos encontrados: {len(total_productos)}")
-    return total_productos
+    print(f"   ✅ Total productos únicos: {len(remotos_unicos)}")
+    return remotos_unicos
 
 # --- FASE 2: SINCRONIZACIÓN ---
 def sincronizar(remotos):
     print(f"--- FASE 2: SINCRONIZANDO ---")
     cache_categorias = obtener_todas_las_categorias()
     locales = []
+    locales_index = {}
+    locales_combo_index = {}
+    locales_url_index = {}
     page = 1
 
     while True:
@@ -215,11 +266,30 @@ def sincronizar(remotos):
         for p in res:
             meta = {m['key']: str(m['value']) for m in p.get('meta_data', [])}
             if "tradingshenzhen.com" in meta.get('importado_de', '').lower():
-                locales.append({"id": p['id'], "nombre": p['name'], "meta": meta})
+                local = {"id": p['id'], "nombre": p['name'], "meta": meta}
+                locales.append(local)
+
+                producto_local = {
+                    "nombre": p['name'],
+                    "memoria": meta.get('memoria', ''),
+                    "capacidad": meta.get('capacidad', ''),
+                    "version": meta.get('version', ''),
+                    "enviado_desde": meta.get('enviado_desde', ''),
+                    "url_imp": meta.get('enlace_de_compra_importado', ''),
+                }
+                clave_local = construir_clave_producto(producto_local)
+                clave_combo_local = construir_clave_combo(producto_local)
+                clave_url_local = construir_clave_url(producto_local)
+                locales_index[clave_local] = local
+                locales_combo_index[clave_combo_local] = local
+                if clave_url_local:
+                    locales_url_index[clave_url_local] = local
 
         if len(res) < 100:
             break
         page += 1
+
+    procesados_run = set()
 
     for r in remotos:
         try:
@@ -236,8 +306,19 @@ def sincronizar(remotos):
             print(f"9) URL Imagen:      {r['img'][:75]}...")
             print(f"10) Enlace Compra:  {r['url_imp']}")
 
-            url_r = r['url_imp'].strip().rstrip('/')
-            match = next((l for l in locales if l['meta'].get('enlace_de_compra_importado', '').strip().rstrip('/') == url_r), None)
+            clave_r = construir_clave_producto(r)
+            clave_combo_r = construir_clave_combo(r)
+            clave_url_r = construir_clave_url(r)
+            if clave_r in procesados_run:
+                print("   ⏭️ IGNORADO: ya procesado en este mismo run.")
+                continue
+            procesados_run.add(clave_r)
+
+            match = locales_index.get(clave_r)
+            if not match:
+                match = locales_combo_index.get(clave_combo_r)
+            if not match and clave_url_r:
+                match = locales_url_index.get(clave_url_r)
 
             url_aff = f"{r['url_imp']}{ID_AFILIADO_TRADINGSENZHEN}"
             url_final = acortar_url(url_aff)
@@ -333,7 +414,29 @@ def sincronizar(remotos):
                                     "meta_data": [{"key": "url_post_acortada", "value": url_short}]
                                 })
 
+                            nuevo_local = {
+                                "id": prod_res.get('id'),
+                                "nombre": r['nombre'],
+                                "meta": {
+                                    "enlace_de_compra_importado": r['url_imp'],
+                                    "precio_actual": str(r['precio_actual']),
+                                    "precio_original": str(r['precio_regular']),
+                                    "memoria": r['memoria'],
+                                    "capacidad": r['capacidad'],
+                                    "version": r['version'],
+                                    "enviado_desde": r['enviado_desde'],
+                                    "imagen_producto": r['img'],
+                                }
+                            }
+                            locales.append(nuevo_local)
+                            locales_index[clave_r] = nuevo_local
+                            locales_combo_index[clave_combo_r] = nuevo_local
+                            if clave_url_r:
+                                locales_url_index[clave_url_r] = nuevo_local
+
                             print(f"   ✅ CREADO -> ID: {prod_res.get('id')}")
+                        else:
+                            time.sleep(15)
                     except:
                         time.sleep(60)
 
