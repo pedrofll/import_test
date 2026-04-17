@@ -2,7 +2,7 @@ name: Import Tradin
 
 on:
   schedule:
-    - cron: "00 17 * * *"   # 18:00 España = 17:00 UTC
+    - cron: "00 16 * * *"   # 18:00 España = 17:00 UTC
   workflow_dispatch:
 
 permissions:
