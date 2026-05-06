@@ -164,6 +164,16 @@ def limpiar_url_segun_fuente(url_exp: str) -> str:
         return ""
 
     url_exp = str(url_exp).strip().replace("&amp;", "&").replace("…", "...")
+
+    # Algunas redirecciones llegan con la query interna codificada dentro del path:
+    # ejemplo: producto.html%3FskuId%3D...%26stockCountry%3DES?f=...
+    # Si no se decodifica antes, se guarda una URL sucia como producto.html%3FskuId...
+    if "%3f" in url_exp.lower() or "%26" in url_exp.lower() or "%3d" in url_exp.lower():
+        try:
+            url_exp = urllib.parse.unquote(url_exp)
+        except Exception:
+            pass
+
     url_limpia = url_exp
 
     # AliExpress: reconstruimos canonical
@@ -337,29 +347,32 @@ def _token_sin_letras_es_decorativo(tok: str) -> bool:
 
 
 def limpiar_prefijo_nombre(s: str) -> str:
-    """Limpia prefijos/sufijos promocionales de Telegram sin tocar el nombre real."""
+    """Limpia prefijos/sufijos promocionales de Telegram sin tocar el nombre real.
+
+    IMPORTANTE:
+    - El icono ℹ️ a veces llega desde Telegram como "i" al convertir el HTML a texto.
+    - Por eso se elimina también una "i" final suelta, solo cuando es token independiente.
+    """
     if not s:
         return ""
 
     s = str(s)
     s = s.replace("**", "").replace("`", "")
+
+    # Antes de normalizar Unicode, quitamos símbolos que NFKC puede convertir a letras.
+    # Ejemplo real: ℹ️ puede terminar convertido en una "i" final.
+    s = s.replace("ℹ️", " ").replace("ℹ", " ")
+    s = s.replace("ⓘ", " ").replace("🛈", " ")
+
     s = unicodedata.normalize("NFKC", s)
     s = _normalizar_espacios_nombre(s)
 
     # Quita bloques promocionales tipo [TOP VENTAS], [NOVEDAD], [PRECIO TOP], etc.
     s = re.sub(r"\[[^\]]{0,60}\]", " ", s, flags=re.I)
-                    
-                                                             
-                                                                                                                   
-                                                     
-                                     
-                                          
-                         
-                 
 
     # Quita prefijos decorativos/emojis/símbolos típicos de Telegram.
     s = re.sub(
-        r"^[\s\u200b-\u200f\u2060\ufeff•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐⚡♦️🧡🧊🔘✨🚀ℹ️]+",
+        r"^[\s\u200b-\u200f\u2060\ufeff•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐⚡♦️🧡🧊🔘✨🚀]+",
         "",
         s,
         flags=re.I,
@@ -370,20 +383,10 @@ def limpiar_prefijo_nombre(s: str) -> str:
 
     # Quita cualquier símbolo restante al inicio, pero conserva letras/números.
     s = re.sub(r"^[^\wA-Za-zÁÉÍÓÚÜáéíóúüÑñ]+", "", s)
-                       
-                        
-                                 
-                                                 
-                               
-                                                                
-                                                                     
-                     
-                                                                                                                                      
-                                                                     
 
-    # Quita emojis/símbolos finales tipo ℹ️.
+    # Quita emojis/símbolos finales.
     s = re.sub(
-        r"[\s\u200b-\u200f\u2060\ufeff•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐⚡♦️🧡🧊🔘✨🚀ℹ️]+$",
+        r"[\s\u200b-\u200f\u2060\ufeff•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐⚡♦️🧡🧊🔘✨🚀]+$",
         "",
         s,
         flags=re.I,
@@ -391,12 +394,19 @@ def limpiar_prefijo_nombre(s: str) -> str:
 
     s = _normalizar_espacios_nombre(s)
 
+    # Si el icono de información ya venía convertido desde Telegram como una i final, la quitamos.
+    # Ejemplo: "Poco X8 Pro i" -> "Poco X8 Pro".
+    s = re.sub(r"\s+[iI]$", "", s).strip()
+
     # Limpieza de tokens iniciales decorativos que hayan sobrevivido.
     partes = s.split()
     while len(partes) > 1 and _token_sin_letras_es_decorativo(partes[0]):
         partes = partes[1:]
 
-    return _normalizar_espacios_nombre(" ".join(partes))
+    s = _normalizar_espacios_nombre(" ".join(partes))
+    s = re.sub(r"\s+[iI]$", "", s).strip()
+
+    return s
 
 def extraer_datos(texto):
     t_clean = texto.replace("**", "").replace("`", "").strip()
@@ -437,8 +447,7 @@ def extraer_datos(texto):
         return None
 
     # descartar tablets
-    nombre_upper = nombre.upper()
-    if re.search(r"\b(PAD|IPAD|TAB)\b", nombre_upper):
+    if any(x in nombre.upper() for x in ["PAD", "IPAD", "TAB"]):
         return "SKIP_TABLET"
 
     # Regla especial: iQOO (Vivo)
@@ -591,28 +600,6 @@ async def main():
         nombre_raw = nombre
         nombre = limpiar_prefijo_nombre(nombre)
         nombre = _normalizar_espacios_nombre(nombre)
-
-        # descartar basura residual de cabeceras promocionales de Telegram
-        nombre_upper = nombre.upper().strip()
-        palabras_basura = [
-            "TOP",
-            "SUPERVENTAS",
-            "SUPERTOP",
-            "MINIMO TOP",
-            "OFERTA TOP",
-            "OFERTA",
-            "TOP SCORE",
-            "POTENCIA",
-            "NOVEDAD",
-            "PRECIO TOP",
-        ]
-        if (
-            nombre_upper in palabras_basura
-            or len(nombre.split()) <= 1
-            or re.fullmatch(r"^[^\w]+$", nombre)
-        ):
-            print(f"⛔ IGNORADO POR BASURA: {nombre}")
-            continue
 
         # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
