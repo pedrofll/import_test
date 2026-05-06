@@ -376,6 +376,60 @@ def limpiar_prefijo_nombre(s: str) -> str:
     return s
 
 
+
+MARCAS_MOVILES_TELEGRAM = [
+    "Samsung", "Xiaomi", "Redmi", "Poco", "POCO", "Apple", "iPhone", "Iphone",
+    "Realme", "Honor", "OnePlus", "Oneplus", "Oppo", "Vivo", "Nubia",
+    "Motorola", "Google", "Pixel", "Nothing", "Sony", "Asus", "Huawei",
+    "Iqoo", "iQOO", "IQOO", "Meizu", "ZTE", "Blackview", "Ulefone", "Doogee",
+]
+
+PALABRAS_PROMO_NOMBRE = {
+    "TOP", "TOP VENTAS", "SUPERVENTAS", "SUPERTOP", "MINIMO TOP",
+    "MÍNIMO TOP", "OFERTA TOP", "OFERTA", "TOP SCORE", "POTENCIA",
+    "NOVEDAD", "PRECIO TOP", "CHOLLO", "PROMO",
+}
+
+def _normalizar_clave_promo(s: str) -> str:
+    s = unicodedata.normalize("NFKC", str(s or ""))
+    s = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip().upper()
+    return s
+
+def _es_nombre_promocional_basura(s: str) -> bool:
+    clave = _normalizar_clave_promo(s)
+    if not clave:
+        return True
+    if clave in PALABRAS_PROMO_NOMBRE:
+        return True
+    if clave.endswith(" TOP") and len(clave.split()) <= 3:
+        return True
+    return False
+
+def extraer_nombre_movil_desde_linea(linea: str) -> str:
+    """Extrae el nombre desde la primera marca conocida.
+    Evita importar como producto textos promocionales de Telegram: [SUPERVENTAS], [OFERTA TOP], etc.
+    """
+    if not linea:
+        return ""
+
+    original = str(linea).replace("ℹ️", " ").replace("ℹ", " ")
+    original = unicodedata.normalize("NFKC", original)
+    cand = limpiar_prefijo_nombre(original)
+
+    patron = r"\b(" + "|".join(re.escape(m) for m in sorted(MARCAS_MOVILES_TELEGRAM, key=len, reverse=True)) + r")\b"
+    m = re.search(patron, cand, flags=re.I)
+    if m:
+        cand = cand[m.start():]
+    else:
+        m = re.search(patron, original, flags=re.I)
+        if m:
+            cand = original[m.start():]
+
+    cand = limpiar_prefijo_nombre(cand)
+    cand = re.sub(r"\s+[iI]$", "", cand).strip()
+    return _normalizar_espacios_nombre(cand)
+
 def extraer_datos(texto):
     t_clean = texto.replace("**", "").replace("`", "").strip()
     lineas = [l.strip() for l in t_clean.split("\n") if l.strip()]
@@ -404,18 +458,26 @@ def extraer_datos(texto):
 
     partes_nombre = []
     for linea in lineas:
-        cand = limpiar_prefijo_nombre(linea)
+        cand = extraer_nombre_movil_desde_linea(linea)
+
+        # Ignora líneas/promos sueltas: [SUPERVENTAS], [OFERTA TOP], etc.
+        if _es_nombre_promocional_basura(cand):
+            continue
+
         if _es_parte_de_nombre(cand):
             partes_nombre.append(cand)
+            break
         elif partes_nombre:
             break
 
     nombre = limpiar_prefijo_nombre(" ".join(partes_nombre)).strip()
-    if not nombre:
+    nombre = re.sub(r"\s+[iI]$", "", nombre).strip()
+
+    if not nombre or _es_nombre_promocional_basura(nombre):
         return None
 
-    # descartar tablets
-    if any(x in nombre.upper() for x in ["PAD", "IPAD", "TAB"]):
+    # descartar tablets con palabra completa: PAD, IPAD, TAB
+    if re.search(r"\b(PAD|IPAD|TAB)\b", nombre.upper()):
         return "SKIP_TABLET"
 
     # Regla especial: iQOO (Vivo)
