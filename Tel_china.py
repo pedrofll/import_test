@@ -337,44 +337,66 @@ def _token_sin_letras_es_decorativo(tok: str) -> bool:
 
 
 def limpiar_prefijo_nombre(s: str) -> str:
-    """Limpia prefijos de numeración/emoji típicos de mensajes de Telegram."""
+    """Limpia prefijos/sufijos promocionales de Telegram sin tocar el nombre real."""
     if not s:
         return ""
 
+    s = str(s)
+    s = s.replace("**", "").replace("`", "")
+    s = unicodedata.normalize("NFKC", s)
     s = _normalizar_espacios_nombre(s)
 
-    # Quita ruido inicial obvio (balas, emojis, signos) pero sin comerse marcas válidas con letras
-    while s:
-        original = s
-        s = re.sub(r"^[\s\u200b-\u200f\u2060\ufeff]+", "", s)
-        s = re.sub(r"^[•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐]+\s*", "", s)
-        s = re.sub(r"^\(?\d{1,2}\)?[.)-]+\s*", "", s)
-        s = re.sub(r"^[^\w]+", "", s)
-        s = _normalizar_espacios_nombre(s)
-        if s == original:
-            break
+    # Quita bloques promocionales tipo [TOP VENTAS], [NOVEDAD], [PRECIO TOP], etc.
+    s = re.sub(r"\[[^\]]{0,60}\]", " ", s, flags=re.I)
+                    
+                                                             
+                                                                                                                   
+                                                     
+                                     
+                                          
+                         
+                 
 
+    # Quita prefijos decorativos/emojis/símbolos típicos de Telegram.
+    s = re.sub(
+        r"^[\s\u200b-\u200f\u2060\ufeff•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐⚡♦️🧡🧊🔘✨🚀ℹ️]+",
+        "",
+        s,
+        flags=re.I,
+    )
+
+    # Quita numeración inicial tipo 1), 1., (1), etc.
+    s = re.sub(r"^\(?\d{1,2}\)?[.)\-]+\s*", "", s)
+
+    # Quita cualquier símbolo restante al inicio, pero conserva letras/números.
+    s = re.sub(r"^[^\wA-Za-zÁÉÍÓÚÜáéíóúüÑñ]+", "", s)
+                       
+                        
+                                 
+                                                 
+                               
+                                                                
+                                                                     
+                     
+                                                                                                                                      
+                                                                     
+
+    # Quita emojis/símbolos finales tipo ℹ️.
+    s = re.sub(
+        r"[\s\u200b-\u200f\u2060\ufeff•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐⚡♦️🧡🧊🔘✨🚀ℹ️]+$",
+        "",
+        s,
+        flags=re.I,
+    )
+
+    s = _normalizar_espacios_nombre(s)
+
+    # Limpieza de tokens iniciales decorativos que hayan sobrevivido.
     partes = s.split()
     while len(partes) > 1 and _token_sin_letras_es_decorativo(partes[0]):
         partes = partes[1:]
 
-    s = _normalizar_espacios_nombre(" ".join(partes))
-
-    # Última red de seguridad: si el primer token sigue sin letras y es muy corto, lo quitamos.
-    partes = s.split()
-    if len(partes) > 1:
-        tok0 = partes[0]
-        base0 = _token_base(tok0)
-        if not any(ch.isalpha() for ch in base0):
-            visible0 = "".join(
-                ch for ch in unicodedata.normalize("NFKD", tok0)
-                if unicodedata.category(ch) not in ("Mn", "Me", "Cf")
-            ).strip()
-            if (not base0) or (base0.isdigit() and len(base0) <= 2) or (len(base0) <= 3 and any(not ch.isalnum() for ch in visible0)):
-                s = _normalizar_espacios_nombre(" ".join(partes[1:]))
-
-    return s
-
+    return _normalizar_espacios_nombre(" ".join(partes))
 
 def extraer_datos(texto):
     t_clean = texto.replace("**", "").replace("`", "").strip()
@@ -415,7 +437,8 @@ def extraer_datos(texto):
         return None
 
     # descartar tablets
-    if any(x in nombre.upper() for x in ["PAD", "IPAD", "TAB"]):
+    nombre_upper = nombre.upper()
+    if re.search(r"\b(PAD|IPAD|TAB)\b", nombre_upper):
         return "SKIP_TABLET"
 
     # Regla especial: iQOO (Vivo)
@@ -568,6 +591,28 @@ async def main():
         nombre_raw = nombre
         nombre = limpiar_prefijo_nombre(nombre)
         nombre = _normalizar_espacios_nombre(nombre)
+
+        # descartar basura residual de cabeceras promocionales de Telegram
+        nombre_upper = nombre.upper().strip()
+        palabras_basura = [
+            "TOP",
+            "SUPERVENTAS",
+            "SUPERTOP",
+            "MINIMO TOP",
+            "OFERTA TOP",
+            "OFERTA",
+            "TOP SCORE",
+            "POTENCIA",
+            "NOVEDAD",
+            "PRECIO TOP",
+        ]
+        if (
+            nombre_upper in palabras_basura
+            or len(nombre.split()) <= 1
+            or re.fullmatch(r"^[^\w]+$", nombre)
+        ):
+            print(f"⛔ IGNORADO POR BASURA: {nombre}")
+            continue
 
         # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
