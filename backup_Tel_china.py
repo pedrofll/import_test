@@ -677,6 +677,8 @@ async def main():
                 nombre_existente_normalizado == nombre_nuevo_normalizado
                 and str(metas_existentes.get("memoria", "")).strip() == memoria
                 and str(metas_existentes.get("capacidad", "")).strip() == capacidad
+                and str(metas_existentes.get("codigo_de_descuento", "")).strip() == str(codigo_de_descuento).strip()
+                and str(metas_existentes.get("fuente", "")).strip().lower() == str(fuente).strip().lower()
                 and metas_existentes.get("importado_de") == "Telegram_Chinabay"
             ):
                 producto_existente_match = prod_existente
