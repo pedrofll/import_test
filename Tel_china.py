@@ -665,23 +665,6 @@ async def main():
         nombre = _normalizar_espacios_nombre(nombre)
         nombre = re.sub(r"\s+[iI]$", "", nombre).strip()
 
-        # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
-        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
-        existe = False
-        producto_existente_match = None
-        for prod_existente in check_exists:
-            nombre_existente_normalizado = limpiar_prefijo_nombre(prod_existente["name"]).strip().lower()
-            nombre_nuevo_normalizado = limpiar_prefijo_nombre(nombre).strip().lower()
-            metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
-            if (
-                nombre_existente_normalizado == nombre_nuevo_normalizado
-                and str(metas_existentes.get("memoria", "")).strip() == memoria
-                and str(metas_existentes.get("capacidad", "")).strip() == capacidad
-                and metas_existentes.get("importado_de") == "Telegram_Chinabay"
-            ):
-                producto_existente_match = prod_existente
-                break
-
         precio_original = calcular_precio_original(precio_actual, 1.20)
 
         # enlaces del mensaje (evitar t.me)
@@ -695,6 +678,58 @@ async def main():
 
         # fuente por dominio
         fuente = detectar_fuente_por_url(url_oferta_sin_acortar)
+
+        # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
+        # Regla estricta:
+        # Solo es el mismo producto si coinciden estas 6 variables:
+        # nombre + memoria + capacidad + importado_de + fuente + codigo_de_descuento.
+        # Si coinciden, solo se actualizan precio_actual y precio_original si han cambiado.
+        # Si alguna no coincide, se crea un producto nuevo.
+        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 50}).json()
+        producto_existente_match = None
+        comparaciones_woo = []
+
+        for prod_existente in check_exists:
+            nombre_existente_normalizado = limpiar_prefijo_nombre(prod_existente["name"]).strip().lower()
+            nombre_nuevo_normalizado = limpiar_prefijo_nombre(nombre).strip().lower()
+            metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
+
+            cmp_nombre = nombre_existente_normalizado == nombre_nuevo_normalizado
+            cmp_memoria = str(metas_existentes.get("memoria", "")).strip() == str(memoria).strip()
+            cmp_capacidad = str(metas_existentes.get("capacidad", "")).strip() == str(capacidad).strip()
+            cmp_importado = str(metas_existentes.get("importado_de", "")).strip() == "Telegram_Chinabay"
+            cmp_fuente = str(metas_existentes.get("fuente", "")).strip().lower() == str(fuente).strip().lower()
+            cmp_codigo = str(metas_existentes.get("codigo_de_descuento", "")).strip() == str(codigo_de_descuento).strip()
+
+            comparaciones_woo.append({
+                "id": prod_existente.get("id"),
+                "nombre": prod_existente.get("name", ""),
+                "nombre_ok": cmp_nombre,
+                "memoria_ok": cmp_memoria,
+                "capacidad_ok": cmp_capacidad,
+                "importado_ok": cmp_importado,
+                "fuente_ok": cmp_fuente,
+                "codigo_ok": cmp_codigo,
+                "memoria_existente": metas_existentes.get("memoria", ""),
+                "capacidad_existente": metas_existentes.get("capacidad", ""),
+                "importado_existente": metas_existentes.get("importado_de", ""),
+                "fuente_existente": metas_existentes.get("fuente", ""),
+                "codigo_existente": metas_existentes.get("codigo_de_descuento", ""),
+                "precio_actual_existente": metas_existentes.get("precio_actual", ""),
+                "precio_original_existente": metas_existentes.get("precio_original", ""),
+            })
+
+            if (
+                cmp_nombre
+                and cmp_memoria
+                and cmp_capacidad
+                and cmp_importado
+                and cmp_fuente
+                and cmp_codigo
+            ):
+                producto_existente_match = prod_existente
+                break
+
 
         # limpiar afiliado original y reconstruir canonical si aplica
         url_importada_sin_afiliado = limpiar_url_segun_fuente(url_oferta_sin_acortar)
@@ -752,6 +787,22 @@ async def main():
         print(f"15) URL acortada con mi afiliado: {url_oferta}")
         print(f"16) Enviado desde: {enviado_desde}")
         print(f"17) Encolado para comparar con base de datos...")
+        print("18) Comparación Woo por 6 variables:")
+        print(f"    Nuevo -> Nombre='{nombre}' | Memoria='{memoria}' | Capacidad='{capacidad}' | Importado_de='Telegram_Chinabay' | Fuente='{fuente}' | Código='{codigo_de_descuento}' | Precio actual='{precio_actual}' | Precio original='{precio_original}'")
+        if not comparaciones_woo:
+            print("    Resultado: sin candidatos Woo por búsqueda de nombre.")
+        else:
+            for c in comparaciones_woo:
+                print(
+                    f"    Candidato ID {c['id']} '{c['nombre']}' -> "
+                    f"Nombre={c['nombre_ok']} | "
+                    f"Memoria={c['memoria_ok']} (Woo='{c['memoria_existente']}') | "
+                    f"Capacidad={c['capacidad_ok']} (Woo='{c['capacidad_existente']}') | "
+                    f"Importado_de={c['importado_ok']} (Woo='{c['importado_existente']}') | "
+                    f"Fuente={c['fuente_ok']} (Woo='{c['fuente_existente']}') | "
+                    f"Código={c['codigo_ok']} (Woo='{c['codigo_existente']}') | "
+                    f"Precio actual Woo='{c['precio_actual_existente']}' | Precio original Woo='{c['precio_original_existente']}'"
+                )
         if _contiene_ellipsis(url_sin_acortar_con_mi_afiliado):
             print("⚠️ ATENCIÓN: La URL con afiliado contiene '...' (no debería ocurrir tras normalización).")
         print("-" * 60)
@@ -796,12 +847,6 @@ async def main():
                 cambios.append(f"precio_actual: {metas_existentes.get('precio_actual', '')} -> {precio_actual}")
             if str(metas_existentes.get("precio_original", "")).strip() != str(precio_original):
                 cambios.append(f"precio_original: {metas_existentes.get('precio_original', '')} -> {precio_original}")
-            if str(metas_existentes.get("url_oferta", "")).strip() != str(url_oferta).strip() and url_oferta:
-                cambios.append("url_oferta")
-            if str(metas_existentes.get("codigo_de_descuento", "")).strip() != str(codigo_de_descuento).strip():
-                cambios.append("codigo_de_descuento")
-            if str(metas_existentes.get("fuente", "")).strip() != str(fuente).strip():
-                cambios.append("fuente")
 
             if cambios:
                 payload_update = {
@@ -815,7 +860,19 @@ async def main():
                 try:
                     wcapi.put(f"products/{exist_id}", payload_update)
                     print(f"♻️ ACTUALIZADO -> {nombre} (ID: {exist_id}) | Cambios: {', '.join(cambios)}")
-                    summary_actualizados.append({"nombre": nombre, "id": exist_id, "cambios": cambios})
+                    summary_actualizados.append({
+                        "nombre": nombre,
+                        "id": exist_id,
+                        "cambios": cambios,
+                        "vars_match": {
+                            "nombre": nombre,
+                            "memoria": memoria,
+                            "capacidad": capacidad,
+                            "importado_de": "Telegram_Chinabay",
+                            "fuente": fuente,
+                            "codigo_de_descuento": codigo_de_descuento,
+                        }
+                    })
                 except Exception as e:
                     print(f"❌ Error actualizando {nombre} (ID: {exist_id}): {e}")
                 continue
@@ -878,7 +935,20 @@ async def main():
     for item in summary_actualizados:
         cambios = item.get('cambios') or []
         cambios_txt = ", ".join(cambios) if isinstance(cambios, list) else str(cambios)
-        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']}): {cambios_txt}".rstrip(": "))
+        vars_match = item.get("vars_match", {})
+        if vars_match:
+            lineas_resumen.append(
+                f"- {item['nombre']} (ID: {item['id']}): "
+                f"nombre={vars_match.get('nombre', '')}; "
+                f"memoria={vars_match.get('memoria', '')}; "
+                f"capacidad={vars_match.get('capacidad', '')}; "
+                f"importado_de={vars_match.get('importado_de', '')}; "
+                f"fuente={vars_match.get('fuente', '')}; "
+                f"codigo_de_descuento={vars_match.get('codigo_de_descuento', '')}; "
+                f"{cambios_txt}"
+            )
+        else:
+            lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']}): {cambios_txt}".rstrip(": "))
 
     lineas_resumen.append(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
     for item in summary_ignorados:
