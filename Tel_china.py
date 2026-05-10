@@ -377,67 +377,58 @@ def limpiar_prefijo_nombre(s: str) -> str:
 
 
 
-
-MARCAS_PERMITIDAS = [
-    "Xiaomi",
-    "Redmi",
-    "Samsung",
-    "Apple",
-    "Meizu",
-    "Redmagic",
-    "Tcl",
-    "Oppo",
-    "Oneplus",
-    "Vivo",
-    "Nubia",
-    "Motorola",
-    "Honor",
-    "Realme",
-    "Poco",
-    "Google",
-    "Nothing",
-    "Huawei",
+MARCAS_MOVILES_TELEGRAM = [
+    "Samsung", "Xiaomi", "Redmi", "Poco", "POCO", "Apple", "iPhone", "Iphone",
+    "Realme", "Honor", "OnePlus", "Oneplus", "Oppo", "Vivo", "Nubia",
+    "Motorola", "Google", "Pixel", "Nothing", "Sony", "Asus", "Huawei",
+    "Iqoo", "iQOO", "IQOO", "Meizu", "ZTE", "Blackview", "Ulefone", "Doogee",
 ]
 
+PALABRAS_PROMO_NOMBRE = {
+    "TOP", "TOP VENTAS", "SUPERVENTAS", "SUPERTOP", "MINIMO TOP",
+    "MÍNIMO TOP", "OFERTA TOP", "OFERTA", "TOP SCORE", "POTENCIA",
+    "NOVEDAD", "PRECIO TOP", "CHOLLO", "PROMO",
+}
+
+def _normalizar_clave_promo(s: str) -> str:
+    s = unicodedata.normalize("NFKC", str(s or ""))
+    s = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip().upper()
+    return s
+
+def _es_nombre_promocional_basura(s: str) -> bool:
+    clave = _normalizar_clave_promo(s)
+    if not clave:
+        return True
+    if clave in PALABRAS_PROMO_NOMBRE:
+        return True
+    if clave.endswith(" TOP") and len(clave.split()) <= 3:
+        return True
+    return False
+
 def extraer_nombre_movil_desde_linea(linea: str) -> str:
+    """Extrae el nombre desde la primera marca conocida.
+    Evita importar como producto textos promocionales de Telegram: [SUPERVENTAS], [OFERTA TOP], etc.
+    """
     if not linea:
         return ""
 
-    original = str(linea).strip()
-
-    original = re.sub(r'[ℹ️ℹⓘ🛈]+', ' ', original)
-    original = re.sub(r'[\uFE0F\u200D]', '', original)
-
+    original = str(linea).replace("ℹ️", " ").replace("ℹ", " ")
     original = unicodedata.normalize("NFKC", original)
+    cand = limpiar_prefijo_nombre(original)
 
-    m_doble = re.search(
-        r'[^\w\s]{1,5}\s*(?:\[[^\]]+\])?\s*[^\w\s]{1,5}\s*([A-Za-z0-9].*)',
-        original
-    )
-
-    if m_doble:
-        posible = m_doble.group(1).strip()
-    else:
-        posible = original
-
-    posible = re.sub(r'\[[^\]]+\]', '', posible)
-    posible = re.sub(r'^[^A-Za-z0-9]+', '', posible)
-    posible = re.sub(r'\s+', ' ', posible).strip()
-
-    patron_marcas = (
-        r'\b(' +
-        '|'.join(re.escape(x) for x in MARCAS_PERMITIDAS) +
-        r')\b'
-    )
-
-    m = re.search(patron_marcas, posible, re.I)
-
+    patron = r"\b(" + "|".join(re.escape(m) for m in sorted(MARCAS_MOVILES_TELEGRAM, key=len, reverse=True)) + r")\b"
+    m = re.search(patron, cand, flags=re.I)
     if m:
-        posible = posible[m.start():].strip()
+        cand = cand[m.start():]
+    else:
+        m = re.search(patron, original, flags=re.I)
+        if m:
+            cand = original[m.start():]
 
-    posible = re.sub(r'\s+[iI]$', '', posible).strip()
-
-    return posible
+    cand = limpiar_prefijo_nombre(cand)
+    cand = re.sub(r"\s+[iI]$", "", cand).strip()
+    return _normalizar_espacios_nombre(cand)
 
 def extraer_datos(texto):
     t_clean = texto.replace("**", "").replace("`", "").strip()
@@ -467,18 +458,26 @@ def extraer_datos(texto):
 
     partes_nombre = []
     for linea in lineas:
-        cand = limpiar_prefijo_nombre(linea)
+        cand = extraer_nombre_movil_desde_linea(linea)
+
+        # Ignora líneas/promos sueltas: [SUPERVENTAS], [OFERTA TOP], etc.
+        if _es_nombre_promocional_basura(cand):
+            continue
+
         if _es_parte_de_nombre(cand):
             partes_nombre.append(cand)
+            break
         elif partes_nombre:
             break
 
     nombre = limpiar_prefijo_nombre(" ".join(partes_nombre)).strip()
-    if not nombre:
+    nombre = re.sub(r"\s+[iI]$", "", nombre).strip()
+
+    if not nombre or _es_nombre_promocional_basura(nombre):
         return None
 
-    # descartar tablets
-    if any(x in nombre.upper() for x in ["PAD", "IPAD", "TAB"]):
+    # descartar tablets con palabra completa: PAD, IPAD, TAB
+    if re.search(r"\b(PAD|IPAD|TAB)\b", nombre.upper()):
         return "SKIP_TABLET"
 
     # Regla especial: iQOO (Vivo)
@@ -631,7 +630,6 @@ async def main():
         nombre_raw = nombre
         nombre = limpiar_prefijo_nombre(nombre)
         nombre = _normalizar_espacios_nombre(nombre)
-        nombre = re.sub(r"\\s+[iI]$", "", nombre).strip()
 
         # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
@@ -687,12 +685,6 @@ async def main():
 
         # categorías
         marca = nombre.split(" ")[0]
-
-        marca_normalizada = marca.strip().capitalize()
-
-        if marca_normalizada not in MARCAS_PERMITIDAS:
-            print(f"⛔ PRODUCTO IGNORADO - MARCA NO PERMITIDA: {nombre}")
-            continue
         id_padre, _ = obtener_o_crear_categoria_con_imagen(marca)
         id_hijo, imagen_subcategoria = obtener_o_crear_categoria_con_imagen(nombre, id_padre)
 
