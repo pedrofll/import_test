@@ -665,25 +665,6 @@ async def main():
         nombre = _normalizar_espacios_nombre(nombre)
         nombre = re.sub(r"\s+[iI]$", "", nombre).strip()
 
-        # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
-        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
-        existe = False
-        producto_existente_match = None
-        for prod_existente in check_exists:
-            nombre_existente_normalizado = limpiar_prefijo_nombre(prod_existente["name"]).strip().lower()
-            nombre_nuevo_normalizado = limpiar_prefijo_nombre(nombre).strip().lower()
-            metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
-            if (
-                nombre_existente_normalizado == nombre_nuevo_normalizado
-                and str(metas_existentes.get("memoria", "")).strip() == memoria
-                and str(metas_existentes.get("capacidad", "")).strip() == capacidad
-                and str(metas_existentes.get("codigo_de_descuento", "")).strip() == str(codigo_de_descuento).strip()
-                and str(metas_existentes.get("fuente", "")).strip().lower() == str(fuente).strip().lower()
-                and metas_existentes.get("importado_de") == "Telegram_Chinabay"
-            ):
-                producto_existente_match = prod_existente
-                break
-
         precio_original = calcular_precio_original(precio_actual, 1.20)
 
         # enlaces del mensaje (evitar t.me)
@@ -697,6 +678,58 @@ async def main():
 
         # fuente por dominio
         fuente = detectar_fuente_por_url(url_oferta_sin_acortar)
+
+        # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
+        # Comparación estricta solicitada:
+        # 1) Nombre 2) Capacidad 3) Memoria 4) Fuente
+        # 5) Código de descuento 6) Precio actual 7) Precio final/original
+        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
+        producto_existente_match = None
+        comparaciones_woo = []
+
+        for prod_existente in check_exists:
+            nombre_existente_normalizado = limpiar_prefijo_nombre(prod_existente["name"]).strip().lower()
+            nombre_nuevo_normalizado = limpiar_prefijo_nombre(nombre).strip().lower()
+            metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
+
+            cmp_nombre = nombre_existente_normalizado == nombre_nuevo_normalizado
+            cmp_capacidad = str(metas_existentes.get("capacidad", "")).strip() == str(capacidad).strip()
+            cmp_memoria = str(metas_existentes.get("memoria", "")).strip() == str(memoria).strip()
+            cmp_fuente = str(metas_existentes.get("fuente", "")).strip().lower() == str(fuente).strip().lower()
+            cmp_codigo = str(metas_existentes.get("codigo_de_descuento", "")).strip() == str(codigo_de_descuento).strip()
+            cmp_precio_actual = str(metas_existentes.get("precio_actual", "")).strip() == str(precio_actual).strip()
+            cmp_precio_original = str(metas_existentes.get("precio_original", "")).strip() == str(precio_original).strip()
+            cmp_importado = metas_existentes.get("importado_de") == "Telegram_Chinabay"
+
+            comparaciones_woo.append({
+                "id": prod_existente.get("id"),
+                "nombre": prod_existente.get("name", ""),
+                "nombre_ok": cmp_nombre,
+                "capacidad_ok": cmp_capacidad,
+                "memoria_ok": cmp_memoria,
+                "fuente_ok": cmp_fuente,
+                "codigo_ok": cmp_codigo,
+                "precio_actual_ok": cmp_precio_actual,
+                "precio_original_ok": cmp_precio_original,
+                "importado_ok": cmp_importado,
+                "fuente_existente": metas_existentes.get("fuente", ""),
+                "codigo_existente": metas_existentes.get("codigo_de_descuento", ""),
+                "precio_actual_existente": metas_existentes.get("precio_actual", ""),
+                "precio_original_existente": metas_existentes.get("precio_original", ""),
+            })
+
+            if (
+                cmp_nombre
+                and cmp_capacidad
+                and cmp_memoria
+                and cmp_fuente
+                and cmp_codigo
+                and cmp_precio_actual
+                and cmp_precio_original
+                and cmp_importado
+            ):
+                producto_existente_match = prod_existente
+                break
 
         # limpiar afiliado original y reconstruir canonical si aplica
         url_importada_sin_afiliado = limpiar_url_segun_fuente(url_oferta_sin_acortar)
@@ -754,6 +787,21 @@ async def main():
         print(f"15) URL acortada con mi afiliado: {url_oferta}")
         print(f"16) Enviado desde: {enviado_desde}")
         print(f"17) Encolado para comparar con base de datos...")
+        print("18) Comparación Woo exigida:")
+        print(f"    Nuevo -> Nombre='{nombre}' | Capacidad='{capacidad}' | Memoria='{memoria}' | Fuente='{fuente}' | Código='{codigo_de_descuento}' | Precio actual='{precio_actual}' | Precio final/original='{precio_original}'")
+        if not comparaciones_woo:
+            print("    Resultado: sin candidatos Woo por búsqueda de nombre.")
+        else:
+            for c in comparaciones_woo:
+                print(
+                    f"    Candidato ID {c['id']} '{c['nombre']}' -> "
+                    f"Nombre={c['nombre_ok']} | Capacidad={c['capacidad_ok']} | Memoria={c['memoria_ok']} | "
+                    f"Fuente={c['fuente_ok']} (Woo='{c['fuente_existente']}') | "
+                    f"Código={c['codigo_ok']} (Woo='{c['codigo_existente']}') | "
+                    f"Precio actual={c['precio_actual_ok']} (Woo='{c['precio_actual_existente']}') | "
+                    f"Precio final/original={c['precio_original_ok']} (Woo='{c['precio_original_existente']}') | "
+                    f"Importado_de={c['importado_ok']}"
+                )
         if _contiene_ellipsis(url_sin_acortar_con_mi_afiliado):
             print("⚠️ ATENCIÓN: La URL con afiliado contiene '...' (no debería ocurrir tras normalización).")
         print("-" * 60)
