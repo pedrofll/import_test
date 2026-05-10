@@ -680,10 +680,11 @@ async def main():
         fuente = detectar_fuente_por_url(url_oferta_sin_acortar)
 
         # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
-        # Comparación correcta:
-        # 1) nombre + 2) memoria + 3) capacidad + 4) importado_de + 5) fuente + 6) codigo_de_descuento.
-        # Si estas 6 variables coinciden, es el mismo producto y solo se actualiza el precio si ha cambiado.
-        # Si al menos una no coincide, son productos diferentes y se creará uno nuevo.
+        # Regla estricta:
+        # Solo es el mismo producto si coinciden estas 6 variables:
+        # nombre + memoria + capacidad + importado_de + fuente + codigo_de_descuento.
+        # Si coinciden, solo se actualizan precio_actual y precio_original si han cambiado.
+        # Si alguna no coincide, se crea un producto nuevo.
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 50}).json()
         producto_existente_match = None
         comparaciones_woo = []
@@ -696,7 +697,7 @@ async def main():
             cmp_nombre = nombre_existente_normalizado == nombre_nuevo_normalizado
             cmp_memoria = str(metas_existentes.get("memoria", "")).strip() == str(memoria).strip()
             cmp_capacidad = str(metas_existentes.get("capacidad", "")).strip() == str(capacidad).strip()
-            cmp_importado = metas_existentes.get("importado_de") == "Telegram_Chinabay"
+            cmp_importado = str(metas_existentes.get("importado_de", "")).strip() == "Telegram_Chinabay"
             cmp_fuente = str(metas_existentes.get("fuente", "")).strip().lower() == str(fuente).strip().lower()
             cmp_codigo = str(metas_existentes.get("codigo_de_descuento", "")).strip() == str(codigo_de_descuento).strip()
 
@@ -728,6 +729,7 @@ async def main():
             ):
                 producto_existente_match = prod_existente
                 break
+
 
         # limpiar afiliado original y reconstruir canonical si aplica
         url_importada_sin_afiliado = limpiar_url_segun_fuente(url_oferta_sin_acortar)
@@ -785,8 +787,8 @@ async def main():
         print(f"15) URL acortada con mi afiliado: {url_oferta}")
         print(f"16) Enviado desde: {enviado_desde}")
         print(f"17) Encolado para comparar con base de datos...")
-        print("18) Comparación Woo:")
-        print(f"    Nuevo -> Nombre='{nombre}' | Memoria='{memoria}' | Capacidad='{capacidad}' | Importado_de='Telegram_Chinabay' | Fuente='{fuente}' | Código='{codigo_de_descuento}'")
+        print("18) Comparación Woo por 6 variables:")
+        print(f"    Nuevo -> Nombre='{nombre}' | Memoria='{memoria}' | Capacidad='{capacidad}' | Importado_de='Telegram_Chinabay' | Fuente='{fuente}' | Código='{codigo_de_descuento}' | Precio actual='{precio_actual}' | Precio original='{precio_original}'")
         if not comparaciones_woo:
             print("    Resultado: sin candidatos Woo por búsqueda de nombre.")
         else:
@@ -858,7 +860,19 @@ async def main():
                 try:
                     wcapi.put(f"products/{exist_id}", payload_update)
                     print(f"♻️ ACTUALIZADO -> {nombre} (ID: {exist_id}) | Cambios: {', '.join(cambios)}")
-                    summary_actualizados.append({"nombre": nombre, "id": exist_id, "cambios": cambios})
+                    summary_actualizados.append({
+                        "nombre": nombre,
+                        "id": exist_id,
+                        "cambios": cambios,
+                        "vars_match": {
+                            "nombre": nombre,
+                            "memoria": memoria,
+                            "capacidad": capacidad,
+                            "importado_de": "Telegram_Chinabay",
+                            "fuente": fuente,
+                            "codigo_de_descuento": codigo_de_descuento,
+                        }
+                    })
                 except Exception as e:
                     print(f"❌ Error actualizando {nombre} (ID: {exist_id}): {e}")
                 continue
@@ -921,7 +935,20 @@ async def main():
     for item in summary_actualizados:
         cambios = item.get('cambios') or []
         cambios_txt = ", ".join(cambios) if isinstance(cambios, list) else str(cambios)
-        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']}): {cambios_txt}".rstrip(": "))
+        vars_match = item.get("vars_match", {})
+        if vars_match:
+            lineas_resumen.append(
+                f"- {item['nombre']} (ID: {item['id']}): "
+                f"nombre={vars_match.get('nombre', '')}; "
+                f"memoria={vars_match.get('memoria', '')}; "
+                f"capacidad={vars_match.get('capacidad', '')}; "
+                f"importado_de={vars_match.get('importado_de', '')}; "
+                f"fuente={vars_match.get('fuente', '')}; "
+                f"codigo_de_descuento={vars_match.get('codigo_de_descuento', '')}; "
+                f"{cambios_txt}"
+            )
+        else:
+            lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']}): {cambios_txt}".rstrip(": "))
 
     lineas_resumen.append(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
     for item in summary_ignorados:
