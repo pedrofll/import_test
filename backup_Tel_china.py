@@ -680,10 +680,11 @@ async def main():
         fuente = detectar_fuente_por_url(url_oferta_sin_acortar)
 
         # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
-        # Comparación estricta solicitada:
-        # 1) Nombre 2) Capacidad 3) Memoria 4) Fuente
-        # 5) Código de descuento 6) Precio actual 7) Precio final/original
-        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
+        # Comparación correcta:
+        # 1) nombre + 2) memoria + 3) capacidad + 4) importado_de + 5) fuente + 6) codigo_de_descuento.
+        # Si estas 6 variables coinciden, es el mismo producto y solo se actualiza el precio si ha cambiado.
+        # Si al menos una no coincide, son productos diferentes y se creará uno nuevo.
+        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 50}).json()
         producto_existente_match = None
         comparaciones_woo = []
 
@@ -693,25 +694,24 @@ async def main():
             metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
 
             cmp_nombre = nombre_existente_normalizado == nombre_nuevo_normalizado
-            cmp_capacidad = str(metas_existentes.get("capacidad", "")).strip() == str(capacidad).strip()
             cmp_memoria = str(metas_existentes.get("memoria", "")).strip() == str(memoria).strip()
+            cmp_capacidad = str(metas_existentes.get("capacidad", "")).strip() == str(capacidad).strip()
+            cmp_importado = metas_existentes.get("importado_de") == "Telegram_Chinabay"
             cmp_fuente = str(metas_existentes.get("fuente", "")).strip().lower() == str(fuente).strip().lower()
             cmp_codigo = str(metas_existentes.get("codigo_de_descuento", "")).strip() == str(codigo_de_descuento).strip()
-            cmp_precio_actual = str(metas_existentes.get("precio_actual", "")).strip() == str(precio_actual).strip()
-            cmp_precio_original = str(metas_existentes.get("precio_original", "")).strip() == str(precio_original).strip()
-            cmp_importado = metas_existentes.get("importado_de") == "Telegram_Chinabay"
 
             comparaciones_woo.append({
                 "id": prod_existente.get("id"),
                 "nombre": prod_existente.get("name", ""),
                 "nombre_ok": cmp_nombre,
-                "capacidad_ok": cmp_capacidad,
                 "memoria_ok": cmp_memoria,
+                "capacidad_ok": cmp_capacidad,
+                "importado_ok": cmp_importado,
                 "fuente_ok": cmp_fuente,
                 "codigo_ok": cmp_codigo,
-                "precio_actual_ok": cmp_precio_actual,
-                "precio_original_ok": cmp_precio_original,
-                "importado_ok": cmp_importado,
+                "memoria_existente": metas_existentes.get("memoria", ""),
+                "capacidad_existente": metas_existentes.get("capacidad", ""),
+                "importado_existente": metas_existentes.get("importado_de", ""),
                 "fuente_existente": metas_existentes.get("fuente", ""),
                 "codigo_existente": metas_existentes.get("codigo_de_descuento", ""),
                 "precio_actual_existente": metas_existentes.get("precio_actual", ""),
@@ -720,13 +720,11 @@ async def main():
 
             if (
                 cmp_nombre
-                and cmp_capacidad
                 and cmp_memoria
+                and cmp_capacidad
+                and cmp_importado
                 and cmp_fuente
                 and cmp_codigo
-                and cmp_precio_actual
-                and cmp_precio_original
-                and cmp_importado
             ):
                 producto_existente_match = prod_existente
                 break
@@ -787,20 +785,21 @@ async def main():
         print(f"15) URL acortada con mi afiliado: {url_oferta}")
         print(f"16) Enviado desde: {enviado_desde}")
         print(f"17) Encolado para comparar con base de datos...")
-        print("18) Comparación Woo exigida:")
-        print(f"    Nuevo -> Nombre='{nombre}' | Capacidad='{capacidad}' | Memoria='{memoria}' | Fuente='{fuente}' | Código='{codigo_de_descuento}' | Precio actual='{precio_actual}' | Precio final/original='{precio_original}'")
+        print("18) Comparación Woo:")
+        print(f"    Nuevo -> Nombre='{nombre}' | Memoria='{memoria}' | Capacidad='{capacidad}' | Importado_de='Telegram_Chinabay' | Fuente='{fuente}' | Código='{codigo_de_descuento}'")
         if not comparaciones_woo:
             print("    Resultado: sin candidatos Woo por búsqueda de nombre.")
         else:
             for c in comparaciones_woo:
                 print(
                     f"    Candidato ID {c['id']} '{c['nombre']}' -> "
-                    f"Nombre={c['nombre_ok']} | Capacidad={c['capacidad_ok']} | Memoria={c['memoria_ok']} | "
+                    f"Nombre={c['nombre_ok']} | "
+                    f"Memoria={c['memoria_ok']} (Woo='{c['memoria_existente']}') | "
+                    f"Capacidad={c['capacidad_ok']} (Woo='{c['capacidad_existente']}') | "
+                    f"Importado_de={c['importado_ok']} (Woo='{c['importado_existente']}') | "
                     f"Fuente={c['fuente_ok']} (Woo='{c['fuente_existente']}') | "
                     f"Código={c['codigo_ok']} (Woo='{c['codigo_existente']}') | "
-                    f"Precio actual={c['precio_actual_ok']} (Woo='{c['precio_actual_existente']}') | "
-                    f"Precio final/original={c['precio_original_ok']} (Woo='{c['precio_original_existente']}') | "
-                    f"Importado_de={c['importado_ok']}"
+                    f"Precio actual Woo='{c['precio_actual_existente']}' | Precio original Woo='{c['precio_original_existente']}'"
                 )
         if _contiene_ellipsis(url_sin_acortar_con_mi_afiliado):
             print("⚠️ ATENCIÓN: La URL con afiliado contiene '...' (no debería ocurrir tras normalización).")
@@ -846,12 +845,6 @@ async def main():
                 cambios.append(f"precio_actual: {metas_existentes.get('precio_actual', '')} -> {precio_actual}")
             if str(metas_existentes.get("precio_original", "")).strip() != str(precio_original):
                 cambios.append(f"precio_original: {metas_existentes.get('precio_original', '')} -> {precio_original}")
-            if str(metas_existentes.get("url_oferta", "")).strip() != str(url_oferta).strip() and url_oferta:
-                cambios.append("url_oferta")
-            if str(metas_existentes.get("codigo_de_descuento", "")).strip() != str(codigo_de_descuento).strip():
-                cambios.append("codigo_de_descuento")
-            if str(metas_existentes.get("fuente", "")).strip() != str(fuente).strip():
-                cambios.append("fuente")
 
             if cambios:
                 payload_update = {
