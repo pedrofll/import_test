@@ -429,6 +429,7 @@ def _normalizar_marca(marca: str) -> str:
 
 
 
+
 def extraer_nombre_movil_desde_linea(linea: str):
 
     if not linea:
@@ -438,13 +439,13 @@ def extraer_nombre_movil_desde_linea(linea: str):
 
     # eliminar icono info
     linea = re.sub(r'[ℹ️ℹⓘ🛈]+', ' ', linea)
-    linea = re.sub(r'[\\uFE0F\\u200D]', '', linea)
+    linea = re.sub(r'[\uFE0F\u200D]', '', linea)
 
     # EXTRAER DESDE PRIMERA MARCA VÁLIDA
     patron = (
         r'(' +
         '|'.join(re.escape(x) for x in MARCAS_PERMITIDAS) +
-        r')\\b.*'
+        r')\b.*'
     )
 
     m = re.search(patron, linea, re.I)
@@ -455,10 +456,10 @@ def extraer_nombre_movil_desde_linea(linea: str):
     nombre = m.group(0).strip()
 
     # limpiar espacios
-    nombre = re.sub(r'\\s+', ' ', nombre).strip()
+    nombre = re.sub(r'\s+', ' ', nombre).strip()
 
     # eliminar "i" residual del icono ℹ️
-    nombre = re.sub(r'\\s+[iI]$', '', nombre).strip()
+    nombre = re.sub(r'\s+[iI]$', '', nombre).strip()
 
     return nombre
 
