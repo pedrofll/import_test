@@ -639,31 +639,19 @@ def sincronizar_productos(remotos):
             for p in res:
                 meta = {m['key']: m['value'] for m in p.get('meta_data', [])}
 
-                # ✅ Transición (IMPORTANTE):
-                # Históricamente 'importado_de' se guardaba con URL_ORIGEN (que puede cambiar).
-                # Para poder eliminar obsoletos antiguos, consideramos Chinabay cualquier variante
-                # que contenga 'chinabay' o que coincida con URL_ORIGEN, y normalizamos al valor fijo.
-                importado_raw = str(meta.get('importado_de', '')).strip().lower()
-                url_origen_raw = str(URL_ORIGEN or '').strip().lower()
-                es_chinabay = (importado_raw == url_origen_raw) or ('chinabay' in importado_raw)
+                # ✅ Seguridad inventario Chinabay:
+                # Este scraper SOLO gestiona productos cuyo ACF importado_de sea exactamente
+                # https://chinabay.es. No se migran variantes ni se comparan otros orígenes.
+                importado_raw = str(meta.get('importado_de', '')).strip()
 
-                if es_chinabay:
-                    # Normaliza para que a partir de hoy el inventario sea estable
-                    if meta.get('importado_de') != IMPORTADO_DE_FIJO:
-                        try:
-                            wcapi.put(
-                                f"products/{p['id']}",
-                                {"meta_data": [{"key": "importado_de", "value": IMPORTADO_DE_FIJO}]}
-                            )
-                            print(f"   🔁 [MIGRADO] importado_de -> {IMPORTADO_DE_FIJO} (ID: {p['id']})", flush=True)
-                        except Exception as e:
-                            print(f"   ⚠️ [MIGRADO] fallo actualizando importado_de (ID: {p['id']}): {e}", flush=True)
+                if importado_raw == IMPORTADO_DE_FIJO:
                     p_act_wp = limpiar_precio(meta.get('precio_actual', p.get('price', 0)))
                     p_reg_wp = limpiar_precio(meta.get('precio_original', p.get('regular_price', 0)))
                     
                     locales.append({
                         "id": p['id'],
                         "name": str(p['name']).strip(),
+                        "importado_de": importado_raw,
                         "price": p_act_wp,
                         "regular_price": p_reg_wp,
                         "fuente": meta.get('fuente', 'Desconocida'),
@@ -734,8 +722,9 @@ def sincronizar_productos(remotos):
                 else:
                     summary_existentes.append({"nombre": local['name'], "id": local['id']})
             else:
-                wcapi.delete(f"products/{local['id']}", params={"force": True})
-                summary_eliminados.append({"nombre": local['name'], "id": local['id']})
+                if local.get('importado_de') == IMPORTADO_DE_FIJO:
+                    wcapi.delete(f"products/{local['id']}", params={"force": True})
+                    summary_eliminados.append({"nombre": local['name'], "id": local['id']})
 
         for remoto in remotos:
             if not remoto['_procesado']:
