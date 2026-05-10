@@ -630,6 +630,512 @@ async def main():
         nombre_raw = nombre
         nombre = limpiar_prefijo_nombre(nombre)
         nombre = _normalizar_espacios_nombre(nombre)
+        nombre = re.sub(r"\s+[iI]$", "", nombre).strip()
+
+        # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
+        check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
+        existe = False
+        producto_existente_match = None
+        for prod_existente in check_exists:
+            nombre_existente_normalizado = limpiar_prefijo_nombre(prod_existente["name"]).strip().lower()
+            nombre_nuevo_normalizado = limpiar_prefijo_nombre(nombre).strip().lower()
+            metas_existentes = {m["key"]: m["value"] for m in prod_existente.get("meta_data", [])}
+            if (
+                nombre_existente_normalizado == nombre_nuevo_normalizado
+                and str(metas_existentes.get("memoria", "")).strip() == memoria
+                and str(metas_existentes.get("capacidad", "")).strip() == capacidad
+                and metas_existentes.get("importado_de") == "Telegram_Chinabay"
+            ):
+                producto_existente_match = prod_existente
+                break
+
+        precio_original = calcular_precio_original(precio_actual, 1.20)
+
+        # enlaces del mensaje (evitar t.me)
+        links = [a["href"] for a in msg.find_all("a", href=True) if "t.me" not in a["href"]]
+        if not links:
+            continue
+        enlace_de_compra_importado = links[0]
+
+        # expandir (redirige a la URL final)
+        url_oferta_sin_acortar = expandir_url(enlace_de_compra_importado)
+
+        # fuente por dominio
+        fuente = detectar_fuente_por_url(url_oferta_sin_acortar)
+
+        # limpiar afiliado original y reconstruir canonical si aplica
+        url_importada_sin_afiliado = limpiar_url_segun_fuente(url_oferta_sin_acortar)
+
+        # construir URL con TU afiliado (completa)
+        url_sin_acortar_con_mi_afiliado = construir_url_con_mi_afiliado(fuente, url_importada_sin_afiliado)
+        url_sin_acortar_con_mi_afiliado = asegurar_url_no_truncada(url_sin_acortar_con_mi_afiliado, fuente)
+
+        # acortar para 'url_oferta'
+        url_oferta = acortar_url(url_sin_acortar_con_mi_afiliado) if url_sin_acortar_con_mi_afiliado else ""
+        if url_oferta and not (url_oferta.startswith("http://") or url_oferta.startswith("https://")):
+            print(f"⚠️ Acortador devolvió valor no válido, se conserva URL larga: {url_oferta}")
+            url_oferta = url_sin_acortar_con_mi_afiliado
+
+        enviado_desde = "España" if fuente in ["Aliexpress", "Amazon", "powerplanet", "Fnac", "MediaMarkt", "Phone House"] else "China"
+        if enviado_desde == "España":
+            enviado_desde_tg = "🇪🇸 España"
+        elif enviado_desde == "Europa":
+            enviado_desde_tg = "🇪🇺 Europa"
+        else:
+            enviado_desde_tg = "🇨🇳 China"
+
+        # categorías
+        marca = nombre.split(" ")[0]
+
+        marca_normalizada = marca.strip().capitalize()
+
+        if marca_normalizada not in MARCAS_PERMITIDAS:
+            print(f"⛔ PRODUCTO IGNORADO - MARCA NO PERMITIDA: {nombre}")
+            continue
+        id_padre, _ = obtener_o_crear_categoria_con_imagen(marca)
+        id_hijo, imagen_subcategoria = obtener_o_crear_categoria_con_imagen(nombre, id_padre)
+
+        # --- LOGS DETALLADOS (guardados a fichero) ---
+        print("# --- LOGS DETALLADOS SOLICITADOS ---")
+        print(f"Detectado {nombre}")
+        print(f"0) Nombre RAW parser: {nombre_raw}")
+        print(f"0b) Nombre normalizado final: {nombre}")
+        print(f"1) Nombre: {nombre}")
+        print(f"2) Memoria: {memoria}")
+        print(f"3) Capacidad: {capacidad}")
+        print(f"4) Versión: {version}")
+        print(f"5) Fuente: {fuente}")
+        print(f"6) Precio actual: {precio_actual}")
+        print(f"7) Precio original: {precio_original}")
+        print(f"8) Código de descuento: {codigo_de_descuento}")
+        print(f"10) Imagen (subcategoría Woo): {'SI' if imagen_subcategoria else 'NO'}")
+        if imagen_subcategoria:
+            print(f"10b) Imagen fichero: {_safe_filename_from_url(imagen_subcategoria)}")
+        print(f"11) Enlace Importado: {enlace_de_compra_importado}")
+        print(f"12) Enlace Expandido: {url_oferta_sin_acortar}")
+        print(f"13) URL importada sin afiliado: {url_importada_sin_afiliado}")
+        print(f"14) URL sin acortar con mi afiliado: {url_sin_acortar_con_mi_afiliado}")
+        print(f"15) URL acortada con mi afiliado: {url_oferta}")
+        print(f"16) Enviado desde: {enviado_desde}")
+        print(f"17) Encolado para comparar con base de datos...")
+        if _contiene_ellipsis(url_sin_acortar_con_mi_afiliado):
+            print("⚠️ ATENCIÓN: La URL con afiliado contiene '...' (no debería ocurrir tras normalización).")
+        print("-" * 60)
+        # -----------------------------------
+
+        data = {
+            "name": nombre,
+            "type": "external",
+            "status": "publish",
+            "regular_price": str(precio_original),
+            "sale_price": str(precio_actual),
+            "external_url": url_oferta or url_sin_acortar_con_mi_afiliado or url_importada_sin_afiliado,
+            "button_text": f"Comprar en {fuente}",
+            "categories": [{"id": id_padre}, {"id": id_hijo}],
+            "images": [{"src": imagen_subcategoria}] if imagen_subcategoria else [],
+            "meta_data": [
+                {"key": "memoria", "value": memoria},
+                {"key": "capacidad", "value": capacidad},
+                {"key": "version", "value": version},
+                {"key": "fuente", "value": fuente},
+                {"key": "precio_actual", "value": str(precio_actual)},
+                {"key": "precio_original", "value": str(precio_original)},
+                {"key": "codigo_de_descuento", "value": codigo_de_descuento},
+                {"key": "enlace_de_compra_importado", "value": enlace_de_compra_importado},
+                {"key": "url_oferta_sin_acortar", "value": url_oferta_sin_acortar},
+                {"key": "url_importada_sin_afiliado", "value": url_importada_sin_afiliado},
+                {"key": "url_sin_acortar_con_mi_afiliado", "value": url_sin_acortar_con_mi_afiliado},
+                {"key": "url_oferta", "value": url_oferta},
+                {"key": "enviado_desde", "value": enviado_desde},
+                {"key": "enviado_desde_tg", "value": enviado_desde_tg},
+                {"key": "importado_de", "value": "Telegram_Chinabay"},
+                {"key": "fecha", "value": hoy_dt.strftime("%Y-%m-%d")},
+            ],
+        }
+
+        if producto_existente_match:
+            exist_id = producto_existente_match["id"]
+            metas_existentes = {m["key"]: m["value"] for m in producto_existente_match.get("meta_data", [])}
+            cambios = []
+
+            if str(metas_existentes.get("precio_actual", "")).strip() != str(precio_actual):
+                cambios.append(f"precio_actual: {metas_existentes.get('precio_actual', '')} -> {precio_actual}")
+            if str(metas_existentes.get("precio_original", "")).strip() != str(precio_original):
+                cambios.append(f"precio_original: {metas_existentes.get('precio_original', '')} -> {precio_original}")
+            if str(metas_existentes.get("url_oferta", "")).strip() != str(url_oferta).strip() and url_oferta:
+                cambios.append("url_oferta")
+            if str(metas_existentes.get("codigo_de_descuento", "")).strip() != str(codigo_de_descuento).strip():
+                cambios.append("codigo_de_descuento")
+            if str(metas_existentes.get("fuente", "")).strip() != str(fuente).strip():
+                cambios.append("fuente")
+
+            if cambios:
+                payload_update = {
+                    "type": "external",
+                    "regular_price": str(precio_original),
+                    "sale_price": str(precio_actual),
+                    "external_url": url_oferta or url_sin_acortar_con_mi_afiliado or url_importada_sin_afiliado,
+                    "button_text": f"Comprar en {fuente}",
+                    "meta_data": data["meta_data"],
+                }
+                try:
+                    wcapi.put(f"products/{exist_id}", payload_update)
+                    print(f"♻️ ACTUALIZADO -> {nombre} (ID: {exist_id}) | Cambios: {', '.join(cambios)}")
+                    summary_actualizados.append({"nombre": nombre, "id": exist_id, "cambios": cambios})
+                except Exception as e:
+                    print(f"❌ Error actualizando {nombre} (ID: {exist_id}): {e}")
+                continue
+            else:
+                print(f"⏭️ El producto '{nombre}' ya existe. Sin cambios.")
+                summary_ignorados.append({"nombre": producto_existente_match["name"], "id": exist_id})
+                continue
+
+        # --- CREACIÓN CON REINTENTOS ---
+        intentos, max_intentos, creado = 0, 10, False
+        while intentos < max_intentos and not creado:
+            intentos += 1
+            try:
+                res = wcapi.post("products", data)
+                if res.status_code in [200, 201]:
+                    p_res = res.json()
+                    new_id = p_res["id"]
+                    plink_raw = p_res.get("permalink", "")
+                    plink_short = acortar_url(plink_raw) if plink_raw else ""
+                    if not plink_short and plink_raw:
+                        plink_short = plink_raw
+                    if plink_short:
+                        wcapi.put(f"products/{new_id}", {"meta_data": [{"key": "url_post_acortada", "value": plink_short}]})
+                    summary_creados.append({"nombre": nombre, "id": new_id})
+
+                    print(f"✅ CREADO -> {nombre} (ID: {new_id})")
+                    print(f"14b) URL Post Acortada (WP): {plink_short}")
+                    creado = True
+                else:
+                    try:
+                        print(f"❌ Error creando producto intento {intentos}/{max_intentos}: HTTP {res.status_code} | {res.text}")
+                    except Exception:
+                        print(f"❌ Error creando producto intento {intentos}/{max_intentos}: HTTP {getattr(res, 'status_code', 'N/A')}")
+                    time.sleep(15)
+            except Exception as e:
+                print(f"❌ Excepción creando producto intento {intentos}/{max_intentos}: {e}")
+                time.sleep(15)
+
+        await asyncio.sleep(15)
+
+    await gestionar_obsoletos()
+
+    # --- RESUMEN FINAL ---
+    hoy_fmt2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    lineas_resumen = []
+    lineas_resumen.append("\n============================================================")
+    lineas_resumen.append(f"📋 RESUMEN DE EJECUCIÓN ({hoy_fmt2})")
+    lineas_resumen.append("============================================================")
+
+    lineas_resumen.append(f"\na) ARTICULOS CREADOS: {len(summary_creados)}")
+    for item in summary_creados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append(f"\nb) ARTICULOS ELIMINADOS (OBSOLETOS): {len(summary_eliminados)}")
+    for item in summary_eliminados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append(f"\nc) ARTICULOS ACTUALIZADOS: {len(summary_actualizados)}")
+    for item in summary_actualizados:
+        cambios = item.get('cambios') or []
+        cambios_txt = ", ".join(cambios) if isinstance(cambios, list) else str(cambios)
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']}): {cambios_txt}".rstrip(": "))
+
+    lineas_resumen.append(f"\nd) ARTICULOS IGNORADOS (SIN CAMBIOS): {len(summary_ignorados)}")
+    for item in summary_ignorados:
+        lineas_resumen.append(f"- {item['nombre']} (ID: {item['id']})")
+
+    lineas_resumen.append("============================================================")
+    resumen_txt = "\n".join(lineas_resumen)
+    print(resumen_txt)
+
+    try:
+        enviar_email(f"Reporte {hoy_fmt2}", resumen_txt)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    asyncio.run(main())MARCAS_PERMITIDAS = [
+    "Xiaomi",
+    "Redmi",
+    "Samsung",
+    "Apple",
+    "Meizu",
+    "Redmagic",
+    "Tcl",
+    "Oppo",
+    "Oneplus",
+    "Vivo",
+    "Nubia",
+    "Motorola",
+    "Honor",
+    "Realme",
+    "Poco",
+    "Google",
+    "Nothing",
+    "Huawei",
+]
+
+def extraer_nombre_movil_desde_linea(linea: str) -> str:
+    if not linea:
+        return ""
+
+    original = str(linea).strip()
+
+    # ELIMINAR ICONO INFO Y SELECTORES UNICODE
+    original = re.sub(r'[ℹ️ℹⓘ🛈]+', ' ', original)
+    original = re.sub(r'[\uFE0F\u200D]', '', original)
+
+    original = unicodedata.normalize("NFKC", original)
+
+    # REGLA PRINCIPAL:
+    # Si existen dos iconos:
+    # ♦️ ▫️
+    # ♦️ 🛑
+    # ♦️ 🧡
+    # el nombre empieza después del segundo icono
+
+    m_doble = re.search(
+        r'[^\w\s]{1,5}\s*(?:\[[^\]]+\])?\s*[^\w\s]{1,5}\s*([A-Za-z0-9].*)',
+        original
+    )
+
+    if m_doble:
+        posible = m_doble.group(1).strip()
+    else:
+        posible = original
+
+    # eliminar [PROMO]
+    posible = re.sub(r'\[[^\]]+\]', '', posible)
+
+    # limpiar basura inicial
+    posible = re.sub(r'^[^A-Za-z0-9]+', '', posible)
+
+    posible = re.sub(r'\s+', ' ', posible).strip()
+
+    # BUSCAR PRIMERA MARCA VÁLIDA
+    patron_marcas = (
+        r'\b(' +
+        '|'.join(re.escape(x) for x in MARCAS_PERMITIDAS) +
+        r')\b'
+    )
+
+    m = re.search(patron_marcas, posible, re.I)
+
+    if m:
+        posible = posible[m.start():].strip()
+
+    # eliminar "i" residual del icono ℹ️
+    posible = re.sub(r'\s+[iI]$', '', posible).strip()
+
+    return posible
+
+def extraer_datos(texto):
+    t_clean = texto.replace("**", "").replace("`", "").strip()
+    lineas = [l.strip() for l in t_clean.split("\n") if l.strip()]
+    if not lineas:
+        return None
+
+    nombre = ""
+
+    def _es_parte_de_nombre(s: str) -> bool:
+        if not s:
+            return False
+        s_str = s.strip()
+        low = s_str.lower()
+        if "http" in low or "www." in low:
+            return False
+        if ":" in s_str:
+            return False
+        if re.search(r"\b\d+[\.,]?\d*\s*€\b", s_str):
+            return False
+        for k in ("precio", "cup", "cupón", "cupon", "link", "ram", "rom", "cn version", "eu version", "visita", "síguenos", "siguenos", "follow"):
+            if low.startswith(k):
+                return False
+        if re.match(r"^[\W_]+$", s_str):
+            return False
+        return True
+
+    partes_nombre = []
+    for linea in lineas:
+        cand = extraer_nombre_movil_desde_linea(linea)
+
+        # Ignora líneas/promos sueltas: [SUPERVENTAS], [OFERTA TOP], etc.
+        if _es_nombre_promocional_basura(cand):
+            continue
+
+        if _es_parte_de_nombre(cand):
+            partes_nombre.append(cand)
+            break
+        elif partes_nombre:
+            break
+
+    nombre = limpiar_prefijo_nombre(" ".join(partes_nombre)).strip()
+    nombre = re.sub(r"\s+[iI]$", "", nombre).strip()
+
+    if not nombre or _es_nombre_promocional_basura(nombre):
+        return None
+
+    # descartar tablets con palabra completa: PAD, IPAD, TAB
+    if re.search(r"\b(PAD|IPAD|TAB)\b", nombre.upper()):
+        return "SKIP_TABLET"
+
+    # Regla especial: iQOO (Vivo)
+    try:
+        _parts = nombre.split()
+        _first_raw = _parts[0] if _parts else ""
+        _first_clean = re.sub(r"[^A-Za-z0-9]+", "", _first_raw)
+        if _first_clean.upper().startswith("IQ") and not nombre.strip().lower().startswith("vivo "):
+            if _parts:
+                _parts[0] = _first_clean.upper() if _first_clean else _parts[0].upper()
+                nombre = "Vivo " + " ".join(_parts)
+    except Exception:
+        pass
+
+    # RAM / ROM
+    gigas = re.findall(r"(\d+)\s*GB", t_clean, re.I)
+    memoria = f"{gigas[0]} GB" if len(gigas) >= 1 else "N/A"
+    capacidad = f"{gigas[1]} GB" if len(gigas) >= 2 else "N/A"
+    if memoria == "N/A" or capacidad == "N/A":
+        return "SKIP_SPECS"
+
+    version = "GLOBAL Version" if "GLOBAL" in t_clean.upper() else "EU VERSION"
+
+    # precio actual
+    precio_actual = 0
+    m_p = re.search(r"(\d+[.,]?\d*)\s*€", t_clean)
+    if m_p:
+        precio_actual = int(round(float(m_p.group(1).replace(",", "."))))
+
+    # cupón
+    codigo_de_descuento = "OFERTA: PROMO."
+    m_c = re.search(r"(?:Cod\.\s*Promo|Cupón|Código)\s*:?\s*([A-Z0-9]+)", t_clean, re.I)
+    if m_c:
+        codigo_de_descuento = m_c.group(1)
+
+    return nombre, memoria, capacidad, version, codigo_de_descuento, precio_actual
+
+
+def calcular_precio_original(precio_actual: int, factor: float = 1.20) -> int:
+    try:
+        pa = float(precio_actual)
+    except Exception:
+        return 0
+    if pa <= 0:
+        return 0
+    return int(math.ceil(pa * factor))
+
+
+def detectar_fuente_por_url(url: str) -> str:
+    u = (url or "").lower()
+    if "powerplanetonline.com" in u:
+        return "powerplanet"
+    if "gshopper.com" in u:
+        return "Gshopper"
+    if "amazon.es" in u or "amazon." in u:
+        return "Amazon"
+    if "aliexpress" in u:
+        return "Aliexpress"
+    if "mediamarkt" in u:
+        return "MediaMarkt"
+    if "fnac.es" in u:
+        return "Fnac"
+    if "phonehouse.es" in u or "phonehouse." in u:
+        return "Phone House"
+    if "tradingshenzhen.com" in u:
+        return "TradingShenzhen"
+    # ✅ NUEVO: DHGate
+    if "dhgate.com" in u:
+        return "Dhgate"
+    return "Tienda"
+
+
+def expandir_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        r = requests.get(url, allow_redirects=True, timeout=15, stream=True, headers={"User-Agent": "Mozilla/5.0"})
+        return r.url
+    except Exception:
+        return url
+
+
+def enviar_email(asunto: str, cuerpo: str) -> None:
+    try:
+        _ = asunto, cuerpo
+    except Exception:
+        pass
+    return
+
+
+async def gestionar_obsoletos():
+    print("\n🔍 INICIANDO GESTIÓN DE OBSOLETOS (Filtro: Telegram_Chinabay)...")
+    try:
+        productos = wcapi.get("products", params={"per_page": 100}).json()
+        for p in productos:
+            p_id = p["id"]
+            p_nombre = p["name"]
+            meta = {m["key"]: m["value"] for m in p.get("meta_data", [])}
+
+            if meta.get("importado_de") == "Telegram_Chinabay":
+                fecha_str = meta.get("fecha")
+                if fecha_str:
+                    try:
+                        fecha_prod = datetime.strptime(fecha_str, "%Y-%m-%d")
+                        dias_dif = (hoy_dt - fecha_prod).days
+                        if dias_dif >= 5:
+                            print(f"Obsoleto - fecha igual o superior a 5 días desde su creación: {p_nombre}")
+                            wcapi.delete(f"products/{p_id}", params={"force": True})
+                            summary_eliminados.append({"nombre": p_nombre, "id": p_id})
+                        else:
+                            print(f"No se elimina - fecha inferior a 5 días desde su creación: {p_nombre}")
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"Error en obsoletos: {e}")
+
+
+async def main():
+    log_bloque_inicio()
+
+    url_canal = os.getenv("TEL_SOURCE_URL", "").strip()
+    if not url_canal:
+        print("❌ Fuente no configurada (TEL_SOURCE_URL).")
+        return
+
+    print(f"📥 ORIGEN DATOS: Telegram (web) | TEL_SOURCE_URL: SI | src_hash={_url_fingerprint(url_canal)}")
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url_canal, headers=headers, timeout=20)
+    soup = BeautifulSoup(response.text, "html.parser")
+    mensajes = soup.find_all("div", class_="tgme_widget_message")
+    print(f"Mensajes Telegram detectados: {len(mensajes)}")
+    if len(mensajes) == 0:
+        titulo = (soup.title.string.strip() if soup.title and soup.title.string else "")
+        print("⚠️ AVISO: No se detectan bloques tgme_widget_message. La fuente puede NO ser Telegram Web o el HTML ha cambiado/bloqueado.")
+        if titulo:
+            th = hashlib.sha256(titulo.encode("utf-8", errors="ignore")).hexdigest()[:10]
+            print(f"   ℹ️ Title_hash={th} (no se muestra el título por confidencialidad)")
+
+    for msg in mensajes:
+        texto_elem = msg.find("div", class_="tgme_widget_message_text")
+        if not texto_elem:
+            continue
+
+        res_data = extraer_datos(texto_elem.get_text(separator="\n"))
+        if res_data in ["SKIP_TABLET", "SKIP_SPECS"] or not res_data:
+            continue
+
+        nombre, memoria, capacidad, version, codigo_de_descuento, precio_actual = res_data
+        nombre_raw = nombre
+        nombre = limpiar_prefijo_nombre(nombre)
+        nombre = _normalizar_espacios_nombre(nombre)
 
         # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
