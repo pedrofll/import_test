@@ -337,68 +337,79 @@ def _token_sin_letras_es_decorativo(tok: str) -> bool:
 
 
 def limpiar_prefijo_nombre(s: str) -> str:
-    """Limpia prefijos/sufijos promocionales de Telegram sin tocar el nombre real."""
+    """Limpia prefijos de numeración/emoji típicos de mensajes de Telegram."""
     if not s:
         return ""
 
-    s = str(s)
-    s = s.replace("**", "").replace("`", "")
-    s = unicodedata.normalize("NFKC", s)
     s = _normalizar_espacios_nombre(s)
 
-    # Quita bloques promocionales tipo [TOP VENTAS], [NOVEDAD], [PRECIO TOP], etc.
-    s = re.sub(r"\[[^\]]{0,60}\]", " ", s, flags=re.I)
+    # Quita ruido inicial obvio (balas, emojis, signos) pero sin comerse marcas válidas con letras
+    while s:
+        original = s
+        s = re.sub(r"^[\s\u200b-\u200f\u2060\ufeff]+", "", s)
+        s = re.sub(r"^[•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐]+\s*", "", s)
+        s = re.sub(r"^\(?\d{1,2}\)?[.)-]+\s*", "", s)
+        s = re.sub(r"^[^\w]+", "", s)
+        s = _normalizar_espacios_nombre(s)
+        if s == original:
+            break
 
-    # Quita prefijos decorativos/emojis/símbolos típicos de Telegram.
-    s = re.sub(
-        r"^[\s\u200b-\u200f\u2060\ufeff•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐⚡♦️🧡🧊🔘✨🚀ℹ️]+",
-        "",
-        s,
-        flags=re.I,
-    )
-
-    # Quita numeración inicial tipo 1), 1., (1), etc.
-    s = re.sub(r"^\(?\d{1,2}\)?[.)\-]+\s*", "", s)
-
-    # Quita cualquier símbolo restante al inicio, pero conserva letras/números.
-    s = re.sub(r"^[^\wA-Za-zÁÉÍÓÚÜáéíóúüÑñ]+", "", s)
-
-    # Quita emojis/símbolos finales tipo ℹ️.
-    s = re.sub(
-        r"[\s\u200b-\u200f\u2060\ufeff•·▪▫◦►▶★☆✅☑✔✳✴◆◇🔹🔸🔥💥📱📦🆕⭐⚡♦️🧡🧊🔘✨🚀ℹ️]+$",
-        "",
-        s,
-        flags=re.I,
-    )
-
-    s = _normalizar_espacios_nombre(s)
-
-    # Limpieza de tokens iniciales decorativos que hayan sobrevivido.
     partes = s.split()
     while len(partes) > 1 and _token_sin_letras_es_decorativo(partes[0]):
         partes = partes[1:]
 
-    return _normalizar_espacios_nombre(" ".join(partes))
+    s = _normalizar_espacios_nombre(" ".join(partes))
 
+    # Última red de seguridad: si el primer token sigue sin letras y es muy corto, lo quitamos.
+    partes = s.split()
+    if len(partes) > 1:
+        tok0 = partes[0]
+        base0 = _token_base(tok0)
+        if not any(ch.isalpha() for ch in base0):
+            visible0 = "".join(
+                ch for ch in unicodedata.normalize("NFKD", tok0)
+                if unicodedata.category(ch) not in ("Mn", "Me", "Cf")
+            ).strip()
+            if (not base0) or (base0.isdigit() and len(base0) <= 2) or (len(base0) <= 3 and any(not ch.isalnum() for ch in visible0)):
+                s = _normalizar_espacios_nombre(" ".join(partes[1:]))
 
-MARCAS_MOVILES_TELEGRAM = [
-    "Samsung", "Xiaomi", "Redmi", "Poco", "POCO", "Apple", "iPhone", "Iphone",
-    "Realme", "Honor", "OnePlus", "Oneplus", "Oppo", "Vivo", "Nubia",
-    "Motorola", "Google", "Pixel", "Nothing", "Sony", "Asus", "Huawei",
-    "Iqoo", "iQOO", "IQOO", "Meizu", "ZTE", "Blackview", "Ulefone", "Doogee",
+    return s
+
+MARCAS_PERMITIDAS = [
+    "Xiaomi",
+    "Redmi",
+    "Samsung",
+    "Apple",
+    "Meizu",
+    "Redmagic",
+    "Tcl",
+    "Oppo",
+    "Oneplus",
+    "Vivo",
+    "Nubia",
+    "Motorola",
+    "Honor",
+    "Realme",
+    "Poco",
+    "Google",
+    "Nothing",
+    "Huawei",
 ]
 
 PALABRAS_PROMO_NOMBRE = {
     "TOP", "TOP VENTAS", "SUPERVENTAS", "SUPERTOP", "MINIMO TOP",
-    "MÍNIMO TOP", "OFERTA TOP", "OFERTA", "TOP SCORE", "POTENCIA",
+    "MÍNIMO TOP", "OFERTA TOP", "OFERTA", "OFERTA FLASH", "OFERTA MINIMA",
+    "HISTORICO", "HISTÓRICO", "EXCLUSIVA", "TOP SCORE", "POTENCIA",
     "NOVEDAD", "PRECIO TOP", "CHOLLO", "PROMO",
 }
+
 
 def _normalizar_clave_promo(s: str) -> str:
     s = unicodedata.normalize("NFKC", str(s or ""))
     s = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip().upper()
     return s
+
 
 def _es_nombre_promocional_basura(s: str) -> bool:
     clave = _normalizar_clave_promo(s)
@@ -410,32 +421,48 @@ def _es_nombre_promocional_basura(s: str) -> bool:
         return True
     return False
 
-def extraer_nombre_movil_desde_linea(linea: str) -> str:
-    """Extrae el nombre empezando por la primera marca conocida.
-    Evita que Telegram parta '[SUPERVENTAS]' y se importe como producto.
-    """
+
+def _normalizar_marca(marca: str) -> str:
+    m = re.sub(r"[^A-Za-z0-9]+", "", str(marca or "")).strip().lower()
+    mapa = {x.lower(): x for x in MARCAS_PERMITIDAS}
+    return mapa.get(m, m.capitalize())
+
+
+
+
+def extraer_nombre_movil_desde_linea(linea: str):
+
     if not linea:
         return ""
 
-    original = str(linea).replace("ℹ️", " ").replace("ℹ", " ")
-    original = unicodedata.normalize("NFKC", original)
+    linea = str(linea)
 
-    # Caso normal: limpiar prefijos [SUPERVENTAS], emojis, etc.
-    cand = limpiar_prefijo_nombre(original)
+    # eliminar icono info
+    linea = re.sub(r'[ℹ️ℹⓘ🛈]+', ' ', linea)
+    linea = re.sub(r'[\uFE0F\u200D]', '', linea)
 
-    # Si todavía queda texto antes de una marca, recortamos desde la marca.
-    patron = r"\b(" + "|".join(re.escape(m) for m in sorted(MARCAS_MOVILES_TELEGRAM, key=len, reverse=True)) + r")\b"
-    m = re.search(patron, cand, flags=re.I)
+    # EXTRAER DESDE PRIMERA MARCA VÁLIDA
+    patron = (
+        r'(' +
+        '|'.join(re.escape(x) for x in MARCAS_PERMITIDAS) +
+        r')\b.*'
+    )
+
+    m = re.search(patron, linea, re.I)
+
     if not m:
-        m = re.search(patron, original, flags=re.I)
-        if m:
-            cand = original[m.start():]
-    else:
-        cand = cand[m.start():]
+        return ""
 
-    cand = limpiar_prefijo_nombre(cand)
-    cand = re.sub(r"\s+[iI]$", "", cand).strip()
-    return _normalizar_espacios_nombre(cand)
+    nombre = m.group(0).strip()
+
+    # limpiar espacios
+    nombre = re.sub(r'\s+', ' ', nombre).strip()
+
+    # eliminar "i" residual del icono ℹ️
+    nombre = re.sub(r'\s+[iI]$', '', nombre).strip()
+
+    return nombre
+
 
 def extraer_datos(texto):
     t_clean = texto.replace("**", "").replace("`", "").strip()
@@ -465,19 +492,25 @@ def extraer_datos(texto):
 
     partes_nombre = []
     for linea in lineas:
-        cand = limpiar_prefijo_nombre(linea)
+        cand = extraer_nombre_movil_desde_linea(linea)
+
+        # Ignora líneas/promos sueltas: [SUPERVENTAS], [OFERTA TOP], etc.
+        if _es_nombre_promocional_basura(cand):
+            continue
+
         if _es_parte_de_nombre(cand):
             partes_nombre.append(cand)
+            break
         elif partes_nombre:
             break
 
     nombre = limpiar_prefijo_nombre(" ".join(partes_nombre)).strip()
-    if not nombre:
+    nombre = re.sub(r"\s+[iI]$", "", nombre).strip()
+    if not nombre or _es_nombre_promocional_basura(nombre):
         return None
 
-    # descartar tablets
-    nombre_upper = nombre.upper()
-    if re.search(r"\b(PAD|IPAD|TAB)\b", nombre_upper):
+    # descartar tablets con palabra completa: PAD, IPAD, TAB
+    if re.search(r"\b(PAD|IPAD|TAB)\b", nombre.upper()):
         return "SKIP_TABLET"
 
     # Regla especial: iQOO (Vivo)
@@ -630,28 +663,7 @@ async def main():
         nombre_raw = nombre
         nombre = limpiar_prefijo_nombre(nombre)
         nombre = _normalizar_espacios_nombre(nombre)
-
-        # descartar basura residual de cabeceras promocionales de Telegram
-        nombre_upper = nombre.upper().strip()
-        palabras_basura = [
-            "TOP",
-            "SUPERVENTAS",
-            "SUPERTOP",
-            "MINIMO TOP",
-            "OFERTA TOP",
-            "OFERTA",
-            "TOP SCORE",
-            "POTENCIA",
-            "NOVEDAD",
-            "PRECIO TOP",
-        ]
-        if (
-            nombre_upper in palabras_basura
-            or len(nombre.split()) <= 1
-            or re.fullmatch(r"^[^\w]+$", nombre)
-        ):
-            print(f"⛔ IGNORADO POR BASURA: {nombre}")
-            continue
+        nombre = re.sub(r"\s+[iI]$", "", nombre).strip()
 
         # --- VERIFICACIÓN DE DUPLICADOS / ACTUALIZACIÓN ---
         check_exists = wcapi.get("products", params={"search": nombre, "per_page": 20}).json()
@@ -707,6 +719,13 @@ async def main():
 
         # categorías
         marca = nombre.split(" ")[0]
+        marca_normalizada = _normalizar_marca(marca)
+
+        if marca_normalizada not in MARCAS_PERMITIDAS:
+            print(f"⛔ PRODUCTO IGNORADO - MARCA NO PERMITIDA: {nombre}")
+            continue
+
+        marca = marca_normalizada
         id_padre, _ = obtener_o_crear_categoria_con_imagen(marca)
         id_hijo, imagen_subcategoria = obtener_o_crear_categoria_con_imagen(nombre, id_padre)
 
