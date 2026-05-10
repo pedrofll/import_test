@@ -231,28 +231,34 @@ def extract_ficha_tecnica(html_text: str) -> Dict[str, str]:
 
 
 def build_specs_html_table(specs: Dict[str, str]) -> str:
-    """Genera HTML estable y legible en Woo."""
+    """Genera HTML legible en Woo con formato `Campo: valor`.
+
+    Antes se guardaba como tabla, pero algunos temas/plugins de WooCommerce
+    renderizan las celdas sin separación visual y terminaba viéndose así:
+    `Pantalla6.9...`, `ProcesadorSnapdragon...`.
+
+    Usamos líneas independientes con `<div>` y el separador `:` dentro del
+    `<strong>` para garantizar siempre: `Pantalla: 6.9...`.
+    """
     if not specs:
         return ""
 
-    # Escapar valores por seguridad (labels también)
-    rows = []
+    lines = []
     for k, v in specs.items():
-        k_esc = html.escape(k)
-        v_esc = html.escape(v)
-        rows.append(
-            f"<tr><td class=\"text-nowrap\"><strong>{k_esc}</strong></td><td>{v_esc}</td></tr>"
-        )
+        k_esc = html.escape(str(k).strip().rstrip(":"))
+        v_esc = html.escape(str(v).strip())
+        if not k_esc or not v_esc:
+            continue
+        lines.append(f"<div><strong>{k_esc}:</strong> {v_esc}</div>")
 
-    rows_html = "\n".join(rows)
+    if not lines:
+        return ""
 
     return (
         "<h2>Ficha técnica</h2>\n"
-        "<table class=\"table table-striped smartgsm-specs\">\n"
-        "<tbody>\n"
-        f"{rows_html}\n"
-        "</tbody>\n"
-        "</table>\n"
+        "<div class=\"smartgsm-specs\">\n"
+        + "\n".join(lines) + "\n"
+        "</div>\n"
     )
 
 
