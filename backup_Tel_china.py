@@ -542,9 +542,39 @@ def extraer_datos(texto):
 
     # cupón
     codigo_de_descuento = "OFERTA: PROMO."
-    m_c = re.search(r"(?:Cod\.\s*Promo|Cupón|Código)\s*:?\s*([A-Z0-9]+)", t_clean, re.I)
+
+    # Detección robusta de cupón/código promocional.
+    # Soporta variantes reales de Telegram como:
+    # "Cod. Promo: SRES25", "Cod . Promo: SRES25", "Cod Promo: SRES25",
+    # "Código: SRES25", "Cupón: SRES25" y variantes con símbolos/emoji.
+    t_coupon = unicodedata.normalize("NFKC", t_clean)
+    t_coupon = re.sub(r"[\u200b-\u200f\u2060\ufeff\uFE0F\u200D]", "", t_coupon)
+    t_coupon = t_coupon.replace("：", ":")
+
+    patron_cupon = (
+        r"(?:"
+        r"C[oó]d\s*\.?\s*Promo"
+        r"|Cod\s*\.?\s*Promo"
+        r"|C[oó]digo"
+        r"|Codigo"
+        r"|Cup[oó]n"
+        r"|Cupon"
+        r")"
+        r"\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9_-]{2,})"
+    )
+
+    m_c = re.search(patron_cupon, t_coupon, re.I)
+
+    # Fallback línea a línea por si BeautifulSoup ha partido el texto con separadores raros.
+    if not m_c:
+        for linea_cupon in t_coupon.splitlines():
+            linea_cupon = re.sub(r"\s+", " ", linea_cupon).strip()
+            m_c = re.search(patron_cupon, linea_cupon, re.I)
+            if m_c:
+                break
+
     if m_c:
-        codigo_de_descuento = m_c.group(1)
+        codigo_de_descuento = m_c.group(1).strip()
 
     return nombre, memoria, capacidad, version, codigo_de_descuento, precio_actual
 
